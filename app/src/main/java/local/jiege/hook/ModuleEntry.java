@@ -24,6 +24,7 @@ import local.jiege.hook.launch.KeyLaunchMode;
 import local.jiege.hook.master.MasterPalette;
 import local.jiege.hook.masterfilter.MasterFilterCompletion;
 import local.jiege.hook.mastercolor.MasterColor;
+import local.jiege.hook.diag.MainThreadWatchdog;
 import local.jiege.hook.masterlut.MasterContrast;
 import local.jiege.hook.masterlut.MasterLutSlots;
 import local.jiege.hook.modestate.ModeStateSplit;
@@ -109,6 +110,7 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             // LSPosed calls native_init when this library is loaded; it must be registered before
             // the camera loads libAlgoInterface / libBasicTone*, so it goes before the features.
             System.loadLibrary("jiege_native");
+            if (CAMERA.equals(param.processName)) MainThreadWatchdog.install();
             Symbols.install("camera", classLoader, param.appInfo.sourceDir, param.appInfo.dataDir);
             PopPort.installCamera(classLoader, CAMERA.equals(param.processName));
             FilterGroupInjector.installCamera(classLoader);

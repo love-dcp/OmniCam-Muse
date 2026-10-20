@@ -26,7 +26,8 @@ import local.jiege.settings.ModuleSettings;
  * - the hard-coded "modes that use the normal filter" list and the soft light lists include it;
  * - the right-hand enter button (BaseMode.Li) is shown, and its beauty UI manager can look the mode up;
  * - the viewfinder palette LUT: gate (Lut3dDataManager), texture engine flag and LUT texture request;
- * - soft light is opened in the capture request (the presenter only does it for a few mode names).
+ * - soft light is opened in the capture request (the presenter only does it for a few mode names);
+ *   this one is opt-in only, see {@link #softLightAllowed()}.
  */
 public final class HighPixelEffects {
     private static final String TAG = "HighPixelEffects";
@@ -39,6 +40,8 @@ public final class HighPixelEffects {
     /** BaseMode.H4/.x6 only write the capture keys (bb.s.e0 tone / bb.s.d0 saturation) when this is on. */
     private static final String BASIC_TONE = "func_support_video_basic_tone";
     private static final String PROP_ENTRY = "persist.omnicam.aura.hpentry";
+    /** Opt-in for soft light in 哈苏超清; see {@link #softLightAllowed()} for why it is off. */
+    private static final String PROP_SOFT_LIGHT = "persist.omnicam.aura.hpsl";
 
     private static final Set<String> answered = Collections.synchronizedSet(new HashSet<>());
     private static volatile android.view.View entryButton;
@@ -59,14 +62,46 @@ public final class HighPixelEffects {
         Log.guard(TAG, "preview palette engine", () -> hookPalettePreview(symbols.cls("PalettePreview"), symbols.field("PalettePreview.flag"),
             symbols.field("PalettePreview.request"), symbols.method("Lut3dData.paletteMode")));
         Log.guard(TAG, "preview lut texture", () -> hookLutTexture(symbols.method("Mode.needBasicToneLut"), symbols.cls("HighPixelMode")));
-        Log.guard(TAG, "soft light types", () -> hookSoftLightTypes(symbols.<Method>all("SoftLight.typesForMode")));
-        Log.guard(TAG, "soft light capture", () -> hookSoftLightCapture(symbols.method("FilterPresenter.captureRequest"),
-            symbols.method("FilterPresenter.softLightIndex"), symbols.field("FeaturePresenter.modeName")));
+        if (softLightAllowed()) {
+            Log.guard(TAG, "soft light types", () -> hookSoftLightTypes(symbols.<Method>all("SoftLight.typesForMode")));
+            Log.guard(TAG, "soft light capture", () -> hookSoftLightCapture(symbols.method("FilterPresenter.captureRequest"),
+                symbols.method("FilterPresenter.softLightIndex"), symbols.field("FeaturePresenter.modeName")));
+        } else {
+            Log.i(TAG, "soft light capture skipped: " + PROP_SOFT_LIGHT + " is not 1");
+        }
         Log.guard(TAG, "beauty model", () -> hookBeautyModel(symbols.cls("BeautyModel")));
         Log.guard(TAG, "entry button", () -> hookEntryButton(symbols.method("Mode.effectEntry"), symbols.cls("HighPixelMode")));
         Log.guard(TAG, "entry force-show", () -> hookEntryVisibility(classLoader, symbols.cls("HighPixelMode")));
         Log.guard(TAG, "entry setup", () -> hookEntrySetup(classLoader, symbols.cls("CaptureParams")));
         Log.guard(TAG, "request log", () -> HighPixelDiagnostics.install(classLoader));
+    }
+
+    /**
+     * Soft light in 哈苏超清 stays off unless {@code persist.omnicam.aura.hpsl} is exactly "1".
+     *
+     * <p>{@link #hookSoftLightCapture} is the only hook that writes into the 哈苏超清 capture request
+     * ({@code SOFT_LIGHT_OPEN = true}); everything else in this class only answers questions. Both freezes
+     * measured on 2026-10-20 landed 350-390 ms after the shutter, immediately after it logged
+     * "soft light opened ... index=1":
+     * <ul>
+     *   <li>21:41:15.641 opened, 21:41:16.010 "sendCmd queue is full";</li>
+     *   <li>22:22:27.242 opened, 22:22:27.595 "sendCmd queue is full".</li>
+     * </ul>
+     * The preview decision thread then sits in {@code APSDeferJobGoverner::getNormalDeferJobAmount} holding
+     * nothing, and {@code executeDeferJob} waits on the same mutex, so the viewfinder is dead until the
+     * process is killed. With every hook off the same 8192x6144 four-frame burst captures normally, which
+     * leaves this injection as the only candidate -- the 50 MP hybridraw pipeline does not accept the soft
+     * light node. The code is kept so the backend can be re-probed, but it must not run by default.
+     */
+    private static boolean softLightAllowed() {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            Object value = type.getMethod("get", String.class, String.class)
+                .invoke(null, PROP_SOFT_LIGHT, "");
+            return "1".equals(String.valueOf(value));
+        } catch (Throwable error) {
+            return false;
+        }
     }
 
     /** The photo mode's answer to "palette supported" without the mode restriction (the config flag). */
