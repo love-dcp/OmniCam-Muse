@@ -2,7 +2,12 @@
 # points at it before the reboot that activates the module. A failed install (e.g. a different
 # signing key) is left as it is and logged to install.log; the installed app is never uninstalled.
 PACKAGE=local.jiege.camera
-APK=$(ls "$MODPATH"/omnicam-muse-*.apk 2>/dev/null | head -n 1)
+# Old builds stay next to the new one (handy for rollback), so pick the APK whose version matches
+# module.prop instead of whichever name happens to sort first.
+VER=$(sed -n 's/^version=//p' "$MODPATH/module.prop" | tr -d ' ')
+VER=${VER#Muse}
+APK="$MODPATH/omnicam-muse-$VER.apk"
+[ -f "$APK" ] || APK=$(ls -1 "$MODPATH"/omnicam-muse-*.apk 2>/dev/null | sort | tail -n 1)
 STAGED=/data/local/tmp/omnicam-muse-module.apk
 HAVE=$(dumpsys package "$PACKAGE" 2>/dev/null | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -n 1)
 WANT=$(sed -n 's/^versionCode=//p' "$MODPATH/module.prop")
