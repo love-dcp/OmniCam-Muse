@@ -175,14 +175,17 @@ else
     # comes out as raw pixels (gallery thumbnail shows, image is blank). X9U NOP-ed this at
     # 0x2040688; X8U's corresponding cbz sits at 0x1e7ae00 and is NOP-ed in the payload copy below.
     # This file is intentionally NOT in system/ (metamount would overlay it unconditionally on both
-    # devices). The f2fs per-file mount here is rw, so overwriting it in place persists across a
-    # soft reboot (mountify keeps the overlay frozen).
+    # devices). /odm is erofs here and stays read-only at runtime: a plain cp cannot create the file,
+    # and unlike libBasicTonePhoto.so there is no writable mountify copy behind it (the mount.log of
+    # every boot said "cp: can't create ... Read-only file system" / NOP FAIL). Bind the patched copy
+    # over the stock path instead, the same way the PMA110 branch installs its libraries.
     BTFIX_SRC="$MODDIR/payload_pkj110/lib64/libAlgoInterface.so"
     if [ -f "$BTFIX_SRC" ]; then
         if [ "$(md5sum "$BTFIX_SRC" | cut -d' ' -f1)" != "$(md5sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -d' ' -f1)" ]; then
-            cp -f "$BTFIX_SRC" /odm/lib64/libAlgoInterface.so 2>>"$LOG" \
-                && log "PKJ110: basictone-skip NOP applied $(md5sum /odm/lib64/libAlgoInterface.so | cut -d' ' -f1)" \
-                || log "PKJ110: basictone-skip NOP FAIL"
+            umount /odm/lib64/libAlgoInterface.so 2>>"$LOG" \
+                && log "PKJ110: detached stale libAlgoInterface.so bind"
+            bind_library "$BTFIX_SRC" libAlgoInterface.so
+            log "PKJ110: basictone-skip NOP now $(md5sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -d' ' -f1)"
         else
             log "PKJ110: basictone-skip NOP already applied"
         fi
