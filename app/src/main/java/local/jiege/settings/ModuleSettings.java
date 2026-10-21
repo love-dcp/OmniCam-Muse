@@ -167,8 +167,15 @@ public final class ModuleSettings {
             case XPAN_CLEAN_SMALL_MASK:
             case XPAN_CLEAN_LARGE_MASK:
             case XPAN_CLEAN_ANIMATION:
-            case HIGH_PIXEL_200M_NO_FACE:
                 return false;
+            case HIGH_PIXEL_200M_NO_FACE:
+                // The decision copy staged for this switch is the X9 Ultra stock tree (1.42MB against the
+                // 360KB stock file). 50MP capture reads that same decision file, and on PKJ110 the X9
+                // Ultra branches never complete a defer job: DeferJob::getJobId(wait=true) waits for a
+                // state that never arrives, holding the APSDeferJobGoverner lock, so every later capture
+                // queues behind it ("sendCmd queue is full", the viewfinder freezes for good).
+                // The 200MP readout this switch unlocks does not exist on PKJ110, so PMA110 only.
+                return isPma110();
             case HIGH_PIXEL_EFFECTS:
             case SHUTTER_IN_SILENT:
             case SHUTTER_IN_VIBRATE:
