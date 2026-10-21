@@ -246,17 +246,23 @@ else
         log "palette skip: no payload"
     fi
 
-    # X8U's own lmt/ carries LMTLut*/SC16Lut*/SC32Lut*, but the X10 libBasicTonePhoto.so this
-    # profile binds opens "%s/LMTPhotoLut0" on the flat path (the master settings carry no
-    # [SensorInfo], so LMTUseSensor is 0 and the per-sensor Photo/Sensor%d/ branch is skipped).
-    # X8U stock has no LMTPhotoLut*, so EVERY master-mode capture died in BasicTone::readLMTLut:
+    # LMTPhotoLut0..3 are X10-only names. X8U ships none, and the stock backend never opens them
+    # ("LMTPhotoLut" occurs 0 times in libBasicTonePhoto.so) -- it resolves LMTLut* the way the
+    # settings it ships with say. They are kept ONLY because the X10 backend needs them: it opens
+    # "%s/LMTPhotoLut0" on the flat path (the master settings carry no [SensorInfo], so
+    # LMTUseSensor is 0 and the per-sensor Photo/Sensor%d/ branch is skipped), and without them
+    # every master-mode capture died in BasicTone::readLMTLut:
     #   basictone: LMTLutFrameMallocDynamic() can't open LMT file!
     #   basictone: readLMTLut() CurrLutname_LMTLut0_1_2_3
     #   SIGSEGV (fault addr 0x0) in thread RefFrameProc
-    # Photo mode is unaffected because its settings list LMTUseSensor = 0/1/2/3/ and resolve to the
-    # per-sensor files X8U already ships. Only the X10-only name is copied, so nothing X8U has is
-    # replaced -- drop the bind to revert. Verified live 2026-10-15 on PKJ110: with LMTPhotoLut0..3
-    # present, master capture no longer crashes (control run without them crashed every shot).
+    # Photo mode was never affected: its settings list LMTUseSensor = 0/1/2/3/ and resolve to the
+    # per-sensor files X8U already ships.
+    #
+    # Since post-mount.sh no longer binds that backend on PKJ110 (port-x8u/README.md 4.15),
+    # nothing reads these four files today -- the stock backend ignores the name entirely. They
+    # stay for the per-process split still under evaluation, where the gallery would keep the X10
+    # backend for its colour styles while the camera keeps the stock one. Cost is 12 MB under
+    # /data (copied, not bound in place); delete this block if that split is abandoned.
     if [ -d "$MODDIR/payload/x10_basictone/lmt" ]; then
         mkdir -p "$BT_EXTRA/lmt"
         for LUT in "$MODDIR/payload/x10_basictone/lmt"/LMTPhotoLut*; do

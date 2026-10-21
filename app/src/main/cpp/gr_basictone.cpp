@@ -298,9 +298,13 @@ void hookBasicTone(HookFunction hook, void *handle) {
                             "processCore hook unusable (no trampoline); BasicTone GR path disabled");
         return;
     }
-    // Two arities exist in the wild. X9U's routerless backend exports the classic loadLut(CamMode);
-    // X8U (PKJ110 Camera 7.006.94) exports only loadLut(CamMode, const char*, bool). dlsym() matches
-    // exact names, so the longer one is not found by asking for the shorter: try both, in order.
+    // Two arities exist in the wild, and which one shows up depends on the backend *file* rather
+    // than on the device: X8U's stock libBasicTonePhoto.so exports the classic loadLut(CamMode)
+    // (sha256 a93f40de), while the X9U/X10 backend exports loadLut(CamMode, const char*, bool)
+    // (that is the file PKJ110 used to have bound over the stock one until 2026-10-21, see
+    // module/post-mount.sh). dlsym() matches exact names, so the longer one is not found by asking
+    // for the shorter: try both, in order. Whichever resolves also settles the one-shot guard's
+    // `originalProcessCore && ...` latch, so keep this in sync with the comment on that guard.
     static const char kLoadLut[] = "_ZN13BasicTone_OGL7loadLutE7CamMode";
     static const char kLoadLut3[] = "_ZN13BasicTone_OGL7loadLutE7CamModePKcb";
     if (dlsym(handle, kLoadLut)) {

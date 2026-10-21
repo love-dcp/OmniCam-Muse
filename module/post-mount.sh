@@ -105,7 +105,7 @@ if [ "$PROFILE" = PMA110 ]; then
     bind_library "$MODDIR/payload/lib64/libAlgoInterface.so"  libAlgoInterface.so
     bind_library "$MODDIR/payload/lib64/libmsnativefilter.so" libmsnativefilter.so
 else
-    log "PKJ110: X8U keeps AlgoInterface + msnativefilter; basic-tone comes from the X10 backend"
+    log "PKJ110: X8U keeps AlgoInterface + msnativefilter, and its own BasicTone backend"
     # metamount.sh has ALREADY overlaid /odm/lib64 from /mnt/vendor/mountify/odm/lib64, and that
     # workspace copy is where the X9U backends come from. No module script can stop the overlay
     # from being created -- but this phase runs immediately afterwards as root, so it can be
@@ -133,40 +133,43 @@ else
         log "  $L = $(stat -c %s "/odm/lib64/$L" 2>/dev/null) B  (X8U stock 538400 / 60867488 / 7992584)"
     done
 
-    # The single backend PKJ110 does take -- and ONLY this one (README 4.14).
+    # X8 Ultra keeps its own BasicTone backend. Do NOT bind the X10 one over it.
     #
-    # libBasicTonePhoto.so is where a capture's colour cards are actually applied. X8U's build has
-    # no palette code in it: grep for "Palette" finds nothing, while the X9U backend (the X10 file
-    # staged by the overlay) exports BasicTone::PaletteSCLutMalloc / PaletteSCLutFrameMalloc and
-    # reads the same SimTool_Photo_*.ini files X8U already has. That asymmetry is the whole reason
-    # the palette was colour-accurate in preview and came back uncoloured in the shot.
+    # History (2026-10-14 .. 2026-10-21). This profile used to bind
+    # system/odm/lib64/libBasicTonePhotoX10.so over libBasicTonePhoto.so, because X8U's build of
+    # that library carries no palette code at all:
+    #     "Palette"            0 occurrences      (X10: PaletteSCLutMalloc / PaletteSCLutFrameMalloc)
+    #     "SimTool_Palette_*"  0 occurrences
+    # so the gallery's colour styles rendered in preview and came back uncoloured in the shot.
+    # The swap did fix that -- and silently broke something larger, which went unnoticed until the
+    # two libraries were finally compared side by side:
     #
-    # The X9U backend is a drop-in here, unlike the other two, and that was measured, not assumed:
-    #   * identical DT_NEEDED lists (libsharebuffer/liblog/libGLESv3/libEGL/libdl/libc/libm) --
-    #     no X9U-only dependency to satisfy;
-    #   * identical entry points: both libraries export the same 39 unmangled symbols, led by
-    #     getAlgoAPI and OGLBasicToneProcess, which is how libAlgoInterface.so reaches this file
-    #     (it dlopen()s the name and names no BasicTone C++ symbol at all);
-    #   * the internal C++ signatures that did change (BasicToneRender::init gained a bool,
-    #     BasicTone_OGL::loadLut gained the profile path) are module-private and never called from
-    #     outside, so they cannot break the caller.
-    # Observed on device 2026-10-14: preview unaffected, capture gains the palette, and the log
-    # shows the expected chain --
-    #   iPaletteFlag = 1 -> BasicTonePaletteProcessNext -> SCLutMallocPalette
-    #   reading palette lut .../palette/HDR/SC16Lut4 -> SCLutFrameMallocPalette SC16Lut0..8
-    #   -> Palette process success!
+    #   * X10 renamed the loader: loadLut(CamMode) -> loadLut(CamMode, const char*, bool). This is
+    #     why the GR / master-colour hook in libaura_native.so never latched on this device: it
+    #     looked for the two-argument symbol, and dlsym() matches exactly one string.
+    #   * X10 opens "%s/LMTPhotoLut0" on the flat LMT path. X8U ships no LMTPhotoLut* (hence the
+    #     "LMTLutFrameMallocDynamic() can't open LMT file!" crashes once worked around by copying
+    #     the X10 tables in post-fs-data.sh).
+    #   * Above all, master-colour captures stopped honouring the look. Measured on PKJ110 on
+    #     2026-10-21, same scene, same look:
+    #         X10 backend : meanSat 0.6011  (colour -- the look is gone)
+    #         stock       : meanSat 0.0647  (monochrome -- correct)
+    #     Unmounting this single mount is the only difference between those two rows.
     #
-    # Prerequisite, already fixed in this release: the GR hook in libaura_native.so used to hook
-    # the classic loadLut(CamMode), which this backend renamed, so its one-shot guard never latched
-    # and a second dlopen re-hooked processCore until LSPosed dropped the trampoline -- SEGV at
-    # pc=0 in OGLBasicToneProcess, thread RefFrameProc (2026-10-14 19:22:45). See
-    # app/src/main/cpp/gr_basictone.cpp.
+    # The trade is therefore: X10 backend = gallery palette works, master-colour captures broken;
+    # stock backend = master-colour captures work, gallery palette has no implementation.
+    # Master colour is this module's headline feature, the palette is secondary, so the stock
+    # backend wins (port-x8u/README.md 4.15). The third-party X8U port reached the same conclusion
+    # and ships no algorithm-library overlay at all.
+    #
+    # Detaching a stale bind is still required: metamount.sh overlays /odm/lib64 from its workspace
+    # unconditionally on every boot, and a soft reboot re-runs this phase while the old bind is
+    # still in place.
     if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then
         umount /odm/lib64/libBasicTonePhoto.so 2>>"$LOG" \
             && log "PKJ110: detached stale libBasicTonePhoto.so bind"
     fi
-    bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhoto.so
-    log "PKJ110: basic-tone now $(md5sum /odm/lib64/libBasicTonePhoto.so 2>/dev/null | cut -d' ' -f1)"
+    log "PKJ110: basic-tone is stock $(md5sum /odm/lib64/libBasicTonePhoto.so 2>/dev/null | cut -d' ' -f1) (expect 8651fa24 = sha256 a93f40de)"
 
     # POP capture RAW fix (door #4, docs/MODULE.md §32/34): X8U stock libAlgoInterface.so has the
     # BasicTone "all-zero skip" still armed. basicToneProcessV1 ORs the four master sliders
