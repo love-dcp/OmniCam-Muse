@@ -5,6 +5,7 @@ import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import local.jiege.hook.common.CameraLogMirror;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Skip;
 import local.jiege.hook.common.Symbols;
 import local.jiege.hook.diag.EntryButtonProbe;
 import local.jiege.hook.diag.GrStylePanelProbe;
@@ -109,49 +110,67 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             }
             // LSPosed calls native_init when this library is loaded; it must be registered before
             // the camera loads libAlgoInterface / libBasicTone*, so it goes before the features.
-            System.loadLibrary("jiege_native");
+            // Every install below can be taken out at runtime through persist.omnicam.aura.skip
+            // (see Skip) so a hang can be bisected by group without a rebuild.
+            if (!Skip.off("native")) System.loadLibrary("jiege_native");
             if (CAMERA.equals(param.processName)) MainThreadWatchdog.install();
+            Log.i("Skip", "hook groups skipped: " + Skip.raw());
             Symbols.install("camera", classLoader, param.appInfo.sourceDir, param.appInfo.dataDir);
-            PopPort.installCamera(classLoader, CAMERA.equals(param.processName));
-            FilterGroupInjector.installCamera(classLoader);
-            X10FilterPort.installCamera(classLoader);
+            if (!Skip.off("pop")) PopPort.installCamera(classLoader, CAMERA.equals(param.processName));
+            if (!Skip.off("filter")) FilterGroupInjector.installCamera(classLoader);
+            if (!Skip.off("filter")) X10FilterPort.installCamera(classLoader);
             // X8U port: the palette feature switch is answered in Java (the OCS config container
             // cannot be synthesised on PKJ110) -- see x10/PaletteFeatureSwitch.
-            Log.guard("Palette", "feature switch", () -> PaletteFeatureSwitch.installCamera(classLoader));
+            if (!Skip.off("filter")) {
+                Log.guard("Palette", "feature switch", () -> PaletteFeatureSwitch.installCamera(classLoader));
+            }
             // X8U port: our own palette panel (master, video, POP and the GR page share it).
-            Log.guard("Palette", "master palette", () -> MasterPalette.install(classLoader));
-            HighPixelEffects.installCamera(classLoader);
+            if (!Skip.off("palette")) {
+                Log.guard("Palette", "master palette", () -> MasterPalette.install(classLoader));
+            }
+            if (!Skip.off("hpeffects")) HighPixelEffects.installCamera(classLoader);
             // X8U port: the hi-res mode's own husselblad label switch (PKJ110 answers false).
-            Log.guard("HighPixel", "hasselblad entry", () -> HighPixelSupport.installCamera(classLoader));
-            Log.guard("HighPixelFilters", "install", () -> HighPixelFilters.install(classLoader));
-            TiltShiftCapture.installCamera(classLoader);
-            SeamlessBlurGuard.installCamera(classLoader);
-            KeyLaunchMode.installCamera(classLoader);
-            Log.guard("CameraLog", "camera log mirror", () -> CameraLogMirror.install(classLoader));
-            MasterFilterCompletion.installCamera(classLoader);
-            GrPort.installCamera(classLoader);
-            MasterColor.installCamera(classLoader);
-            ShutterSound.installCamera(classLoader);
-            ModeStateSplit.installCamera(classLoader);
-            VideoFilterHighSpec.installCamera(classLoader);
-            NaturalMode.installCamera(classLoader);
-            Unlock25mp.installCamera(classLoader);
-            HighPixel200mFace.installCamera(classLoader);
-            ModelSpoof.installCamera(classLoader);
-            XpanWatermarkIsolation.installCamera(classLoader);
-            XpanLivePhoto.installCamera(classLoader);
-            XpanViewfinderClean.installCamera(classLoader);
-            VideoWatermarkGuard.installCamera(classLoader);
-            SoftLight.installCamera(classLoader);
-            MasterLutSlots.installCamera(classLoader);
-            MasterContrast.installCamera(classLoader);
+            if (!Skip.off("hpentry")) {
+                Log.guard("HighPixel", "hasselblad entry", () -> HighPixelSupport.installCamera(classLoader));
+            }
+            // The feature the mode has no presenter for: the filter row, its gate and its capture tag.
+            if (!Skip.off("hpfilter")) {
+                Log.guard("HighPixelFilters", "install", () -> HighPixelFilters.install(classLoader));
+            }
+            if (!Skip.off("capture")) TiltShiftCapture.installCamera(classLoader);
+            if (!Skip.off("capture")) SeamlessBlurGuard.installCamera(classLoader);
+            if (!Skip.off("launch")) KeyLaunchMode.installCamera(classLoader);
+            if (!Skip.off("diag")) {
+                Log.guard("CameraLog", "camera log mirror", () -> CameraLogMirror.install(classLoader));
+            }
+            if (!Skip.off("capture")) MasterFilterCompletion.installCamera(classLoader);
+            if (!Skip.off("gr")) GrPort.installCamera(classLoader);
+            if (!Skip.off("master")) MasterColor.installCamera(classLoader);
+            if (!Skip.off("sound")) ShutterSound.installCamera(classLoader);
+            if (!Skip.off("modestate")) ModeStateSplit.installCamera(classLoader);
+            if (!Skip.off("video")) VideoFilterHighSpec.installCamera(classLoader);
+            if (!Skip.off("natural")) NaturalMode.installCamera(classLoader);
+            if (!Skip.off("unlock")) Unlock25mp.installCamera(classLoader);
+            if (!Skip.off("hp200m")) HighPixel200mFace.installCamera(classLoader);
+            if (!Skip.off("spoof")) ModelSpoof.installCamera(classLoader);
+            if (!Skip.off("xpan")) XpanWatermarkIsolation.installCamera(classLoader);
+            if (!Skip.off("xpan")) XpanLivePhoto.installCamera(classLoader);
+            if (!Skip.off("xpan")) XpanViewfinderClean.installCamera(classLoader);
+            if (!Skip.off("watermark")) VideoWatermarkGuard.installCamera(classLoader);
+            if (!Skip.off("softlight")) SoftLight.installCamera(classLoader);
+            if (!Skip.off("master")) MasterLutSlots.installCamera(classLoader);
+            if (!Skip.off("master")) MasterContrast.installCamera(classLoader);
             // X8U port: the GR page's own parameter dial (drives the camera's GR rows), plus the
             // read-only probes left over from the port work. The probes are off unless their
             // persist.omnicam.aura.* property names one; none of them rides a hot path.
-            Log.guard("GrEffects", "install", () -> GrEffectValues.install(classLoader));
-            Log.guard("HpProbe", "install", () -> HighPixelProbe.install(classLoader));
-            Log.guard("EntryProbe", "install", () -> EntryButtonProbe.install(classLoader));
-            Log.guard("GrProbe", "install", () -> GrStylePanelProbe.install(classLoader));
+            if (!Skip.off("gr")) {
+                Log.guard("GrEffects", "install", () -> GrEffectValues.install(classLoader));
+                Log.guard("GrProbe", "install", () -> GrStylePanelProbe.install(classLoader));
+            }
+            if (!Skip.off("diag")) {
+                Log.guard("HpProbe", "install", () -> HighPixelProbe.install(classLoader));
+                Log.guard("EntryProbe", "install", () -> EntryButtonProbe.install(classLoader));
+            }
         }
     }
 }

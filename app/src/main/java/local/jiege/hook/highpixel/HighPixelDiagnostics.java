@@ -54,6 +54,7 @@ final class HighPixelDiagnostics {
                         + " filter=" + XposedHelpers.getObjectField(tag, "mFilterType")
                         + " softLight=" + XposedHelpers.getBooleanField(tag, "mbSoftLightOpen") + "/" + XposedHelpers.getObjectField(tag, "mSoftLightType")
                         + " algorithms=" + algorithms);
+                    logMetaSizes(mode, param);
                     // One full snapshot of the filter-related fields per mode *and* filter: 和光 and
                     // 反差黑白 each carry their own grain block, so every filter gets its own line.
                     Object filterType = XposedHelpers.getObjectField(tag, "mFilterType");
@@ -74,5 +75,70 @@ final class HighPixelDiagnostics {
             }
         });
         Log.i(TAG, "installed");
+    }
+
+    private static final java.util.Set<Integer> sized = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    /**
+     * Sizes of the keys the capture request carries. cameraserver drops the result metadata for the
+     * 50 MP request ("result size 1078168, fmq availableToWrite 1048576") and the app then sees
+     * {@code onCaptureBufferLost}; naming the biggest keys says which tag has to go.
+     */
+    private static void logMetaSizes(Object mode, XC_MethodHook.MethodHookParam param) {
+        if (!MODE.equals(mode) || param.hasThrowable() || param.getResult() == null) return;
+        try {
+            Object meta = param.getResult();
+            Object tag = param.args[0];
+            int id = XposedHelpers.getIntField(tag, "mRequestId");
+            if (!sized.add(id) || sized.size() > 64) return;
+            long total = 0;
+            int count = 0;
+            String biggest = "";
+            long biggestSize = 0;
+            StringBuilder top = new StringBuilder();
+            if (meta instanceof java.util.Map) {
+                for (Object entryObject : ((java.util.Map<?, ?>) meta).entrySet()) {
+                    java.util.Map.Entry<?, ?> entry = (java.util.Map.Entry<?, ?>) entryObject;
+                    long size = measure(entry.getValue());
+                    total += size;
+                    count++;
+                    if (size > biggestSize) { biggestSize = size; biggest = String.valueOf(entry.getKey()); }
+                    if (size >= 4096) top.append(' ').append(entry.getKey()).append('=').append(size);
+                }
+            } else {
+                Object keys;
+                try { keys = XposedHelpers.callMethod(meta, "keySet"); }
+                catch (Throwable plain) { keys = XposedHelpers.callMethod(meta, "keys"); }
+                if (keys instanceof java.util.Collection) {
+                    for (Object key : (java.util.Collection<?>) keys) {
+                        long size;
+                        try { size = measure(XposedHelpers.callMethod(meta, "get", key)); }
+                        catch (Throwable ignored) { continue; }
+                        total += size;
+                        count++;
+                        if (size > biggestSize) { biggestSize = size; biggest = String.valueOf(key); }
+                        if (size >= 4096) top.append(' ').append(key).append('=').append(size);
+                    }
+                }
+            }
+            Log.i(TAG, "meta " + meta.getClass().getName() + " items=" + count + " bytes=" + total
+                + " biggest=" + biggest + "/" + biggestSize + " big:" + top);
+        } catch (Throwable error) {
+            Log.e(TAG, "meta sizes", error);
+        }
+    }
+
+    private static long measure(Object value) {
+        if (value == null) return 0;
+        if (value instanceof String) return ((String) value).length();
+        if (value instanceof byte[]) return ((byte[]) value).length;
+        if (value instanceof int[]) return ((int[]) value).length * 4L;
+        if (value instanceof float[]) return ((float[]) value).length * 4L;
+        if (value instanceof Object[]) {
+            long sum = 0;
+            for (Object item : (Object[]) value) sum += measure(item);
+            return sum;
+        }
+        return String.valueOf(value).length();
     }
 }
