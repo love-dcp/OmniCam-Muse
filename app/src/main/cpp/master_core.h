@@ -50,7 +50,9 @@ constexpr int kLutSize = 64;
 // Planes R, G, B, each [B][G][R] with R fastest (BasicTone / CombineLut LMTLut layout).
 bool bake(const Key &key, std::vector<float> &lut, int threads);
 
-constexpr int kStockTables = 6;   // LMTLut0..5: the stock master LMT interpolates them by scene level
+// Upper bound on the stock LMT chain. The master LMT interpolates LMTLut0..N by scene level, but N
+// is per device: X9U ships six, X8U (PKJ110) ships four. Probe the directory, never assume.
+constexpr int kStockTables = 6;
 
 // Blend mode. `look` is the baked look table (bake(key) with the weights ignored). Splits it and each
 // stock table stockDir/LMTLut<i> into tone (the neutral-axis curve, as a function of the scene luma of

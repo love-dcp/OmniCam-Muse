@@ -1105,6 +1105,19 @@ bool readTable(const std::string &path, std::vector<float> &out) {
     return ok;
 }
 
+// LMTLut<0..> are contiguous from zero, so stop at the first missing one. Assuming six on a device that
+// ships four made readTable() fail and took the whole blend down with it.
+int stockTableCount(const std::string &dir) {
+    int count = 0;
+    for (int i = 0; i < kStockTables; i++) {
+        FILE *file = std::fopen((dir + "/LMTLut" + std::to_string(i)).c_str(), "rb");
+        if (!file) break;
+        std::fclose(file);
+        count++;
+    }
+    return count;
+}
+
 }  // namespace
 
 bool blendWithStock(const Key &key, const std::vector<float> &look, const std::string &stockDir,
@@ -1120,8 +1133,10 @@ bool blendWithStock(const Key &key, const std::vector<float> &look, const std::s
         tables.push_back(look);
         return true;
     }
-    std::vector<std::vector<float>> stock(kStockTables);
-    for (int i = 0; i < kStockTables; i++)
+    const int stockCount = stockTableCount(stockDir);
+    if (stockCount <= 0) return false;
+    std::vector<std::vector<float>> stock(stockCount);
+    for (int i = 0; i < stockCount; i++)
         if (!readTable(stockDir + "/LMTLut" + std::to_string(i), stock[i])) return false;
     if (wt <= 0 && wc <= 0) {
         tables = std::move(stock);
@@ -1158,9 +1173,9 @@ bool blendWithStock(const Key &key, const std::vector<float> &look, const std::s
     std::vector<float> toneLookAt(nodes);
     for (size_t i = 0; i < nodes; i++) toneLookAt[i] = float(std::max(toneLook.at(luma[i]), kFloor));
 
-    tables.assign(kStockTables, std::vector<float>(3 * nodes));
+    tables.assign(stockCount, std::vector<float>(3 * nodes));
     threads = std::max(1, std::min(threads, 8));
-    for (int t = 0; t < kStockTables; t++) {
+    for (int t = 0; t < stockCount; t++) {
         std::vector<float> eStock(3 * nodes);
         for (size_t i = 0; i < 3 * nodes; i++) eStock[i] = float(hlgInverse(stock[t][i]));
         const NeutralCurve toneStock = neutral(eStock.data());

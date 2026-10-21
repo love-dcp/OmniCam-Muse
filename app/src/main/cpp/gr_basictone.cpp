@@ -72,6 +72,10 @@ int (*filterRegisterV1)(void *, int);
 int (*filterUnregisterV1)(void *, int);
 uintptr_t (*originalProcessCore)(void *, void *, void *, void *, void *);
 uintptr_t (*originalLoadLut)(void *, int);
+// X8U's backend renamed the loader to loadLut(CamMode, const char*, bool). Its extra argument is
+// the *setting* directory -- readLMTXML appends /TriggerBIN and SimTool_*.ini to it -- not the LMT
+// directory, so it is passed straight through. Only the LMT buffer at +0x008 is ours.
+uintptr_t (*originalLoadLut3)(void *, int, const char *, bool);
 // Guards hookBasicTone against being run twice on the same library.
 //
 // The obvious guard - `originalProcessCore && originalLoadLut` - only latches when BOTH symbols
@@ -197,22 +201,36 @@ uintptr_t processCore(void *object, void *input, void *output, void *parameters,
     return result;
 }
 
+// Point the object's LMT directory at the tree this frame belongs to. Intermediate ODT passes carry
+// no profile, so they keep the LUTs the object already has.
+void applyLmtPath(void *object) {
+    if (activeProfile == kUnknown) return;
+    char *lmtPath = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
+    const char *desired = activeProfile == kGr ? kGrLmtPath
+                        : activeProfile == kMaster ? activeMasterDir.c_str() : kHostLmtPath;
+    if (std::strlen(desired) < 240 && std::strcmp(lmtPath, desired) != 0) {
+        std::strcpy(lmtPath, desired);
+        // The path is not part of the vendor cache key, so a profile switch forces a reload.
+        *reinterpret_cast<int *>(static_cast<char *>(object) + 0xeb0) = -1;
+        __android_log_print(ANDROID_LOG_INFO, kTag, "BasicTone profile=%s path=%s",
+                            activeProfile == kGr ? "GR" : activeProfile == kMaster ? "master-colour" : "host", desired);
+    }
+}
+
 uintptr_t loadLut(void *object, int mode) {
     if (!originalLoadLut) return 0;
-    // Intermediate ODT passes carry no profile; they keep the object's current LUTs.
-    if (activeProfile != kUnknown) {
-        char *lmtPath = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
-        const char *desired = activeProfile == kGr ? kGrLmtPath
-                            : activeProfile == kMaster ? activeMasterDir.c_str() : kHostLmtPath;
-        if (std::strlen(desired) < 240 && std::strcmp(lmtPath, desired) != 0) {
-            std::strcpy(lmtPath, desired);
-            // The path is not part of the vendor cache key, so a profile switch forces a reload.
-            *reinterpret_cast<int *>(static_cast<char *>(object) + 0xeb0) = -1;
-            __android_log_print(ANDROID_LOG_INFO, kTag, "BasicTone profile=%s path=%s",
-                                activeProfile == kGr ? "GR" : activeProfile == kMaster ? "master-colour" : "host", desired);
-        }
-    }
+    applyLmtPath(object);
     return originalLoadLut(object, mode);
+}
+
+// Same, for the loader X8U exports. `settingPath` is echoed only: rewriting it would break the ini
+// lookups (readLMTXML reads %s/TriggerBIN and %s/TriggerBINPhoto_Sensor<N> off it).
+uintptr_t loadLut3(void *object, int mode, const char *settingPath, bool flag) {
+    if (!originalLoadLut3) return 0;
+    applyLmtPath(object);
+    __android_log_print(ANDROID_LOG_INFO, kTag, "loadLut mode=%d setting=%s flag=%d",
+                        mode, settingPath ? settingPath : "(null)", flag ? 1 : 0);
+    return originalLoadLut3(object, mode, settingPath, flag);
 }
 
 void *resolveSettingInt(void *base) {
@@ -280,16 +298,22 @@ void hookBasicTone(HookFunction hook, void *handle) {
                             "processCore hook unusable (no trampoline); BasicTone GR path disabled");
         return;
     }
-    // X9U's backend renamed this to loadLut(CamMode, const char*, bool) to carry the profile path.
-    // hookExport only ever calls dlsym() on the exact name, so asking for the classic form on a
-    // backend that lacks it fails harmlessly - but it must not be treated as a hook, and the GR
-    // LMT path swap does not apply there anyway.
-    if (dlsym(handle, "_ZN13BasicTone_OGL7loadLutE7CamMode")) {
-        hookExport(hook, handle, "_ZN13BasicTone_OGL7loadLutE7CamMode",
-                   reinterpret_cast<void *>(loadLut), reinterpret_cast<void **>(&originalLoadLut), kTag);
+    // Two arities exist in the wild. X9U's routerless backend exports the classic loadLut(CamMode);
+    // X8U (PKJ110 Camera 7.006.94) exports only loadLut(CamMode, const char*, bool). dlsym() matches
+    // exact names, so the longer one is not found by asking for the shorter: try both, in order.
+    static const char kLoadLut[] = "_ZN13BasicTone_OGL7loadLutE7CamMode";
+    static const char kLoadLut3[] = "_ZN13BasicTone_OGL7loadLutE7CamModePKcb";
+    if (dlsym(handle, kLoadLut)) {
+        hookExport(hook, handle, kLoadLut, reinterpret_cast<void *>(loadLut),
+                   reinterpret_cast<void **>(&originalLoadLut), kTag);
+    } else if (dlsym(handle, kLoadLut3)) {
+        hookExport(hook, handle, kLoadLut3, reinterpret_cast<void *>(loadLut3),
+                   reinterpret_cast<void **>(&originalLoadLut3), kTag);
+        if (!originalLoadLut3)
+            __android_log_print(ANDROID_LOG_ERROR, kTag,
+                                "loadLut3 hook unusable (no trampoline); LMT path swap disabled");
     } else {
-        __android_log_print(ANDROID_LOG_INFO, kTag,
-                            "loadLut classic symbol absent (X10 backend); GR LMT path swap disabled");
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "loadLut not exported; LMT path swap disabled");
     }
     basicToneHooked = true;
 }
