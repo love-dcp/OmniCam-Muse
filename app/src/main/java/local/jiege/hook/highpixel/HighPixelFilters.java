@@ -358,6 +358,14 @@ public final class HighPixelFilters {
                                 + " key=" + algorithmKey);
                         }
                         if (!"high_pixel_mode".equals(mode)) return;
+                        // Experiment (persist.omnicam.aura.hppalcapture=1): the palette params are
+                        // stamped by HighPixelPaletteCapture, which moves this shot onto the smaller
+                        // palette pipeline. Ask for the upscale stage on top of it and see whether
+                        // that restores 6484x10256 while the metadata keeps the dial.
+                        if (paletteActive() && "1".equals(prop("persist.omnicam.aura.hppalcapture"))) {
+                            ensureStage(param.getResult(), algorithmKey, "aps_algo_upscale",
+                                PALETTE_ALGORITHM);
+                        }
                         // No palette stage is inserted any more: with aps_algo_basic_tone in
                         // the list (or the color_palette pair) this mode's 50 MP request came
                         // back as a 3244x5132 image (2026-10-23 07:03 / 07:06), so the chain
@@ -548,6 +556,32 @@ public final class HighPixelFilters {
             }
         }
         return false;
+    }
+
+    /** Adds one algorithm stage after another one, if the list does not carry it already. */
+    private static void ensureStage(Object meta, Object algorithmKey, String stage, String after) {
+        if (meta == null) return;
+        Object value;
+        try {
+            value = XposedHelpers.callMethod(meta, "get", algorithmKey);
+        } catch (Throwable error) {
+            return;
+        }
+        if (!(value instanceof String[])) return;
+        String[] current = (String[]) value;
+        java.util.List<String> list = new java.util.ArrayList<>();
+        int at = -1;
+        for (int i = 0; i < current.length; i++) {
+            if (stage.equals(current[i])) return;
+            list.add(current[i]);
+            if (after != null && after.equals(current[i])) at = i + 1;
+        }
+        if (at < 0) at = list.size();
+        list.add(at, stage);
+        String[] next = list.toArray(new String[0]);
+        if (setAlgorithmList(meta, algorithmKey, next) && seen.add("stage:" + stage)) {
+            Log.i(TAG, stage + " ensured in the capture chain: " + java.util.Arrays.toString(next));
+        }
     }
 
     /** Hands the meta item a new algorithm list; returns whether a setter took it. */
