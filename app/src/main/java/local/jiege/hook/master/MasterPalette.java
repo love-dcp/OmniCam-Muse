@@ -828,7 +828,14 @@ public final class MasterPalette {
             return true;
         }
         current.open();
-        current.neutralize();
+        // Neutral only when this page is entered from another mode. Neutralising on every open put
+        // the dial back to 0 right after a shutter tap closed the palette (the camera synthesises a
+        // click on the entry), so the capture was taken with 0/0 while the user had just set 100.
+        String mode = currentMode();
+        if (!mode.equals(neutralizedMode)) {
+            neutralizedMode = mode;
+            current.neutralize();
+        }
         return true;
     }
 
@@ -1094,6 +1101,9 @@ public final class MasterPalette {
      * The camera's own mode gate is answered for us while this holds - see {@link #install}.
      */
     private static volatile boolean directPaletteOpen;
+
+    /** Mode the dial was last neutralised for, so a shutter-reopen keeps the user's values. */
+    private static volatile String neutralizedMode = "";
 
     /** Set while a page whose presenter was replaced writes through the LUT manager instead. */
     private static volatile boolean paletteDirectFallback;
