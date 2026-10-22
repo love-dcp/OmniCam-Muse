@@ -145,6 +145,29 @@ public final class PopFisheyeSupport {
      * did not.
      */
     private static void installCapture(ClassLoader classLoader) {
+        // The tag is built before the metadata is derived from it, and the APS fish-eye node reads
+        // the flag from that tag, so it has to be set as early as possible.
+        try {
+            Class<?> processor = XposedHelpers.findClass(SDK + "consumer.ApsProcessor", classLoader);
+            XposedBridge.hookAllMethods(processor, "createRequestTag", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Object tag = param.getResult();
+                    if (tag == null) return;
+                    try {
+                        if (!lensOn && !lensFromPreference()) return;
+                        XposedHelpers.setBooleanField(tag, "mRetroFilterFishEyeEnable", true);
+                        XposedHelpers.setBooleanField(tag, "mbFishEyeEnable", true);
+                        if (traced.add("tagEarly")) {
+                            Log.i(TAG, "request tag fish-eye flags set at createRequestTag");
+                        }
+                    } catch (Throwable error) {
+                        if (traced.add("tagEarlyError")) Log.i(TAG, "early tag failed: " + error);
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            Log.i(TAG, "createRequestTag hook unavailable: " + error);
+        }
         try {
             XposedHelpers.findAndHookMethod(SDK + "consumer.ApsProcessor", classLoader,
                 "createMetaItemInfo", SDK + "common.util.CameraRequestTag", new XC_MethodHook() {
