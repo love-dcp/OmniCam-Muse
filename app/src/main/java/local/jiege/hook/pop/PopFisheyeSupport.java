@@ -54,6 +54,11 @@ public final class PopFisheyeSupport {
     private static volatile boolean on;
     /** Last known state of the POP lens toggle (the presenter's f1), kept for the capture hook. */
     private static volatile boolean lensOn;
+    /** Every Meishe effect context the camera has set a value on (preview, capture, ...). */
+    private static final java.util.Set<Object> effectContexts =
+        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<Object, Boolean>());
+    /** The renderer's own id for the fish-eye switch, read from the SDK. */
+    private static volatile String fishEyeId;
 
     private PopFisheyeSupport() {}
 
@@ -82,8 +87,56 @@ public final class PopFisheyeSupport {
         XposedBridge.hookAllMethods(config, "getConfigBooleanValue", hook);
         XposedBridge.hookAllMethods(config, "d", hook);
         on = true;
+        installEffectBridge(classLoader);
         installCapture(classLoader);
         Log.i(TAG, "fish-eye lens: answering " + String.join(", ", KEYS) + " = true");
+    }
+
+    /**
+     * The Meishe SDK's own switch: {@code MsEffectSdkContextUtils.MsSetEffectBooleanValue(id, value)}
+     * reaches {@code nativeMsSetEffectBooleanValue}, which is what the reference module calls "set the
+     * fish flag through the renderer API". The camera calls it for grain and the other toggles, so the
+     * live context is picked up from there and reused at capture; writing the renderer struct by hand
+     * was measured to crash the preview thread.
+     */
+    private static void installEffectBridge(ClassLoader classLoader) {
+        try {
+            Class<?> utils = XposedHelpers.findClass("com.meicam.effect.sdk.MsEffectSdkContextUtils",
+                classLoader);
+            XposedBridge.hookAllMethods(utils, "MsSetEffectBooleanValue", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args != null && param.args.length == 2) {
+                        effectContexts.add(param.thisObject);
+                    }
+                }
+            });
+            Object id = XposedHelpers.getStaticObjectField(
+                XposedHelpers.findClass("com.meicam.effect.sdk.SMsEffectParam", classLoader),
+                "MS_EFFECT_PARAM_ID_FISH_EYE_ENABLE");
+            if (id instanceof String) fishEyeId = (String) id;
+            Log.i(TAG, "renderer switch id = " + fishEyeId);
+        } catch (Throwable error) {
+            Log.i(TAG, "renderer bridge unavailable: " + error);
+        }
+    }
+
+    /** Turns the Meishe fish-eye pass on for every context the camera has used so far. */
+    private static void applyEffectFishEye() {
+        String id = fishEyeId;
+        if (id == null) return;
+        int applied = 0;
+        for (Object context : new java.util.ArrayList<>(effectContexts)) {
+            try {
+                Object result = XposedHelpers.callMethod(context, "MsSetEffectBooleanValue", id,
+                    Boolean.TRUE);
+                if (Boolean.TRUE.equals(result)) applied++;
+            } catch (Throwable error) {
+                if (traced.add("effectError")) Log.i(TAG, "renderer fish-eye failed: " + error);
+            }
+        }
+        if (traced.add("effect")) {
+            Log.i(TAG, "renderer fish-eye -> " + applied + "/" + effectContexts.size() + " contexts");
+        }
     }
 
     /**
@@ -103,6 +156,8 @@ public final class PopFisheyeSupport {
                             Object tag = param.args[0];
                             XposedHelpers.setBooleanField(tag, "mRetroFilterFishEyeEnable", true);
                             XposedHelpers.setBooleanField(tag, "mbFishEyeEnable", true);
+                            // The renderer is the half that actually draws the frame.
+                            applyEffectFishEye();
                             if (traced.add("tag")) {
                                 Log.i(TAG, "capture tag carries mRetroFilterFishEyeEnable/mbFishEyeEnable");
                             }
