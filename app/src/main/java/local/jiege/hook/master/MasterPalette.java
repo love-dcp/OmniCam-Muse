@@ -1000,9 +1000,10 @@ public final class MasterPalette {
      */
     private static void applyPreviewLut() {
         if (!wantPreviewLut()) {
-            // The capture hook keeps the last table until it is told to stop, so the off state has
-            // to be written too - otherwise a 0/0 shot would still carry the previous look.
-            PaletteCaptureExport.publish(paletteFilesDir, false, null);
+            // Only the neutral dial turns the capture table off. Tapping the shutter closes our
+            // palette, and that close used to clear the table right before the shot was processed -
+            // the dial sat at 100/-100 and the 50 MP frame went through the neutral table.
+            if (!paletteEngaged()) PaletteCaptureExport.publish(paletteFilesDir, false, null);
             return;
         }
         Object manager = lut();
