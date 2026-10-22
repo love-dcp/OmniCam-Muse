@@ -497,11 +497,11 @@ public final class X10FilterPort {
      */
     private static boolean stampsPalette(String mode) {
         if (!"high_pixel_mode".equals(mode)) return false;
-        // Off by default since 2026-10-23: the stamp makes the shot carry src.image + filter.info,
-        // and the gallery then re-renders it from that source - which comes out turned 90 degrees and
-        // neutral on the first draw on this mode. Without it the photo opens in 色彩风格 the way
-        // master's does, showing the look that was baked into the pixels.
-        return "1".equals(prop("persist.omnicam.aura.hppalstamp"));
+        // Stays on: with the flag off the capture takes the HDRTransform *quick* path and never
+        // reaches MsRenderHDRHostBuffer, which is where the native palette is applied - the shot came
+        // out untoned (2026-10-23 07:52). The flag is also what gives the photo its src.image; the
+        // gallery's 90-degree first draw comes from that re-render and is a separate problem.
+        return !"0".equals(prop("persist.omnicam.aura.hppalstamp"));
     }
 
     private static String prop(String name) {
