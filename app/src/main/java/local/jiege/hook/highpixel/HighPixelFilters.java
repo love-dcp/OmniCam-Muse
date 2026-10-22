@@ -64,6 +64,8 @@ public final class HighPixelFilters {
     private static volatile List<String> types = Collections.emptyList();
     private static volatile int current = -1;
     private static volatile long lastPickAt;
+    /** Guards the camera reporting a pick back into select() (see there). */
+    private static boolean applying;
     /** Rewrites the fixed card and its dots after a swipe selected another filter. */
     private static volatile Runnable panelRefresh;
     /** Plays the card/dot switch animation for a swipe in this direction (+1 next, -1 previous). */
@@ -338,8 +340,17 @@ public final class HighPixelFilters {
                     if ("0".equals(prop(PROP_CAPTURE))) return;
                     try {
                         Object tag = param.args[0];
-                        if (!"high_pixel_mode".equals(XposedHelpers.getObjectField(tag, "mCaptureMode"))) return;
-                        if (!XposedHelpers.getBooleanField(tag, "mbFilterOpen")) return;
+                        String mode = String.valueOf(XposedHelpers.getObjectField(tag, "mCaptureMode"));
+                        boolean open = XposedHelpers.getBooleanField(tag, "mbFilterOpen");
+                        // Diagnostic for "the jpeg has no filter": says whether the meta hook runs at
+                        // all and what the tag looked like at that moment.
+                        if (seen.add("metaAfter:" + mode + ":" + open)) {
+                            Log.i(TAG, "meta after: mode=" + mode + " filterOpen=" + open
+                                + " type=" + XposedHelpers.getObjectField(tag, "mFilterType")
+                                + " key=" + algorithmKey);
+                        }
+                        if (!"high_pixel_mode".equals(mode)) return;
+                        if (!open) return;
                         addFilterNode(param.getResult(), algorithmKey);
                     } catch (Throwable error) {
                         Log.i(TAG, "algorithm list: " + error);
@@ -643,21 +654,39 @@ public final class HighPixelFilters {
         if (presenter == null) return false;
         int index = types.indexOf(type);
         if (index < 0) return false;
-        long now = System.currentTimeMillis();
-        if (now - lastPickAt < 250) return true;
-        lastPickAt = now;
-        Symbols symbols = Symbols.get();
+        // applyFilter reports the pick back to the camera's own strip handlers, which can call back
+        // into this method; without the guard one swipe walked three filters (17,18,19,20 in the log).
+        if (applying) return true;
+        applying = true;
+        try {
+            return apply(symbols(), presenter, index, type);
+        } finally {
+            applying = false;
+        }
+    }
+
+    private static Symbols symbols() {
+        return Symbols.get();
+    }
+
+    private static boolean apply(Symbols symbols, Object presenter, int index, String type) {
+        // select() records the index; apply(index, softLight, style, group) is what pushes the look
+        // to the preview request and the capture, and this mode has no strip to call it. Calling
+        // applyFilter as well re-enters the camera's own strip handler and ends up drawing the
+        // filter twice (measured on the X8U: the second pass dropped the look), so it is not used.
         try {
             symbols.call("FilterPresenter.select", presenter, Integer.valueOf(index));
             current = index;
+            lastPickAt = System.currentTimeMillis();
             Log.i(TAG, "selected " + type + " at " + index);
         } catch (Throwable error) {
             Log.i(TAG, "select " + type + " failed: " + error);
             return false;
         }
-        // select() only records the index; the filter reaches the preview and the capture through
-        // apply(index, softLight, style, group), which the camera's own strip calls and this mode
-        // never does (it has no strip). Same call the video page's filter needs at 4K/60fps.
+        // select()/applyFilter() only record the index; the filter reaches the preview and the
+        // capture through apply(index, softLight, style, group), which the camera's own strip calls
+        // and this mode never does (it has no strip). Same call the video page's filter needs at
+        // 4K/60fps.
         try {
             symbols.call("FilterPresenter.apply", presenter, Integer.valueOf(index),
                 symbols.call("FilterPresenter.softLightIndex", presenter),

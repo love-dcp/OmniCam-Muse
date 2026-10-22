@@ -1230,6 +1230,8 @@ public final class MasterPalette {
         boolean photoPaletteOpen;
         boolean filterPanelOpen;
         boolean retroOpen;
+        /** The filter presenter this page writes through (POP: the retro one; null elsewhere). */
+        Object filterPresenter;
         boolean grActive;
         boolean grSuppressed;
         /** The palette was opened from our own button rather than by the camera's GR menu. */
@@ -1665,7 +1667,7 @@ public final class MasterPalette {
          */
         void slideSwitch(final int direction) {
             if (!(previewMask instanceof PreviewCardMask)) {
-                HighPixelFilters.swipe(direction);
+                stepFilter(direction);
                 return;
             }
             final PreviewCardMask mask = (PreviewCardMask) previewMask;
@@ -1680,16 +1682,48 @@ public final class MasterPalette {
                 mask.setSlide((Float) animation.getAnimatedValue());
                 if (!switched[0] && animation.getAnimatedFraction() >= 0.5f) {
                     switched[0] = true;
-                    HighPixelFilters.swipe(direction);
+                    stepFilter(direction);
                 }
             });
             animator.addListener(new android.animation.AnimatorListenerAdapter() {
                 @Override public void onAnimationEnd(android.animation.Animator animation) {
                     mask.setSlide(0f);
-                    if (!switched[0]) HighPixelFilters.swipe(direction);
+                    if (!switched[0]) stepFilter(direction);
                 }
             });
             animator.start();
+        }
+
+        /**
+         * One filter over, in the mode this page serves.
+         *
+         * <p>哈苏超清 goes through {@link HighPixelFilters}, which owns that mode's filter row. Every
+         * other page (POP above all) hands the step to its own presenter instead: the retro page's
+         * filters live in the current style's group, and {@code FilterPresenter.applyFilter} is the
+         * camera's own entry for picking one - the same call its strip makes when a filter is tapped.
+         */
+        void stepFilter(int direction) {
+            if (HighPixelFilters.available()) {
+                HighPixelFilters.swipe(direction);
+                return;
+            }
+            Object presenter = filterPresenter;
+            if (presenter == null) return;
+            try {
+                local.jiege.hook.common.Symbols symbols = local.jiege.hook.common.Symbols.get();
+                java.util.List<?> types =
+                    (java.util.List<?>) symbols.call("FilterPresenter.types", presenter);
+                int size = types == null ? 0 : types.size();
+                if (size <= 0) return;
+                int current = ((Number) symbols.call("FilterPresenter.currentIndex", presenter))
+                    .intValue();
+                int next = Math.max(0, Math.min(size - 1, current + direction));
+                if (next == current) return;
+                symbols.call("FilterPresenter.applyFilter", presenter, Integer.valueOf(next));
+                Log.i(TAG, "palette step " + current + " -> " + next + "/" + size);
+            } catch (Throwable error) {
+                Log.i(TAG, "palette step failed: " + error);
+            }
         }
 
         /**
@@ -2326,6 +2360,7 @@ public final class MasterPalette {
                 return;
             }
             Object presenter = palettePresenter(retro ? MODE_RETRO : MODE_MASTER);
+            filterPresenter = presenter;
             // 哈苏超清 takes the shelf page (filter row + dial): the master page has no filter row
             // at all, and the pro presenter only shows up after the camera has built its palette
             // once. Ignoring the presenter here keeps the page stable and writes through the LUT
