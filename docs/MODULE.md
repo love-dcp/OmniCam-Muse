@@ -222,6 +222,19 @@ chrome 这一层要压过 scrim：两者都是 decor 的直接子 View，只按�
 
 现状：预览有效、成片不带。链里插节点那段（`HighPixelFilters.addPaletteNode`）留着，实测不会破坏成片（多张 20-30 MB 正常图像），但也没有效果，随时可删。
 
+### 成片调色盘：下一步要查的具体位置（2026-10-22 晚）
+
+同滤镜连拍交叉验证过：调色盘 +100/−100 与 −49/−84、0/0 之间，成片色度/亮度完全一致（20:24:52 vs 20:24:59，20:26:18 vs 20:26:30），所以那段时间调色盘一次都没进成片。看起来"成功"的那张（202231.jpg）是 morandi 滤镜本身的低饱和，不是调色盘——它和 202324.jpg 不是同一滤镜，不能拿来对比。
+
+真正的线索在 `module/post-mount.sh`：
+
+- X8U 的 `libAlgoInterface.so` 里 `basicToneProcessV1` 有个「四个主滑块全为 0 就 cbz 跳过转换」的分支（X9U 在 `0x2040688` NOP 过，X8U 对应 `0x1e7ae00`，patch 在 `payload_pkj110/lib64/libAlgoInterface.so`）；
+- 那个补丁默认不绑定，因为一绑定 POP 成片就会黑（`persist.omnicam.sdrbt=1` 才开）。10-18 那次"成片调色盘有效"的验证，就是在这个开关打开的状态下做的。
+
+所以调色盘要进成片，值必须落到 BasicTone 读的那四个主滑块上；现在写的是 `Lut3dDataManager` 的 w/v 加 `H4`/`x6` 通知，而 `H4`/`x6` 在哈苏超清上作用的是 `fm.f0`（BaseMode）、在大师上作用的是 `ef.m` 的 mode 对象，两者不一定是同一条写入路径。
+
+下一步：给 `H4`/`x6` 各加一行日志（写到哪个键、什么值），再拿大师模式同样的调用对比；确认哈苏超清这边是不是只写了预览键、没写到拍摄侧 vendor 键（`bb.s.e0` / `bb.s.d0`）。
+
 ### 属性开关
 
 - `persist.omnicam.aura.hires` — 哈苏超清模式入口（`setprop … 0` 后重启相机即隐藏）。
