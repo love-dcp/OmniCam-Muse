@@ -195,6 +195,8 @@ public final class MasterPalette {
      */
     private static final int PREVIEW_CARD_INSET_DP = 14;
     private static final int PREVIEW_CARD_RADIUS_DP = 16;
+    /** Black line between two cards while the frame slides - photo mode keeps it very thin. */
+    private static final int PREVIEW_CARD_GAP_DP = 3;
     /**
      * 哈苏超清's filter card and dots sit inside the picture where photo mode draws its own strip:
      * that strip's dots end 105dp above the card bottom, its card 115dp, so the block's bottom edge
@@ -2055,7 +2057,8 @@ public final class MasterPalette {
                     maskParams.leftMargin = screenLeft(frame);
                     maskParams.topMargin = screenTop(frame);
                     previewMask = new PreviewCardMask(activity,
-                        dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP));
+                        dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP),
+                        dp(PREVIEW_CARD_GAP_DP));
                     decor.addView(previewMask, maskParams);
                 }
                 // The thumbnail is the camera's, and with nothing lifted it stays in its own corner.
@@ -2430,7 +2433,8 @@ public final class MasterPalette {
                         maskParams.leftMargin = screenLeft(frame);
                         maskParams.topMargin = screenTop(frame);
                         previewMask = new PreviewCardMask(activity,
-                            dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP));
+                            dp(PREVIEW_CARD_INSET_DP), dp(PREVIEW_CARD_RADIUS_DP),
+                            dp(PREVIEW_CARD_GAP_DP));
                         decor.addView(previewMask, maskParams);
                     }
 
@@ -2648,24 +2652,27 @@ public final class MasterPalette {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float inset;
         private final float radius;
+        private final float gap;
         /** How far the pair of windows has travelled; one card width per switch. */
         private float slide;
 
-        PreviewCardMask(Context context, float inset, float radius) {
+        PreviewCardMask(Context context, float inset, float radius, float gap) {
             super(context);
             this.inset = inset;
             this.radius = radius;
+            this.gap = gap;
             paint.setColor(0xFF000000);
             setClickable(false);
             setFocusable(false);
         }
 
         /**
-         * How far the pair of windows travels for a single filter switch: one card plus the inset,
-         * which is the strip's gap - at rest the incoming card ends exactly on the left edge.
+         * How far the pair of windows travels for a single filter switch: one card plus the thin
+         * black line between two cards. At rest the neighbours sit exactly one step away, so the
+         * one that arrives lands where the card left.
          */
         float step() {
-            return Math.max(1f, getWidth() - inset);
+            return Math.max(1f, getWidth() - 2f * inset + gap);
         }
 
         void setSlide(float value) {
@@ -2678,7 +2685,7 @@ public final class MasterPalette {
             path.setFillType(Path.FillType.EVEN_ODD);
             path.addRect(0f, 0f, getWidth(), getHeight(), Path.Direction.CW);
             float step = step();
-            float hole = step - inset;
+            float hole = getWidth() - 2f * inset;
             float left = inset + slide;
             // The card, plus one on each side: whichever way the pair travels, the neighbour
             // arrives exactly where the card left, and at rest the extra two are off screen.
