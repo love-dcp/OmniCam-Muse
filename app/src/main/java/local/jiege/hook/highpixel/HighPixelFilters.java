@@ -358,9 +358,11 @@ public final class HighPixelFilters {
                                 + " key=" + algorithmKey);
                         }
                         if (!"high_pixel_mode".equals(mode)) return;
-                        // The dial reaches the preview through the LUT manager; the capture needs a
-                        // stage to apply it with, and this mode's list has none.
-                        if (paletteActive()) addPaletteNode(param.getResult(), algorithmKey);
+                        // No palette stage is inserted any more: with aps_algo_basic_tone in
+                        // the list (or the color_palette pair) this mode's 50 MP request came
+                        // back as a 3244x5132 image (2026-10-23 07:03 / 07:06), so the chain
+                        // stays exactly as the camera built it and only the capture params
+                        // carry the dial (HighPixelPaletteCapture).
                         if (!open) return;
                         addFilterNode(param.getResult(), algorithmKey);
                     } catch (Throwable error) {
