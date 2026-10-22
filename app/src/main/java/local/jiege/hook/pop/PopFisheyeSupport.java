@@ -93,6 +93,55 @@ public final class PopFisheyeSupport {
     }
 
     /**
+     * The still is filtered by the IPU filter process unit, and its parameters carry
+     * {@code retro_ccd_fisheye_open} / {@code retro_ccd_fisheye_zoom}. The preview is seen sending
+     * them as true in the log; the image pass keeps them false. Forcing the flag on the parameter
+     * call is enough for that unit to warp the frame.
+     */
+    private static void installIpuFilter(ClassLoader classLoader) {
+        try {
+            Class<?> keys = XposedHelpers.findClass(
+                "com.oplus.ocs.camera.ipusdk.processunit.filter.key.FilterProcessKeySDK",
+                classLoader);
+            Object openKey = staticFieldOrNull(keys, "RETRO_CCD_FISHEYE_OPEN");
+            Object zoomKey = staticFieldOrNull(keys, "RETRO_CCD_FISHEYE_ZOOM");
+            Class<?> unit = XposedHelpers.findClass(
+                "com.oplus.ocs.camera.ipusdk.processunit.BaseProcessUnitSDK", classLoader);
+            XposedBridge.hookAllMethods(unit, "setProcessParameter", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length != 2) return;
+                    if (!lensOn && !lensFromPreference()) return;
+                    if (param.args[0] == null) return;
+                    final String key = String.valueOf(param.args[0]);
+                    if (traced.size() < 200 && traced.add("k:" + key)) {
+                        Log.i(TAG, "IPU param " + key + " = " + param.args[1]);
+                    }
+                    if (key.contains("retro_ccd_fisheye_open") || (openKey != null && param.args[0] == openKey)) {
+                        param.args[1] = Boolean.TRUE;
+                        if (traced.add("ipuOpen")) {
+                            Log.i(TAG, "IPU filter retro_ccd_fisheye_open forced true");
+                        }
+                    } else if (key.contains("retro_ccd_fisheye_zoom") || (zoomKey != null && param.args[0] == zoomKey)) {
+                        param.args[1] = Float.valueOf(1.0f);
+                    }
+                }
+            });
+            Log.i(TAG, "IPU filter fish-eye keys hooked");
+        } catch (Throwable error) {
+            Log.i(TAG, "IPU filter hook unavailable: " + error);
+        }
+    }
+
+    private static Object staticFieldOrNull(Class<?> type, String name) {
+        try {
+            return XposedHelpers.getStaticObjectField(type, name);
+        } catch (Throwable missing) {
+            Log.i(TAG, "no " + name + " on " + type.getSimpleName());
+            return null;
+        }
+    }
+
+    /**
      * The Meishe SDK's own switch: {@code MsEffectSdkContextUtils.MsSetEffectBooleanValue(id, value)}
      * reaches {@code nativeMsSetEffectBooleanValue}, which is what the reference module calls "set the
      * fish flag through the renderer API". The camera calls it for grain and the other toggles, so the
