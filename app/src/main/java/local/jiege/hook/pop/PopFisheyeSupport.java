@@ -157,6 +157,7 @@ public final class PopFisheyeSupport {
                         if (!lensOn && !lensFromPreference()) return;
                         XposedHelpers.setBooleanField(tag, "mRetroFilterFishEyeEnable", true);
                         XposedHelpers.setBooleanField(tag, "mbFishEyeEnable", true);
+                        writeCaptureStamp();
                         if (traced.add("tagEarly")) {
                             Log.i(TAG, "request tag fish-eye flags set at createRequestTag");
                         }
@@ -260,6 +261,22 @@ public final class PopFisheyeSupport {
             });
         } catch (Throwable error) {
             Log.i(TAG, "texture request hook unavailable: " + error);
+        }
+    }
+
+    /**
+     * The APS fish-eye node is only wanted for the shot, not for the preview that shares the same
+     * engine, so the capture window is stamped here and the native getEnable hook stays quiet
+     * outside it.
+     */
+    private static void writeCaptureStamp() {
+        try {
+            java.io.FileOutputStream out = new java.io.FileOutputStream(
+                "/data/user/0/com.oplus.camera/files/fisheye_capture", false);
+            out.write(String.valueOf(System.currentTimeMillis()).getBytes("UTF-8"));
+            out.close();
+        } catch (Throwable error) {
+            Log.i(TAG, "capture stamp write failed: " + error);
         }
     }
 

@@ -34,6 +34,10 @@ constexpr char kLib[] = "libAlgoInterface.so";
 constexpr char kSymbol[] = "_ZN7android14APSFisheyeNode9getEnableEPNS_22AlgoPreviewProcessDataE";
 // Dropped by PopFisheyeSupport (Java) when the lens button changes state.
 constexpr char kStatePath[] = "/data/user/0/com.oplus.camera/files/fisheye_lens";
+// Written with the current epoch time when a POP capture builds its request tag, so the node only
+// runs for the shot and leaves the preview that shares the engine alone.
+constexpr char kCapturePath[] = "/data/user/0/com.oplus.camera/files/fisheye_capture";
+constexpr int64_t kCaptureWindowMs = 3000;
 
 using GetEnableFn = bool (*)(void *self, void *data);
 GetEnableFn gGetEnable = nullptr;
@@ -54,6 +58,19 @@ bool lensOn() {
 bool getEnableHook(void *self, void *data) {
     const bool stock = gGetEnable ? gGetEnable(self, data) : false;
     if (!lensOn()) return stock;
+    // The node shares the APS engine with the preview, and processing there blackens the frame, so
+    // it only answers while a capture is being set up.
+    char buf[24] = {};
+    int fd = open(kCapturePath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return stock;
+    const ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return stock;
+    timespec now{};
+    clock_gettime(CLOCK_REALTIME, &now);
+    const int64_t stamp = strtoll(buf, nullptr, 10);
+    const int64_t current = int64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+    if (stamp <= 0 || current - stamp > kCaptureWindowMs) return stock;
     if (!gReported) {
         gReported = true;
         __android_log_print(ANDROID_LOG_INFO, kTag, "APS fish-eye node enabled (stock=%d)",
