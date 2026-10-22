@@ -42,6 +42,8 @@ public final class HighPixelFilters {
     private static final String FILTER_FEATURE = "com.oplus.camera.feature.filter";
     /** The capture stage that applies the filter LUT. */
     private static final String FILTER_ALGORITHM = "aps_algo_filter";
+    /** The stage that applies the palette (tone / saturation) to a capture. */
+    private static final String PALETTE_ALGORITHM = "aps_algo_basic_tone";
     /**
      * Whether the capture request also gets the filter stage. The 50 MP pipeline is built without it
      * and it is not yet proven that adding it back is accepted, so it can be switched off without a
@@ -350,6 +352,9 @@ public final class HighPixelFilters {
                                 + " key=" + algorithmKey);
                         }
                         if (!"high_pixel_mode".equals(mode)) return;
+                        // The dial reaches the preview through the LUT manager; the capture needs a
+                        // stage to apply it with, and this mode's list has none.
+                        if (paletteActive()) addPaletteNode(param.getResult(), algorithmKey);
                         if (!open) return;
                         addFilterNode(param.getResult(), algorithmKey);
                     } catch (Throwable error) {
@@ -438,6 +443,60 @@ public final class HighPixelFilters {
         } catch (Throwable ignored) {
             // a tag without those fields simply keeps its own values
         }
+    }
+
+    /**
+     * The palette's basic-tone stage. The retro page's request carries it and its dial reaches the
+     * capture; 哈苏超清's list does not have it at all, which is why the dial only moved the preview.
+     * Inserted after the raw stage, the place the retro page puts it.
+     */
+    private static void addPaletteNode(Object meta, Object algorithmKey) {
+        if (meta == null) return;
+        Object value = XposedHelpers.callMethod(meta, "get", algorithmKey);
+        if (!(value instanceof String[])) return;
+        String[] current = (String[]) value;
+        for (String name : current) if (PALETTE_ALGORITHM.equals(name)) return;
+        int at = 0;
+        for (int i = 0; i < current.length; i++) {
+            if ("aps_algo_hybridraw".equals(current[i])) { at = i + 1; break; }
+        }
+        String[] next = new String[current.length + 1];
+        System.arraycopy(current, 0, next, 0, at);
+        next[at] = PALETTE_ALGORITHM;
+        System.arraycopy(current, at, next, at + 1, current.length - at);
+        if (setAlgorithmList(meta, algorithmKey, next) && seen.add("paletteNode")) {
+            Log.i(TAG, "palette stage added to the capture request: " + java.util.Arrays.toString(next));
+        }
+    }
+
+    /** True while the palette dial is off its neutral position. */
+    private static boolean paletteActive() {
+        try {
+            Class<?> holder = XposedHelpers.findClass(
+                "com.oplus.camera.common.utils.Lut3dDataManager$b", null);
+            Object manager = XposedHelpers.getStaticObjectField(holder, "a");
+            if (manager == null) return false;
+            return XposedHelpers.getIntField(manager, "w") != 0
+                || XposedHelpers.getIntField(manager, "v") != 0;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
+    /** Hands the meta item a new algorithm list; returns whether a setter took it. */
+    private static boolean setAlgorithmList(Object meta, Object algorithmKey, String[] next) {
+        Object[] candidates = { next, java.util.Arrays.asList(next) };
+        for (Object candidate : candidates) {
+            for (String setter : new String[] {"setValue", "set", "put"}) {
+                try {
+                    XposedHelpers.callMethod(meta, setter, algorithmKey, candidate);
+                    return true;
+                } catch (Throwable ignored) {
+                    // try the next spelling
+                }
+            }
+        }
+        return false;
     }
 
     /**

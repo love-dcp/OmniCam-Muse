@@ -70,8 +70,26 @@ final class HighPixelDiagnostics {
                             try { text.append(' ').append(name).append('=').append(field.get(tag)); }
                             catch (Throwable ignored) { }
                         }
-                        text.append(" manager=").append(managerState());
+                        text.append(" manager=").append(managerState(tag.getClass().getClassLoader()));
                         Log.i(TAG, text.toString());
+                        StringBuilder apsText = new StringBuilder("aps:");
+                        try {
+                            Object apsTag = XposedHelpers.getObjectField(tag, "mApsRequestTag");
+                            if (apsTag != null) {
+                                for (java.lang.reflect.Field field : apsTag.getClass().getDeclaredFields()) {
+                                    String lower = field.getName().toLowerCase();
+                                    if (!lower.contains("tone") && !lower.contains("lut")
+                                        && !lower.contains("palette") && !lower.contains("satur")) continue;
+                                    field.setAccessible(true);
+                                    try { apsText.append(' ').append(field.getName()).append('=')
+                                        .append(field.get(apsTag)); }
+                                    catch (Throwable ignored) { }
+                                }
+                            }
+                        } catch (Throwable error) {
+                            apsText.append(" unreadable ").append(error.getClass().getSimpleName());
+                        }
+                        Log.i(TAG, apsText.toString());
                     }
                 } catch (Throwable error) {
                     Log.e(TAG, "log", error);
@@ -137,10 +155,10 @@ final class HighPixelDiagnostics {
      * combined table is up. A capture whose palette differs from these is what "成片和预览不一样"
      * looks like, so the request snapshot carries them side by side.
      */
-    private static String managerState() {
+    private static String managerState(ClassLoader loader) {
         try {
             Class<?> holder = XposedHelpers.findClass(
-                "com.oplus.camera.common.utils.Lut3dDataManager$b", null);
+                "com.oplus.camera.common.utils.Lut3dDataManager$b", loader);
             Object manager = XposedHelpers.getStaticObjectField(holder, "a");
             if (manager == null) return "none";
             return "tone=" + XposedHelpers.getIntField(manager, "w")
