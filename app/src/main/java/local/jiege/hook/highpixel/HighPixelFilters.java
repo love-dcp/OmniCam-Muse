@@ -6,6 +6,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.HorizontalScrollView;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import de.robv.android.xposed.XC_MethodHook;
@@ -689,62 +690,72 @@ public final class HighPixelFilters {
         final int dotSize = dp(activity, 4);
         final int dotGap = dp(activity, 4);
         final int dotCount = 5;
-        final int slide = dp(activity, 10);
-        final float slot = dotSize + 2f * dotGap;
+        final int dotSlot = dotSize + 2 * dotGap;
+        // One dot cell each side of the five on screen: when the window scrolls, the dot leaving
+        // the left edge has somewhere to go and the new one comes in from the right.
+        final int cells = dotCount + 2;
 
         final TextView nameView = new TextView(activity);
         final TextView traitView = new TextView(activity);
         final LinearLayout card = card(activity, nameView, traitView, cardW, cardH);
 
         final List<View> dots = new ArrayList<>();
-        final LinearLayout dotRow = new LinearLayout(activity);
-        dotRow.setGravity(Gravity.CENTER);
-        for (int i = 0; i < dotCount; i++) {
+        final LinearLayout dotStrip = new LinearLayout(activity);
+        dotStrip.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < cells; i++) {
             View dot = new View(activity);
             LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dotSize, dotSize);
             dotParams.leftMargin = dotGap;
             dotParams.rightMargin = dotGap;
-            dotRow.addView(dot, dotParams);
+            dotStrip.addView(dot, dotParams);
             dots.add(dot);
         }
+        // The strip is a cell wider than the window on both sides; the window shows cells 1..5.
+        final FrameLayout dotWindow = new FrameLayout(activity);
+        dotWindow.setClipChildren(true);
+        dotWindow.addView(dotStrip, new FrameLayout.LayoutParams(cells * dotSlot, dotSize));
 
         LinearLayout block = new LinearLayout(activity);
         block.setOrientation(LinearLayout.VERTICAL);
         block.setGravity(Gravity.CENTER_HORIZONTAL);
         block.addView(card, new LinearLayout.LayoutParams(cardW, cardH));
-        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, dotSize);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dotCount * dotSlot, dotSize);
         dotParams.topMargin = dp(activity, 10);
-        block.addView(dotRow, dotParams);
+        block.addView(dotWindow, dotParams);
+        dotStrip.setTranslationX(-dotSlot);
 
         final Runnable texts = () -> {
             int index = Math.max(0, Math.min(list.size() - 1, current));
             nameView.setText(index < label.size() ? label.get(index) : list.get(index));
             traitView.setText(trait(list.get(index)));
         };
+        final Runnable paintDots = () -> refreshDots(dots, list.size(), dotCount);
         panelRefresh = () -> {
             texts.run();
-            refreshDots(dots, list.size(), dotCount);
+            paintDots.run();
         };
         panelRefresh.run();
 
-        // Switching filters animates the way the camera's own strip does: the card slides the way
-        // the swipe went and fades back in, the dot row nudges the same way and re-tints when it
-        // lands. Both stay where they are - nothing follows the finger, the swipe is on the picture.
+        // Switching animates the way the camera's strip does: the card stays put and only fades
+        // round the new text; the dots scroll one slot when the five-dot window moves (the dot on
+        // the left edge leaves, a new one comes in on the right), and just re-tint when it does not.
         panelSwipe = direction -> {
             card.animate().cancel();
-            card.animate().translationX(direction * slide).alpha(0.3f).setDuration(90)
+            card.animate().alpha(0.3f).setDuration(90)
                 .withEndAction(() -> {
                     texts.run();
-                    card.setTranslationX(-direction * slide);
-                    card.animate().translationX(0f).alpha(1f).setDuration(150).start();
+                    card.animate().alpha(1f).setDuration(150).start();
                 }).start();
-            dotRow.animate().cancel();
-            dotRow.animate().translationX(-direction * slot * 0.45f).setDuration(100)
-                .withEndAction(() -> {
-                    refreshDots(dots, list.size(), dotCount);
-                    dotRow.animate().translationX(0f).setDuration(120).start();
-                }).start();
+            dotStrip.animate().cancel();
+            if (windowMoves(direction, list.size(), dotCount)) {
+                dotStrip.animate().translationX(-dotSlot - direction * (float) dotSlot).setDuration(150)
+                    .withEndAction(() -> {
+                        paintDots.run();
+                        dotStrip.setTranslationX(-dotSlot);
+                    }).start();
+            } else {
+                dotStrip.postDelayed(paintDots, 60);
+            }
         };
 
         if (seen.add("barLog")) {
@@ -757,6 +768,17 @@ public final class HighPixelFilters {
         }
         Log.i(TAG, "panel built: " + list.size() + " filters, current " + current);
         return block;
+    }
+
+    /** Whether moving one filter over scrolls the five-dot window instead of just the highlight. */
+    private static boolean windowMoves(int direction, int size, int count) {
+        return dotOffset(current, size, count) != dotOffset(current - direction, size, count);
+    }
+
+    /** First filter the dot window shows for a selection: the window keeps the selection centred. */
+    private static int dotOffset(int index, int size, int count) {
+        int safe = Math.max(0, Math.min(size - 1, index));
+        return Math.max(0, Math.min(safe - count / 2, Math.max(0, size - count)));
     }
 
     /** Moves the selection one filter over, the way a horizontal swipe on the picture does. */
@@ -814,14 +836,14 @@ public final class HighPixelFilters {
         return card;
     }
 
-    /** Five dots around the selection: the current one filled, the rest dimmed. */
+    /** The dot strip: five on screen, one spare cell each side; the selection is filled. */
     private static void refreshDots(List<View> dots, int size, int count) {
         int index = Math.max(0, Math.min(size - 1, current));
-        int offset = Math.max(0, Math.min(index - count / 2, Math.max(0, size - count)));
+        int offset = dotOffset(index, size, count);
         for (int i = 0; i < dots.size(); i++) {
-            int at = offset + i;
+            int at = offset + i - 1;
             View dot = dots.get(i);
-            dot.setVisibility(at < size ? View.VISIBLE : View.INVISIBLE);
+            dot.setVisibility(at >= 0 && at < size ? View.VISIBLE : View.INVISIBLE);
             GradientDrawable background = new GradientDrawable();
             background.setShape(GradientDrawable.OVAL);
             background.setColor(at == index ? 0xFFFFFFFF : 0x59FFFFFF);
