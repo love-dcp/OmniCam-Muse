@@ -18,7 +18,11 @@ final class HighPixelDiagnostics {
 
     private HighPixelDiagnostics() {}
 
+    /** The camera app loader; the request tag comes from the SDK's own loader. */
+    private static ClassLoader appLoader;
+
     static void install(ClassLoader classLoader) throws Throwable {
+        appLoader = classLoader;
         Class<?> processor = XposedHelpers.findClass("com.oplus.ocs.camera.consumer.ApsProcessor", classLoader);
         Class<?> tagClass = XposedHelpers.findClass("com.oplus.ocs.camera.common.util.CameraRequestTag", classLoader);
         Class<?> keys = XposedHelpers.findClass("com.oplus.ocs.camera.common.util.ParameterKeys", classLoader);
@@ -70,7 +74,7 @@ final class HighPixelDiagnostics {
                             try { text.append(' ').append(name).append('=').append(field.get(tag)); }
                             catch (Throwable ignored) { }
                         }
-                        text.append(" manager=").append(managerState(tag.getClass().getClassLoader()));
+                        text.append(" manager=").append(managerState(appLoader));
                         Log.i(TAG, text.toString());
                         StringBuilder apsText = new StringBuilder("aps:");
                         try {

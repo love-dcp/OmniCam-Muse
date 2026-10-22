@@ -82,7 +82,11 @@ public final class HighPixelFilters {
 
     private HighPixelFilters() {}
 
+    /** The camera app loader: the LUT manager is an app class, the request tag comes from the SDK's. */
+    private static volatile ClassLoader appLoader;
+
     public static void install(ClassLoader classLoader) {
+        appLoader = classLoader;
         final Symbols symbols = Symbols.get();
         try {
             XposedBridge.hookAllConstructors(symbols.cls("FilterPresenter"), new XC_MethodHook() {
@@ -451,9 +455,15 @@ public final class HighPixelFilters {
      * Inserted after the raw stage, the place the retro page puts it.
      */
     private static void addPaletteNode(Object meta, Object algorithmKey) {
-        if (meta == null) return;
+        if (meta == null) { Log.i(TAG, "palette stage: no meta"); return; }
         Object value = XposedHelpers.callMethod(meta, "get", algorithmKey);
-        if (!(value instanceof String[])) return;
+        if (!(value instanceof String[])) {
+            if (seen.add("paletteType")) {
+                Log.i(TAG, "palette stage: algorithm list is "
+                    + (value == null ? "null" : value.getClass().getName()));
+            }
+            return;
+        }
         String[] current = (String[]) value;
         for (String name : current) if (PALETTE_ALGORITHM.equals(name)) return;
         int at = 0;
@@ -464,8 +474,10 @@ public final class HighPixelFilters {
         System.arraycopy(current, 0, next, 0, at);
         next[at] = PALETTE_ALGORITHM;
         System.arraycopy(current, at, next, at + 1, current.length - at);
-        if (setAlgorithmList(meta, algorithmKey, next) && seen.add("paletteNode")) {
-            Log.i(TAG, "palette stage added to the capture request: " + java.util.Arrays.toString(next));
+        boolean set = setAlgorithmList(meta, algorithmKey, next);
+        if (seen.add("paletteNode:" + set)) {
+            Log.i(TAG, "palette stage " + (set ? "added" : "rejected") + ": "
+                + java.util.Arrays.toString(next));
         }
     }
 
@@ -473,12 +485,13 @@ public final class HighPixelFilters {
     private static boolean paletteActive() {
         try {
             Class<?> holder = XposedHelpers.findClass(
-                "com.oplus.camera.common.utils.Lut3dDataManager$b", null);
+                "com.oplus.camera.common.utils.Lut3dDataManager$b", appLoader);
             Object manager = XposedHelpers.getStaticObjectField(holder, "a");
             if (manager == null) return false;
             return XposedHelpers.getIntField(manager, "w") != 0
                 || XposedHelpers.getIntField(manager, "v") != 0;
         } catch (Throwable error) {
+            if (seen.add("paletteActive")) Log.i(TAG, "palette state unreadable: " + error);
             return false;
         }
     }
