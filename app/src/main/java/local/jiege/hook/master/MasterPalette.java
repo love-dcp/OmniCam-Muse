@@ -196,11 +196,11 @@ public final class MasterPalette {
     private static final int PREVIEW_CARD_INSET_DP = 14;
     private static final int PREVIEW_CARD_RADIUS_DP = 16;
     /**
-     * 哈苏超清's filter carousel sits inside the card where photo mode draws its own strip: that
-     * strip runs 1390..1530 with the card bottom at 1770, so the dot row's bottom edge is 80dp
-     * above the picture.
+     * 哈苏超清's filter card and dots sit inside the picture where photo mode draws its own strip:
+     * that strip's dots end 105dp above the card bottom, its card 115dp, so the block's bottom edge
+     * is 78dp above the picture.
      */
-    private static final int HIGHPIXEL_FILTER_BOTTOM_DP = 80;
+    private static final int HIGHPIXEL_FILTER_BOTTOM_DP = 78;
     /**
      * The app's own 影调/饱和度 readout, shown along the top edge while its palette is up. Inflating
      * the layout keeps the labels (string/tone, string/camera_master_saturation), font and spacing

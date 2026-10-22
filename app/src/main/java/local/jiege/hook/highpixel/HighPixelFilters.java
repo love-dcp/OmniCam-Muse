@@ -65,6 +65,13 @@ public final class HighPixelFilters {
     private static volatile long lastPickAt;
     /** Rewrites the fixed card and its dots after a swipe selected another filter. */
     private static volatile Runnable panelRefresh;
+    /** Plays the card/dot switch animation for a swipe in this direction (+1 next, -1 previous). */
+    private static volatile SwipeAnim panelSwipe;
+
+    /** The panel's switch animation, one direction per swipe. */
+    private interface SwipeAnim {
+        void run(int direction);
+    }
     private static final java.util.Set<String> seen =
         java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
@@ -665,10 +672,11 @@ public final class HighPixelFilters {
 
     /**
      * The panel photo mode shows under its palette: one fixed card with the filter's name on the
-     * black band and its label on the white one, and five dots under it. Nothing here moves - the
-     * filter changes by swiping the picture (MasterPalette hands those swipes to {@link #swipe}),
-     * and the card's text and the dots follow the selection. Null when the mode has no presenter or
-     * the 哈苏超清 effects switch is off.
+     * black band and its label on the white one, and five dots under it. The card and the dots keep
+     * their place - the filter changes by swiping the picture (MasterPalette hands those swipes to
+     * {@link #swipe}), and the card's text, the dots sliding and the fade are the only motion, the
+     * same way the camera's own strip behaves. Sized to the camera's card: 42x26dp, name 12sp,
+     * label 9sp. Null when the mode has no presenter or the 哈苏超清 effects switch is off.
      */
     public static View panel(Activity activity, Runnable onPicked) {
         if (presenter == null) ensurePresenter();
@@ -676,18 +684,20 @@ public final class HighPixelFilters {
         if (!available() || !Settings.get(ModuleSettings.HIGH_PIXEL_EFFECTS)) return null;
         final List<String> list = types;
         final List<String> label = labels(activity, list);
-        final int cardW = dp(activity, 104);
-        final int cardH = dp(activity, 38);
-        final int dotSize = dp(activity, 5);
-        final int dotGap = dp(activity, 5);
+        final int cardW = dp(activity, 46);
+        final int cardH = dp(activity, 28);
+        final int dotSize = dp(activity, 4);
+        final int dotGap = dp(activity, 4);
         final int dotCount = 5;
+        final int slide = dp(activity, 10);
+        final float slot = dotSize + 2f * dotGap;
 
         final TextView nameView = new TextView(activity);
         final TextView traitView = new TextView(activity);
-        LinearLayout card = card(activity, nameView, traitView, cardW, cardH);
+        final LinearLayout card = card(activity, nameView, traitView, cardW, cardH);
 
         final List<View> dots = new ArrayList<>();
-        LinearLayout dotRow = new LinearLayout(activity);
+        final LinearLayout dotRow = new LinearLayout(activity);
         dotRow.setGravity(Gravity.CENTER);
         for (int i = 0; i < dotCount; i++) {
             View dot = new View(activity);
@@ -707,23 +717,35 @@ public final class HighPixelFilters {
         dotParams.topMargin = dp(activity, 10);
         block.addView(dotRow, dotParams);
 
-        panelRefresh = () -> {
+        final Runnable texts = () -> {
             int index = Math.max(0, Math.min(list.size() - 1, current));
             nameView.setText(index < label.size() ? label.get(index) : list.get(index));
             traitView.setText(trait(list.get(index)));
-            // Five dots around the selection: the row keeps its width however long the list is.
-            int offset = Math.max(0, Math.min(index - dotCount / 2, Math.max(0, list.size() - dotCount)));
-            for (int i = 0; i < dots.size(); i++) {
-                int at = offset + i;
-                View dot = dots.get(i);
-                dot.setVisibility(at < list.size() ? View.VISIBLE : View.INVISIBLE);
-                GradientDrawable background = new GradientDrawable();
-                background.setShape(GradientDrawable.OVAL);
-                background.setColor(at == index ? 0xFFFFFFFF : 0x59FFFFFF);
-                dot.setBackground(background);
-            }
+        };
+        panelRefresh = () -> {
+            texts.run();
+            refreshDots(dots, list.size(), dotCount);
         };
         panelRefresh.run();
+
+        // Switching filters animates the way the camera's own strip does: the card slides the way
+        // the swipe went and fades back in, the dot row nudges the same way and re-tints when it
+        // lands. Both stay where they are - nothing follows the finger, the swipe is on the picture.
+        panelSwipe = direction -> {
+            card.animate().cancel();
+            card.animate().translationX(direction * slide).alpha(0.3f).setDuration(90)
+                .withEndAction(() -> {
+                    texts.run();
+                    card.setTranslationX(-direction * slide);
+                    card.animate().translationX(0f).alpha(1f).setDuration(150).start();
+                }).start();
+            dotRow.animate().cancel();
+            dotRow.animate().translationX(-direction * slot * 0.45f).setDuration(100)
+                .withEndAction(() -> {
+                    refreshDots(dots, list.size(), dotCount);
+                    dotRow.animate().translationX(0f).setDuration(120).start();
+                }).start();
+        };
 
         if (seen.add("barLog")) {
             StringBuilder pairs = new StringBuilder();
@@ -743,14 +765,19 @@ public final class HighPixelFilters {
         int index = current + direction;
         if (index < 0 || index >= types.size()) return false;
         if (!select(types.get(index))) return false;
-        Runnable refresh = panelRefresh;
-        if (refresh != null) refresh.run();
+        SwipeAnim animate = panelSwipe;
+        if (animate != null) {
+            animate.run(direction);
+        } else {
+            Runnable refresh = panelRefresh;
+            if (refresh != null) refresh.run();
+        }
         return true;
     }
 
     /** Height of {@link #panel}: the card, the gap and the dot row. */
     public static int panelHeight(Activity activity) {
-        return dp(activity, 38) + dp(activity, 10) + dp(activity, 5);
+        return dp(activity, 28) + dp(activity, 10) + dp(activity, 4);
     }
 
     /** One filter's card: the name on the black band, the label on the white one. */
@@ -760,16 +787,18 @@ public final class HighPixelFilters {
         card.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable background = new GradientDrawable();
         background.setColor(0xFF0D0D0D);
-        background.setCornerRadius(dp(activity, 3));
+        background.setCornerRadius(dp(activity, 5));
         card.setBackground(background);
+        // Rounds the white band's bottom corners with the card's, as the camera's card does.
+        card.setClipToOutline(true);
 
         top.setTextColor(0xFFFFFFFF);
-        top.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+        top.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
         top.setGravity(Gravity.CENTER);
         top.setSingleLine(true);
         top.setEllipsize(android.text.TextUtils.TruncateAt.END);
         top.setBackgroundColor(0xFF0D0D0D);
-        top.setPadding(dp(activity, 6), 0, dp(activity, 6), 0);
+        top.setPadding(dp(activity, 2), 0, dp(activity, 2), 0);
 
         bottom.setTextColor(0xFF141414);
         bottom.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 8);
@@ -777,12 +806,27 @@ public final class HighPixelFilters {
         bottom.setSingleLine(true);
         bottom.setEllipsize(android.text.TextUtils.TruncateAt.END);
         bottom.setBackgroundColor(0xFFF7F7F7);
-        bottom.setPadding(dp(activity, 6), 0, dp(activity, 6), 0);
+        bottom.setPadding(dp(activity, 2), 0, dp(activity, 2), 0);
 
-        int topHeight = Math.round(height * 0.58f);
+        int topHeight = Math.round(height * 0.60f);
         card.addView(top, new LinearLayout.LayoutParams(width, topHeight));
         card.addView(bottom, new LinearLayout.LayoutParams(width, height - topHeight));
         return card;
+    }
+
+    /** Five dots around the selection: the current one filled, the rest dimmed. */
+    private static void refreshDots(List<View> dots, int size, int count) {
+        int index = Math.max(0, Math.min(size - 1, current));
+        int offset = Math.max(0, Math.min(index - count / 2, Math.max(0, size - count)));
+        for (int i = 0; i < dots.size(); i++) {
+            int at = offset + i;
+            View dot = dots.get(i);
+            dot.setVisibility(at < size ? View.VISIBLE : View.INVISIBLE);
+            GradientDrawable background = new GradientDrawable();
+            background.setShape(GradientDrawable.OVAL);
+            background.setColor(at == index ? 0xFFFFFFFF : 0x59FFFFFF);
+            dot.setBackground(background);
+        }
     }
 
     /**
