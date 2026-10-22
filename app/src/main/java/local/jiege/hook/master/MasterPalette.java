@@ -196,11 +196,11 @@ public final class MasterPalette {
     private static final int PREVIEW_CARD_INSET_DP = 14;
     private static final int PREVIEW_CARD_RADIUS_DP = 16;
     /**
-     * 哈苏超清's filter row sits inside the card where photo mode draws its own filter carousel:
-     * that carousel runs 1390..1500 with the card bottom at 1770, so the row's bottom edge is 90dp
+     * 哈苏超清's filter carousel sits inside the card where photo mode draws its own strip: that
+     * strip runs 1390..1530 with the card bottom at 1770, so the dot row's bottom edge is 80dp
      * above the picture.
      */
-    private static final int HIGHPIXEL_FILTER_BOTTOM_DP = 90;
+    private static final int HIGHPIXEL_FILTER_BOTTOM_DP = 80;
     /**
      * The app's own 影调/饱和度 readout, shown along the top edge while its palette is up. Inflating
      * the layout keeps the labels (string/tone, string/camera_master_saturation), font and spacing
@@ -2259,9 +2259,9 @@ public final class MasterPalette {
                 View filterBar = null;
                 int filterBarH = 0;
                 if (highPixel) {
-                    filterBar = HighPixelFilters.bar(activity, null);
+                    filterBar = HighPixelFilters.carousel(activity, null);
                     if (filterBar != null) {
-                        filterBarH = dp(34);
+                        filterBarH = HighPixelFilters.carouselHeight(activity);
                     } else {
                         Log.i(TAG, "no filter row for this page: " + HighPixelFilters.describe());
                     }

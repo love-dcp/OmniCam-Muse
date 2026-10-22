@@ -172,11 +172,11 @@ GR 模式向相机的播放器请求自己的音效（14 快门，15/16 长曝�
 
 ### 界面
 
-滤镜行由 `HighPixelFilters.bar()` 画：每个滤镜一个 chip，名字取资源串（`FilterGroup.sFilterGroup.getNameIdList`，跟随系统语言）。`MasterPalette.open()` 在 `highPixel` 下把“滤镜行 + 圆盘”包进一个纵向容器（`shelf`），停在 min(`frame_layout` 底边, 变焦行顶边) − 盘高 − 16dp。入口仍是右侧那个 `camera_menu_right_enter_button`，`HighPixelEffects` 负责让它显示（`persist.omnicam.aura.hpentry=1`）并接管点击 → `MasterPalette.toggleFromEntry()`。
+滤镜由 `HighPixelFilters.carousel()` 画成照片模式那样的轮播：每屏一个卡片，黑带上滤镜名（资源串，`FilterGroup.sFilterGroup.getNameIdList`，跟随系统语言），白带上是该滤镜的类目标签（模块目录里的 `FilterEntry.label`，原厂预置滤镜显示「原生质感」），卡片下面一排小圆点跟随页码。`MasterPalette.open()` 在 `highPixel` 下走 lifted 分支——与照片模式同一套：控制栏上抬 95dp、预览遮成圆角卡片（`PreviewCardMask`）、顶部读出、圆盘停在卡片下方黑区；卡片与圆点画在卡片里，离画面底边 80dp（照片模式放自带滤镜轮播的位置），scrim 抬到它上方，否则滑动落到 scrim 上。滑动按页吸附，一次只走一个滤镜（`settle()` 里对页码按 ±1 截断，快划也不跳档），程序化吸附期间用 `snapping` 标志挡住自己触发的滚动回调，避免吸到一半又退回原页。入口仍是右侧那个 `camera_menu_right_enter_button`，`HighPixelEffects` 负责让它显示（`persist.omnicam.aura.hpentry=1`）并接管点击 → `MasterPalette.toggleFromEntry()`。
 
 三个坑：入口按钮一次点击会上报两次，`toggleFromEntry()` 需要 600ms 去抖；`MenuRightButton` 跨模式复用同一个实例，替换它的监听会把照片模式的效果栏一起弄坏，只在没有监听时补装、且不要在 `onTouchEvent` 里手动 `performClick()`；相机空闲几秒后会合成一次点击去隐藏控件，会落到 `onForeignClick` 上把面板关掉，那里要先判 `view.isShown()`。
 
-还有一处：`MasterPalette.open()` 的页面类型由 `stacked = retro || presenter == null` 决定，而调色盘的 pro presenter 是相机第一次打开调色盘时才建的——同一个按钮“第一次是好页、之后都变成没有滤镜行的 master 页”。所以 `highPixel` 必须先把这个 presenter 置空（`if (!retro && isHighPixelMode(currentMode())) presenter = null;`），恒定走 shelf 页、经 LUT 管理器写影调与饱和度，页面才稳定。
+还有一处：`MasterPalette.open()` 的页面类型由 `stacked` 决定，而调色盘的 pro presenter 是相机第一次打开调色盘时才建的——同一个按钮“第一次是好页、之后都变成没有滤镜行的 master 页”。所以 `highPixel` 必须先把这个 presenter 置空（`if (highPixel) presenter = null;`），恒定走 shelf 页、经 LUT 管理器写影调与饱和度，页面才稳定。版式与页面类型是两回事：`stacked = retro || (presenter == null && !highPixel)`——哈苏超清即使没有 presenter 也用与照片模式相同的 lifted 版式，只有 POP 和视频页继续 docked（它们的预览卡片下方没有位置，抬控制栏会把快门压到滤镜条上）。
 
 滤镜序号有两套：相机 bean 的下标与 `FilterPresenter.types()` 不是同一套（差一位）。`read()` 只在用户还没点选过（`current < 0`）时才用相机的当前索引，否则界面高亮与实际生效的滤镜会错开。
 

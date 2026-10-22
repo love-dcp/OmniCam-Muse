@@ -662,41 +662,109 @@ public final class HighPixelFilters {
     }
 
     /**
-     * The filter row: one chip per filter the mode has, the current one highlighted. Null when the
-     * mode has no presenter, so nothing is drawn over a page that could not apply a pick.
+     * The filter carousel: one card per filter, picked by swiping sideways the way photo mode's
+     * palette strip works. The card carries the name on its black band and the filter's label on
+     * the white one, and a dot row under the card follows the page. Null when the mode has no
+     * presenter or the 哈苏超清 effects switch is off, so nothing is drawn over a page that could
+     * not apply a pick.
      */
-    public static View bar(Activity activity, Runnable onPicked) {
+    public static View carousel(Activity activity, Runnable onPicked) {
         if (presenter == null) ensurePresenter();
         if (presenter != null) read(Symbols.get());
         if (!available() || !Settings.get(ModuleSettings.HIGH_PIXEL_EFFECTS)) return null;
-        List<String> list = types;
+        final List<String> list = types;
         List<String> label = labels(activity, list);
-        LinearLayout row = new LinearLayout(activity);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(dp(activity, 4), 0, dp(activity, 4), 0);
-        List<TextView> chips = new ArrayList<>();
-        for (int i = 0; i < list.size(); i++) {
-            final String type = list.get(i);
-            TextView chip = chip(activity, i < label.size() ? label.get(i) : type);
-            chip.setOnClickListener(v -> {
-                if (select(type)) {
-                    for (int c = 0; c < chips.size(); c++) tint(chips.get(c), c == current);
-                    if (onPicked != null) onPicked.run();
-                }
-            });
-            tint(chip, i == current);
-            chips.add(chip);
-            row.addView(chip);
-        }
-        HorizontalScrollView scroll = new HorizontalScrollView(activity);
+        final int cardW = dp(activity, 104);
+        final int cardH = dp(activity, 38);
+        final int dotSize = dp(activity, 5);
+        final int dotGap = dp(activity, 4);
+
+        final HorizontalScrollView scroll = new HorizontalScrollView(activity);
         scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setClipToPadding(false);
-        scroll.addView(row, new ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        scroll.post(() -> {
-            View chosen = current >= 0 && current < chips.size() ? chips.get(current) : null;
-            if (chosen != null) scroll.smoothScrollTo(Math.max(0, chosen.getLeft() - dp(activity, 24)), 0);
+        final LinearLayout pages = new LinearLayout(activity);
+        pages.setOrientation(LinearLayout.HORIZONTAL);
+        final List<LinearLayout> slabs = new ArrayList<>();
+        for (int i = 0; i < list.size(); i++) {
+            LinearLayout slab = new LinearLayout(activity);
+            slab.setGravity(Gravity.CENTER);
+            slab.setClipChildren(false);
+            slab.addView(card(activity, i < label.size() ? label.get(i) : list.get(i),
+                trait(list.get(i)), cardW, cardH));
+            pages.addView(slab, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, cardH));
+            slabs.add(slab);
+        }
+        scroll.addView(pages, new ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, cardH));
+
+        final List<View> dots = new ArrayList<>();
+        LinearLayout dotRow = new LinearLayout(activity);
+        dotRow.setGravity(Gravity.CENTER);
+        for (int i = 0; i < list.size(); i++) {
+            View dot = new View(activity);
+            LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dotSize, dotSize);
+            dotParams.rightMargin = dotGap;
+            dotRow.addView(dot, dotParams);
+            dots.add(dot);
+        }
+        // Dots are rebuilt as one row; the spacing comes from the margins above.
+        tintDots(dots, Math.max(0, current));
+
+        LinearLayout block = new LinearLayout(activity);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.addView(scroll, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, cardH));
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dotSize);
+        dotParams.topMargin = dp(activity, 4);
+        block.addView(dotRow, dotParams);
+
+        // Each page is one screen wide, so exactly one card is on screen and a swipe moves one
+        // filter, like the camera's own strip.
+        scroll.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            int width = right - left;
+            if (width <= 0) return;
+            for (LinearLayout slab : slabs) {
+                LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) slab.getLayoutParams();
+                if (params.width != width) {
+                    params.width = width;
+                    slab.setLayoutParams(params);
+                }
+            }
+            if (scroll.getScrollX() == 0 && current > 0 && current < slabs.size()) {
+                scroll.scrollTo(current * width, 0);
+            }
         });
+
+        final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+        // Set while our own snap is animating: that animation fires scroll changes too, and without
+        // this the debounce re-enters settle() mid-way and can pick the page it started from.
+        final boolean[] snapping = {false};
+        final Runnable settle = () -> {
+            int width = scroll.getWidth();
+            if (width <= 0 || snapping[0]) return;
+            int page = Math.round(scroll.getScrollX() / (float) width);
+            page = Math.max(0, Math.min(list.size() - 1, page));
+            // One filter per swipe, like the camera's own strip: a fast fling can carry the scroll
+            // several pages, and landing three filters away from a short drag reads as a jump.
+            if (current >= 0) page = Math.max(current - 1, Math.min(current + 1, page));
+            if (scroll.getScrollX() != page * width) {
+                snapping[0] = true;
+                scroll.smoothScrollTo(page * width, 0);
+                handler.postDelayed(() -> snapping[0] = false, 360);
+            }
+            if (page != current && select(list.get(page)) && onPicked != null) onPicked.run();
+            tintDots(dots, page);
+            if (seen.add("carousel:" + page)) Log.i(TAG, "carousel page " + page + " / " + list.size());
+        };
+        scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
+            if (snapping[0]) return;
+            handler.removeCallbacks(settle);
+            handler.postDelayed(settle, 140);
+        });
+
         if (seen.add("barLog")) {
             StringBuilder pairs = new StringBuilder();
             for (int i = 0; i < list.size() && i < 12; i++) {
@@ -705,38 +773,72 @@ public final class HighPixelFilters {
             }
             Log.i(TAG, "filters: " + pairs);
         }
-        Log.i(TAG, "bar built: " + list.size() + " filters, current " + current);
-        return scroll;
+        Log.i(TAG, "carousel built: " + list.size() + " filters, current " + current);
+        return block;
     }
 
-    private static TextView chip(Activity activity, String text) {
-        TextView chip = new TextView(activity);
-        chip.setText(text);
-        chip.setSingleLine(true);
-        chip.setGravity(Gravity.CENTER);
-        chip.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
-        chip.setPadding(dp(activity, 10), dp(activity, 5), dp(activity, 10), dp(activity, 5));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(0xB3000000);
-        background.setCornerRadius(dp(activity, 13));
-        background.setStroke(Math.max(1, dp(activity, 1)), 0x44FFFFFF);
-        chip.setBackground(background);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        params.rightMargin = dp(activity, 6);
-        params.gravity = Gravity.CENTER_VERTICAL;
-        chip.setLayoutParams(params);
-        return chip;
+    /** Height of {@link #carousel}: the card plus the gap and the dot row. */
+    public static int carouselHeight(Activity activity) {
+        return dp(activity, 38) + dp(activity, 4) + dp(activity, 5);
     }
 
-    private static void tint(TextView chip, boolean chosen) {
-        chip.setTextColor(chosen ? 0xFFFFC24B : 0xFFEDEDED);
+    /** One filter's card: the name on the black band, the label on the white one. */
+    private static View card(Activity activity, String name, String trait, int width, int height) {
+        LinearLayout card = new LinearLayout(activity);
+        card.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable background = new GradientDrawable();
-        background.setColor(chosen ? 0x99000000 : 0xB3000000);
-        background.setCornerRadius(chip.getResources().getDisplayMetrics().density * 13);
-        background.setStroke(Math.max(1, Math.round(chip.getResources().getDisplayMetrics().density)),
-            chosen ? 0xFFFFC24B : 0x44FFFFFF);
-        chip.setBackground(background);
+        background.setColor(0xFF0D0D0D);
+        background.setCornerRadius(dp(activity, 3));
+        card.setBackground(background);
+
+        TextView top = new TextView(activity);
+        top.setText(name);
+        top.setTextColor(0xFFFFFFFF);
+        top.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
+        top.setGravity(Gravity.CENTER);
+        top.setSingleLine(true);
+        top.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        top.setBackgroundColor(0xFF0D0D0D);
+        top.setPadding(dp(activity, 6), 0, dp(activity, 6), 0);
+
+        TextView bottom = new TextView(activity);
+        bottom.setText(trait);
+        bottom.setTextColor(0xFF141414);
+        bottom.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 8);
+        bottom.setGravity(Gravity.CENTER);
+        bottom.setSingleLine(true);
+        bottom.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        bottom.setBackgroundColor(0xFFF7F7F7);
+        bottom.setPadding(dp(activity, 6), 0, dp(activity, 6), 0);
+
+        int topHeight = Math.round(height * 0.58f);
+        card.addView(top, new LinearLayout.LayoutParams(width, topHeight));
+        card.addView(bottom, new LinearLayout.LayoutParams(width, height - topHeight));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, height);
+        params.gravity = Gravity.CENTER;
+        card.setLayoutParams(params);
+        return card;
+    }
+
+    /**
+     * The white band's text: the category label for a filter this module adds (e.g. 胶片模拟), and
+     * the camera's own preset label otherwise. The stock filters carry that label in the camera's
+     * card, which is not readable from here; 原生质感 is what it prints on this build.
+     */
+    private static String trait(String type) {
+        FilterEntry entry = FilterCatalog.get(FilterScope.NORMAL).find(type);
+        if (entry != null && entry.label != null && !entry.label.isEmpty()) return entry.label;
+        return "原生质感";
+    }
+
+    /** One dot per filter; the selected one is filled. */
+    private static void tintDots(List<View> dots, int selected) {
+        for (int i = 0; i < dots.size(); i++) {
+            GradientDrawable dot = new GradientDrawable();
+            dot.setShape(GradientDrawable.OVAL);
+            dot.setColor(i == selected ? 0xFFFFFFFF : 0x59FFFFFF);
+            dots.get(i).setBackground(dot);
+        }
     }
 
     private static int dp(Activity activity, int value) {
