@@ -222,3 +222,16 @@ chrome 这一层要压过 scrim：两者都是 decor 的直接子 View，只按�
 X8U 锁存带来两个时序缺陷，均已修：文件原本只在相机活着时随 capture request 同步，而设置页改开关时相机在后台、随后被 force-stop，旧编辑副本留在磁盘上——① 关掉开关后相机重启仍会吃到旧副本（关不掉）；② 打开开关后首次启动读到的是上一轮的旧内容（开得慢）。修复 = `installCamera` 时先 `sync()` 一次（赶在算法打开 json 之前把文件写/删到位），native 侧 `naturalRemapPath`/`wantedEps` 再加一道主开关门控（读 `persist.omnicam.aura.natural` 的 bit1，属性为空时退回文件判定，X9U 行为不变）——即使有残留文件，主开关关闭也只供应原厂。
 
 X8U（PKJ110）上的现实边界：tuning json 存在且 `EnhanceNetParamsSet` 七组 42 个混合权重键全齐（关 AI 细节完整生效），但 `TMCParamsSet` 没有 lceStrength/usmStrength 键（关 LCE 空转，UI 在该机型隐藏这两行），库里也没有 `TmcDownTransModule` 符号与 1e-7 指令对（柔化空转）——X8U 的引导滤波是 `imgproc::FastGuidedFilterNeonO1Reflect101<float>::filter` 等 6 个导出符号、eps 由调用方作为参数传入，将来做柔化要走导出函数参数 hook，而不是改立即数。
+
+## POP 鱼眼（取景有、成片无）
+
+相机自带整套 retro 鱼眼：功能键 `FUNC_KEY_ID_RETRO_FISH_EYE_LENS`、预览纹理效果 `FishEyeTexturePreview`、Meishe 的 `CNvFishEyeEdgeBlur`，以及 APS 侧的 `APSFisheyeNode`。X8U 只是缺平台能力键，`hook/pop/PopFisheyeSupport.java` 在 `CameraConfig` 上把 `com.oplus.feature.fish.eye.support`、`com.oplus.fisheye.new.style.support`、`com.oplus.camera.retro.fisheye.enable` 等答成真，POP 的鱼眼镜头入口就出现了，取景画面也是标准圆形鱼眼（预览侧由模块的 soft-light 钩子把 `"Fish Eye Enable"` 设进 Meishe 渲染器）。开关 `persist.omnicam.aura.fisheye`。
+
+成片目前仍是普通透视，已知边界（都实测过）：
+
+- 预览参数与成片是两条路。预览走 Meishe/IPU 纹理链（`retro_ccd_fisheye_open`、`MsSetEffectBooleanValue("Fish Eye Enable")`），成片走 APS 流水线；把这些 Java 可见的开关（元数据键 `KEY_RETRO_FILTER_FISH_EYE_ENALE`、请求 tag 的 `mRetroFilterFishEyeEnable`/`mbFishEyeEnable`、Meishe 渲染器 API、IPU 滤镜参数）全部置真，成片都不变。
+- 能真正扭曲成片的是 `APSFisheyeNode`，它的 `getEnable` 只读参数 `fisheye_enable`（`AlgoPreviewProcessData+0x370`），而这个节点不在 retroCamera 的拍照管线里；把它加进 `oplus_camera_algo_switch_config`（capture 段的 retroCamera entity）会让预览直接黑屏——节点在共享 APS 引擎里初始化，`doInit` 需要只有相机自己的 `FISH_EYE` capMode 才会提供的参数（`input pParams is NULL`）。
+- X9U 的 `libAlgoInterface.so` 里是同一份代码（同样 5 处 `"Fish Eye Enable"` 调用点、同一个 `APSFisheyeNode`、同一个 `fisheye_enable` 参数），配置里同样没开，所以没有可照搬的机型差异。
+- 后处理路线试过：模块在 `onJpegReceived` 后轮询 `/sdcard/DCIM/Camera`，解码后把画面压进圆、圆外填黑再回写，效果正确，但相机会把同一张 JPEG 分多次写完，早写的副本会被最后一次覆盖——表现为「刚拍完缩略图是鱼眼、点开变回普通照片」。文件尾是补零而不是 EOI 标记，也据此排除了「写完」判定。`PopFisheyeSave` 因此从安装链移除，入口保留。
+
+下一步可选：命中相机真正写盘完成的位置（MediaStore 插入之后）再做重写，或在 APS 管线构建处只给拍照插入该节点并补齐它的初始化参数。
