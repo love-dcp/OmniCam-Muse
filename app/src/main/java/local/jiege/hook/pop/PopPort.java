@@ -49,4 +49,17 @@ public final class PopPort {
             Log.e(TAG, "POP capture probe unavailable", error);
         }
     }
+
+    /**
+     * The 10-bit delivery probe, installed straight from ModuleEntry: it has to land before the
+     * rest of the POP group, and its own log lines have to survive whatever swallowed the
+     * installer lines in this process.
+     */
+    public static void installHeifProbe(ClassLoader classLoader) {
+        try {
+            PopHeifProbe.install(classLoader);
+        } catch (Throwable error) {
+            Log.e("PopHeif", "probe unavailable", error);
+        }
+    }
 }

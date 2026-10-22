@@ -116,6 +116,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (CAMERA.equals(param.processName)) MainThreadWatchdog.install();
             Log.i("Skip", "hook groups skipped: " + Skip.raw());
             Symbols.install("camera", classLoader, param.appInfo.sourceDir, param.appInfo.dataDir);
+            // POP delivers a 10-bit (P010) buffer that this device has no HEIF encoder for; it comes
+            // out black or false-coloured. The probe reports the ApsResult shape it arrives in (see
+            // PopHeifProbe), and goes first so its lines are never lost behind the rest of the group.
+            if (!Skip.off("pop")) PopPort.installHeifProbe(classLoader);
             if (!Skip.off("pop")) PopPort.installCamera(classLoader, CAMERA.equals(param.processName));
             if (!Skip.off("filter")) FilterGroupInjector.installCamera(classLoader);
             if (!Skip.off("filter")) X10FilterPort.installCamera(classLoader);

@@ -171,29 +171,39 @@ else
     fi
     log "PKJ110: basic-tone is stock $(md5sum /odm/lib64/libBasicTonePhoto.so 2>/dev/null | cut -d' ' -f1) (expect 8651fa24 = sha256 a93f40de)"
 
-    # POP capture RAW fix (door #4, docs/MODULE.md §32/34): X8U stock libAlgoInterface.so has the
-    # BasicTone "all-zero skip" still armed. basicToneProcessV1 ORs the four master sliders
-    # (w20..w23); when they are all zero it cbz-jumps to a face-rectify fallback that skips the
-    # P010->8-bit conversion, so hybridraw's P010 goes straight to the encoder and the main JPEG
-    # comes out as raw pixels (gallery thumbnail shows, image is blank). X9U NOP-ed this at
-    # 0x2040688; X8U's corresponding cbz sits at 0x1e7ae00 and is NOP-ed in the payload copy below.
-    # This file is intentionally NOT in system/ (metamount would overlay it unconditionally on both
-    # devices). /odm is erofs here and stays read-only at runtime: a plain cp cannot create the file,
-    # and unlike libBasicTonePhoto.so there is no writable mountify copy behind it (the mount.log of
-    # every boot said "cp: can't create ... Read-only file system" / NOP FAIL). Bind the patched copy
-    # over the stock path instead, the same way the PMA110 branch installs its libraries.
+    # POP capture RAW fix (door #4, docs/MODULE.md §32/34): this used to bind the patched
+    # libAlgoInterface.so on every boot. A/B on PKJ110 (2026-10-21) says the patch itself is what
+    # breaks POP capture, so it is now opt-in only.
+    #
+    # Background for the patch: X8U stock libAlgoInterface.so keeps the BasicTone "all-zero skip"
+    # armed -- basicToneProcessV1 ORs the four master sliders and cbz-jumps past the P010->8-bit
+    # conversion when they are all zero, so POP's P010 reaches the encoder unconverted. X9U NOP-ed
+    # that cbz at 0x2040688, X8U's copy at 0x1e7ae00 is NOP-ed in payload_pkj110.
+    #
+    # What the A/B showed: with the patched library bound, every non-inst POP stock -- CCD, 0.6x,
+    # the plain stocks -- came back black or magenta-cast (Y mean 0.8 / p50 0 on 0.6x, 117 on CCD
+    # 1x), while inst stayed fine because it is re-encoded from an 8-bit Bitmap through the PLD
+    # watermark path. logcat said "libHeifEncoderWrapper.so dlopen failed" plus
+    # "SnapAlloc: No map for format 0x36": those two tbz do not decide whether BasicTone is
+    # appended, they select the HDR pipeline variant, so the SDR shot was handed back as P010
+    # (YCBCR_P010) with no encoder left to finish it -- and X8U has no libHeifEncoderWrapper.so
+    # anywhere. Unbinding restored every stock immediately, with no other change.
+    #
+    # The detach below runs unconditionally, before the opt-in test: a soft reboot restarts
+    # userspace but NOT the kernel, so a bind made by an older build survives across reboots and
+    # would keep the black frames coming even after the module is updated.
     BTFIX_SRC="$MODDIR/payload_pkj110/lib64/libAlgoInterface.so"
-    if [ -f "$BTFIX_SRC" ]; then
-        if [ "$(md5sum "$BTFIX_SRC" | cut -d' ' -f1)" != "$(md5sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -d' ' -f1)" ]; then
-            umount /odm/lib64/libAlgoInterface.so 2>>"$LOG" \
-                && log "PKJ110: detached stale libAlgoInterface.so bind"
-            bind_library "$BTFIX_SRC" libAlgoInterface.so
-            log "PKJ110: basictone-skip NOP now $(md5sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -d' ' -f1)"
-        else
-            log "PKJ110: basictone-skip NOP already applied"
-        fi
+    if grep -q " /odm/lib64/libAlgoInterface.so " /proc/self/mounts 2>/dev/null; then
+        umount /odm/lib64/libAlgoInterface.so 2>>"$LOG" \
+            && log "PKJ110: detached libAlgoInterface.so bind"
+    fi
+    # Property name is kept short on purpose: PROP_NAME_MAX is 32 including the NUL, so any name
+    # longer than 31 characters can never be set and the opt-in would look broken for no reason.
+    if [ "$(getprop_safe persist.omnicam.sdrbt)" = "1" ] && [ -f "$BTFIX_SRC" ]; then
+        bind_library "$BTFIX_SRC" libAlgoInterface.so
+        log "PKJ110: algo-interface now $(md5sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -d' ' -f1) (sdrbt experiment ON, POP capture will be broken)"
     else
-        log "PKJ110: basictone-skip NOP source missing"
+        log "PKJ110: algo-interface left stock $(sha256sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -c1-8) (sdrbt opt-in off)"
     fi
 fi
 
