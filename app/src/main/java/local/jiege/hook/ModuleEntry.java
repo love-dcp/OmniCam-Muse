@@ -3,6 +3,7 @@ package local.jiege.hook;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import local.jiege.hook.capture.CaptureDumps;
 import local.jiege.hook.common.CameraLogMirror;
 import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Skip;
@@ -10,6 +11,7 @@ import local.jiege.hook.common.Symbols;
 import local.jiege.hook.diag.EntryButtonProbe;
 import local.jiege.hook.diag.GrStylePanelProbe;
 import local.jiege.hook.diag.HighPixelProbe;
+import local.jiege.hook.filterpanel.LegacyFilterPanel;
 import local.jiege.hook.filters.FilterGroupInjector;
 import local.jiege.hook.gr.GrEffectValues;
 import local.jiege.hook.gr.GrPort;
@@ -113,6 +115,8 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             // Every install below can be taken out at runtime through persist.omnicam.aura.skip
             // (see Skip) so a hang can be bisected by group without a rebuild.
             if (!Skip.off("native")) System.loadLibrary("jiege_native");
+            // Upstream 4.4.4: RAW / ccmVec / HDRTransform / capture dumps, each with its own switch.
+            if (!Skip.off("dump")) CaptureDumps.installCamera();
             if (CAMERA.equals(param.processName)) MainThreadWatchdog.install();
             Log.i("Skip", "hook groups skipped: " + Skip.raw());
             Symbols.install("camera", classLoader, param.appInfo.sourceDir, param.appInfo.dataDir);
@@ -122,6 +126,7 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("pop")) PopPort.installHeifProbe(classLoader);
             if (!Skip.off("pop")) PopPort.installCamera(classLoader, CAMERA.equals(param.processName));
             if (!Skip.off("filter")) FilterGroupInjector.installCamera(classLoader);
+            if (!Skip.off("filter")) LegacyFilterPanel.installCamera(classLoader);
             if (!Skip.off("filter")) X10FilterPort.installCamera(classLoader);
             // X8U port: the palette feature switch is answered in Java (the OCS config container
             // cannot be synthesised on PKJ110) -- see x10/PaletteFeatureSwitch.

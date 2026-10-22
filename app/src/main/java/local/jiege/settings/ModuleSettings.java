@@ -74,6 +74,11 @@ public final class ModuleSettings {
     public static final String NATURAL_NO_LCE = "natural_no_lce";
     public static final String NATURAL_SOFTEN = "natural_soften";
 
+    /** Independent capture dumps, read when the camera process starts. */
+    public static final String DUMP_RAW = "dump_raw";
+    public static final String DUMP_CCM = "dump_ccm_vec";
+    public static final String DUMP_HDRT = "dump_hdrtransform";
+
     /** Normal-mode 25MP: relaxed lux / ISO / thermal gates and decision tree (applies after the camera restarts). */
     public static final String UNLOCK_25MP = "unlock_25mp";
 
@@ -93,6 +98,8 @@ public final class ModuleSettings {
 
     /** Experimental: share of the simulated filter in the replacement, in percent (applies immediately). */
     public static final String SOFT_LIGHT_STRENGTH = "soft_light_strength";
+    /** Master captures with a replaced soft light skip HDRTransform's local contrast fusion. */
+    public static final String SOFT_LIGHT_NO_LOCAL_CONTRAST = "soft_light_no_local_contrast";
 
     /** Experimental: 和光 capture renders Portra 400's emulsion scatter, halation and DIR edges (实验/Portra光学) instead of the stock highlight blend. */
     public static final String MASTER_PORTRA_PHYSICAL = "master_portra_physical";
@@ -119,6 +126,12 @@ public final class ModuleSettings {
     public static final String KEY_LAUNCH_MODE_ON = "key_launch_mode_on";
     public static final String KEY_LAUNCH_MODE = "key_launch_mode";
 
+    /** How the quick filter strip opens from the master card / palette entry: FILTER_PANEL_* (integer). */
+    public static final String FILTER_PANEL_TRIGGER = "filter_panel_trigger";
+    public static final int FILTER_PANEL_NONE = 0;
+    public static final int FILTER_PANEL_SWIPE_UP = 1;
+    public static final int FILTER_PANEL_LONG_PRESS = 2;
+
     private ModuleSettings() {}
 
     public static String defaultString(String key) {
@@ -131,6 +144,7 @@ public final class ModuleSettings {
     public static int defaultInt(String key) {
         if (SHUTTER_VOLUME.equals(key)) return 60;
         if (SOFT_LIGHT_STRENGTH.equals(key)) return 100;
+        if (FILTER_PANEL_TRIGGER.equals(key)) return FILTER_PANEL_SWIPE_UP;
         if (NATURAL_SOFTEN.equals(key)) return 0;
         if (MASTER_FILM_DENSITY_C.equals(key) || MASTER_FILM_DENSITY_M.equals(key) || MASTER_FILM_DENSITY_Y.equals(key)) return 100;
         if (MASTER_LOOK_PRINT.equals(key) || MASTER_HNCS_INTENT.equals(key) || MASTER_HNCS_CURVE.equals(key)) return 0;
@@ -154,6 +168,9 @@ public final class ModuleSettings {
             case VIDEO_FILTER_HIGH_SPEC:
             case POP_SDR_STYLE:
             case NATURAL_MODE:
+            case DUMP_RAW:
+            case DUMP_CCM:
+            case DUMP_HDRT:
             case NORMAL_FOLLOWS_MASTER:
             case XPAN_WATERMARK_ISOLATION:
             case MODEL_SPOOF_WATERMARK:
@@ -162,6 +179,7 @@ public final class ModuleSettings {
             case SOFT_LIGHT_WEAK_HDF:
             case SOFT_LIGHT_MEDIUM_BLACK_MIST:
             case SOFT_LIGHT_STRONG_WHITE_MIST:
+            case SOFT_LIGHT_NO_LOCAL_CONTRAST:
             case XPAN_DEVELOPING_LIVE:
             case MASTER_PORTRA_PHYSICAL:
             case XPAN_CLEAN_SMALL_MASK:

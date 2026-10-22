@@ -7,6 +7,7 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 
+#include "capture_dump.h"
 #include "native_hooks.h"
 
 namespace {
@@ -37,6 +38,8 @@ HookFunction installHook;
 
 void onLibraryLoaded(const char *name, void *handle) {
     if (!name) return;  // dlopen(NULL) hands back the main program
+    // Upstream's capture dump carries its own switches and runs ungated.
+    onLibraryLoadedForCaptureDump(installHook, name, handle);
     if (moduleOn(kPropNatural)) onLibraryLoadedForNatural(name);
     if (moduleOn(kPropGr)) onLibraryLoadedForGr(installHook, name, handle);
     if (moduleOn(kPropSoft)) onLibraryLoadedForSoftLight(installHook, name, handle);
