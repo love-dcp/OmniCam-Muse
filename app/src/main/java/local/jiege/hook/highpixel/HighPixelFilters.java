@@ -524,6 +524,32 @@ public final class HighPixelFilters {
         }
     }
 
+    /**
+     * Puts one value into the meta item's own map - the same map the algorithm list lives in. The
+     * capture metadata (the file's palette record) is built from it, so the dial can be recorded
+     * there without touching the request params, which cost the 50 MP resolution.
+     */
+    static boolean putMetaValue(Object meta, Object key, Object value) {
+        if (meta == null || key == null) return false;
+        for (Class<?> type = meta.getClass(); type != null; type = type.getSuperclass()) {
+            for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (!java.util.Map.class.isAssignableFrom(field.getType())) continue;
+                try {
+                    field.setAccessible(true);
+                    Object map = field.get(meta);
+                    if (!(map instanceof java.util.Map)) continue;
+                    @SuppressWarnings("unchecked")
+                    java.util.Map<Object, Object> values = (java.util.Map<Object, Object>) map;
+                    values.put(key, value);
+                    return true;
+                } catch (Throwable ignored) {
+                    // try the next field
+                }
+            }
+        }
+        return false;
+    }
+
     /** Hands the meta item a new algorithm list; returns whether a setter took it. */
     private static boolean setAlgorithmList(Object meta, Object algorithmKey, String[] next) {
         Object[] candidates = { next, java.util.Arrays.asList(next) };
