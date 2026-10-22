@@ -509,6 +509,29 @@ public final class HighPixelFilters {
                 }
             }
         }
+        // No setter: the item may still be a thin wrapper over a map we can edit directly.
+        if (seen.add("metaFields")) {
+            StringBuilder fields = new StringBuilder("meta fields of " + meta.getClass().getName() + ":");
+            for (java.lang.reflect.Field field : meta.getClass().getDeclaredFields()) {
+                fields.append(' ').append(field.getName()).append(':').append(field.getType().getSimpleName());
+            }
+            Log.i(TAG, fields.toString());
+        }
+        for (java.lang.Class<?> type = meta.getClass(); type != null; type = type.getSuperclass()) {
+            for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (!java.util.Map.class.isAssignableFrom(field.getType())) continue;
+                try {
+                    field.setAccessible(true);
+                    Object map = field.get(meta);
+                    if (!(map instanceof java.util.Map)) continue;
+                    ((java.util.Map<Object, Object>) map).put(algorithmKey, next);
+                    if (seen.add("mapPut")) Log.i(TAG, "algorithm list replaced through map field " + field.getName());
+                    return true;
+                } catch (Throwable ignored) {
+                    // try the next field
+                }
+            }
+        }
         return false;
     }
 
