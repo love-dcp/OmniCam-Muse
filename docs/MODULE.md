@@ -202,38 +202,30 @@ chrome 这一层要压过 scrim：两者都是 decor 的直接子 View，只按�
 
 排查时走过的弯路（别再重走）：把 `aps_algo_filter` 挪到链尾、补 `aps_algo_basic_tone`（`MetaItemInfo` 不能加长，换掉 watermark 槽位也没用）、把 `highPictureSize`/`aiHighPixel` 置假强制降成 12 MP（不生效，成片仍是 50 MP）、把 `_normal` 换成 `_master` 变体、改 `mFilterEnumType`、写 `mFilterId`（该字段不存在）。真正有效的方法是：让所有滤镜各拍一张做 A/B，再对比大师模式同一滤镜的请求字段快照——`HighPixelRequest` 诊断会按“模式 × 滤镜”各打一行全部滤镜字段的值。
 
-### 调色盘的成片（未解决，2026-10-22）
+### 调色盘的成片（2026-10-23 已解决）
 
-预览侧是好的：调色盘一划预览就变。成片侧目前不带调色盘的影调/饱和度，这里记结论和下次的入口。
+**结果**：同滤镜同构图两组，调色盘 0/0 对 100/−100，成片色度 34.92% → 10.33%、亮度 141 → 155，两张都是 6484×10256。日志：
 
-试过并否掉的：
+```
+MuseSoftLight: palette capture on
+MuseSoftLight: palette table loaded (786432 floats)
+MuseSoftLight: palette applied to the capture 1280x960
+MuseSoftLight: palette applied to the capture 4096x3072
+```
 
-1. 给 50 MP 的算法链插 `aps_algo_basic_tone`。`createMetaItemInfo` 返回的 `MetaItemInfo` 没有任何 setter（`setValue`/`set`/`put` 都试过），但它内部有个 Map 字段，改那个字段能真正把节点插进链里（日志 `algorithm list replaced through …`，请求变成 `[aps_algo_hybridraw, aps_algo_basic_tone, aps_algo_filter, …]`）。成片无变化：同一构图两组（tone 100 / 饱和 -100 对 0/0）亮度差 3.5 级、色度差 0.34%，等于没生效。
-2. 再补 `aps_algo_fb_hdr_convert`（POP 的链里 `basic_tone` 后面紧跟它）。节点进了链，成片仍然无变化（两组 RGB 逐项几乎相同）。
-3. 改用大师 50 MP 的节点组合：`aps_algo_color_palette` + `aps_algo_basic_tone`。仍然无变化。
+**机制**：这个模式的 50MP 成片不是原生 50MP，而是 **4096×3072 的渲染帧经 `aps_algo_upscale` 放大**得到的，而那一帧正好经过 `MsRenderHDRHostBuffer`——柔光用的同一个入口。所以调色盘不走 APS：
 
-关键对照：大师 JPG MAX 也是 50 MP，调色盘在它那儿是有效的（两张：色度 11.15% vs 51.68%、亮度 147 vs 105），但它的请求里 `mbPaletteEnable=false`、`mSaturationValue=-1`、`mb3DLutEnable=false`——没有任何"调色盘字段"，和哈苏超清的请求结构一致。也就是说大师的调色盘不是靠 APS 链节点带进成片的，而是走模块自己的原生大师管线（`master_core` / `master_lut_slots`，只作用于 `basicToneMasterFrame()` 标记的帧），哈苏超清不在这个集合里。
+1. `PaletteCaptureExport`（Java）把预览正在用的合成表（`Lut3dDataManager.p()` 的 64³ 输出）写成 `files/jiege/palette_lut.bin`（64³×3 float32，3 MB），开关写 `palette_state`；
+2. `soft_light.cpp` 的 `applyPaletteToCapture()` 在同一入口对 P010 缓冲做三线性查表（YUV→RGB→表→YUV，色度按 2×2 块平均回写），复用柔光已有的 `P010`/`YuvCoding`/`codeToUnit`；
+3. 只有**调色盘归零**才写 `palette_state=0`。按快门会关闭调色盘，早先"关闭即清表"会把刚设的值抹掉——成片于是走中性表，这是最后卡住的一环。
 
-用户观察（下次的入口）：这个问题以前修好过，2026-10-22 当晚也偶发成功过一次，触发方式疑似"先切到该模式、再切回来"再拍。下次排查应该抓这个时序，对比"成功那次"和"失败那次"的：
+**试过但走不通的（别再重走）**：
 
-- `Lut3dDataManager` 的实例与 `N`/`W`/`P` 状态（`MasterPalette` 的 `lutState()` 会打）；
-- 请求里的 `paletteState=`（`HighPixelRequest` 每次快门一行）；
-- 切换模式时相机重建了什么（调色盘引擎 `PalettePreview`、tone 环境）。
+- 往 50MP 的算法链插 `aps_algo_basic_tone`（或再加 `aps_algo_color_palette` / `aps_algo_fb_hdr_convert`）：节点能进链（`MetaItemInfo` 没有 setter，但它内部的 Map 字段可写），成片却掉成 3244×5132；
+- 在 `FilterPresenter.U1` 之后给请求盖 `KEY_MASTER_MODE_CONTRAST`/`KEY_MASTER_MODE_SATURATION`/`KEY_PALETTE_CAPTURE_ENABLE`：同样掉成 3244×5132（同样 100/−100，只有盖章不同），而且那条小管线上颜色也不跟调色盘；
+- 大师 JPG MAX 的调色盘之所以有效，是走模块自己的原生大师管线，不是 APS 链。
 
-现状：预览有效、成片不带。链里插节点那段（`HighPixelFilters.addPaletteNode`）留着，实测不会破坏成片（多张 20-30 MB 正常图像），但也没有效果，随时可删。
-
-### 成片调色盘：下一步要查的具体位置（2026-10-22 晚）
-
-同滤镜连拍交叉验证过：调色盘 +100/−100 与 −49/−84、0/0 之间，成片色度/亮度完全一致（20:24:52 vs 20:24:59，20:26:18 vs 20:26:30），所以那段时间调色盘一次都没进成片。看起来"成功"的那张（202231.jpg）是 morandi 滤镜本身的低饱和，不是调色盘——它和 202324.jpg 不是同一滤镜，不能拿来对比。
-
-真正的线索在 `module/post-mount.sh`：
-
-- X8U 的 `libAlgoInterface.so` 里 `basicToneProcessV1` 有个「四个主滑块全为 0 就 cbz 跳过转换」的分支（X9U 在 `0x2040688` NOP 过，X8U 对应 `0x1e7ae00`，patch 在 `payload_pkj110/lib64/libAlgoInterface.so`）；
-- 那个补丁默认不绑定，因为一绑定 POP 成片就会黑（`persist.omnicam.sdrbt=1` 才开）。10-18 那次"成片调色盘有效"的验证，就是在这个开关打开的状态下做的。
-
-所以调色盘要进成片，值必须落到 BasicTone 读的那四个主滑块上；现在写的是 `Lut3dDataManager` 的 w/v 加 `H4`/`x6` 通知，而 `H4`/`x6` 在哈苏超清上作用的是 `fm.f0`（BaseMode）、在大师上作用的是 `ef.m` 的 mode 对象，两者不一定是同一条写入路径。
-
-下一步：给 `H4`/`x6` 各加一行日志（写到哪个键、什么值），再拿大师模式同样的调用对比；确认哈苏超清这边是不是只写了预览键、没写到拍摄侧 vendor 键（`bb.s.e0` / `bb.s.d0`）。
+开关：`persist.omnicam.aura.hppalcapture=1` 会重新打开"往请求盖调色盘键"的实验路径（默认关，因为会掉分辨率）。
 
 ### 属性开关
 
