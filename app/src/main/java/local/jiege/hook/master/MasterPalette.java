@@ -1059,7 +1059,14 @@ public final class MasterPalette {
      * stock picture untouched until there is something to show.
      */
     private static boolean wantPreviewLut() {
-        return videoPaletteLive() && paletteEngaged();
+        if (!paletteEngaged()) return false;
+        if (videoPaletteLive()) return true;
+        // Pages the camera has no palette of its own for (哈苏超清 above all, and POP cold-started
+        // outside the pro feature): there is no presenter, so the value goes into the LUT manager -
+        // and nothing hands that table to the preview renderer. The camera only re-reads it when it
+        // rebuilds its preview program, which is why the dial seemed dead until a mode switch: the
+        // switch rebuilt the program and the table came along. Hand it over on these pages too.
+        return directPaletteOpen && !isVideoMode(currentMode());
     }
 
     /** True while tone or saturation is off-centre, read from the LUT manager's own two fields. */
