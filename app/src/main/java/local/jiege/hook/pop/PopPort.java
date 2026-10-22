@@ -53,6 +53,11 @@ public final class PopPort {
         } catch (Throwable error) {
             Log.e(TAG, "POP fish-eye lens unavailable", error);
         }
+        try {
+            PopFisheyeSave.install(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "POP fish-eye save unavailable", error);
+        }
     }
 
     /**
