@@ -48,27 +48,38 @@ final class HighPixelPaletteCapture {
 
     private static void stamp(ClassLoader loader, Object message) {
         if (message == null) return;
-        // Off by default: stamping KEY_MASTER_MODE_CONTRAST / KEY_MASTER_MODE_SATURATION on this
-        // mode made the camera take the shot down a palette-capable pipeline that returns
-        // 3244x5132 instead of 6484x10256 (measured 2026-10-23 07:10, identical dial, only the stamp
-        // differing). persist.omnicam.aura.hppalcapture=1 turns it back on for experiments.
-        if (!"1".equals(prop())) return;
         int[] wv = HighPixelFilters.paletteValues();
         if (wv == null || (wv[0] == 0 && wv[1] == 0)) return;
         Object holder = XposedHelpers.getObjectField(message, "D");
         if (holder == null) return;
+        // Only this mode: the same presenter handles POP, where the palette already reaches the
+        // capture through the camera's own path.
+        try {
+            Object manager = XposedHelpers.getStaticObjectField(
+                XposedHelpers.findClass("com.oplus.camera.common.utils.Lut3dDataManager$b", loader), "a");
+            String mode = String.valueOf(XposedHelpers.getObjectField(manager, "P"));
+            if (!mode.contains("highPixel") && !mode.contains("high_pixel")) return;
+        } catch (Throwable ignored) {
+            return;
+        }
+        // The tag's own fields are what the file metadata is built from, so the gallery's 色彩风格
+        // re-renders with the same numbers the shot was taken with. This side does not touch the
+        // APS pipeline, which is what dropped the shot to 3244x5132 when the params were stamped.
+        try {
+            XposedHelpers.setIntField(message, "mSaturationValue", wv[1]);
+            if (seen.add("meta:" + wv[1])) {
+                Log.i(TAG, "palette metadata: saturation=" + wv[1]);
+            }
+        } catch (Throwable ignored) {
+            // the tag of this build has no such field
+        }
+        // The pipeline params stayed opt-in: they cost the 50 MP resolution.
+        if (!"1".equals(prop())) return;
         Class<?> parameters = XposedHelpers.findClass(PARAMETER, loader);
         Object toneKey = XposedHelpers.getStaticObjectField(parameters, "KEY_MASTER_MODE_CONTRAST");
         Object saturationKey = XposedHelpers.getStaticObjectField(parameters, "KEY_MASTER_MODE_SATURATION");
-        Object paletteKey = XposedHelpers.getStaticObjectField(parameters, "KEY_PALETTE_CAPTURE_ENABLE");
         XposedHelpers.callMethod(holder, "e", toneKey, Integer.valueOf(wv[0]));
         XposedHelpers.callMethod(holder, "e", saturationKey, Integer.valueOf(wv[1]));
-        // KEY_PALETTE_CAPTURE_ENABLE is deliberately left alone: with it set, the camera takes this
-        // mode's shot down a palette-capable pipeline that returns 3244x5132 instead of the 6484x10256
-        // the plain request produces (measured 2026-10-23 07:08, chain unchanged between the two).
-        if ("1".equals(prop("persist.omnicam.aura.hppalenable", ""))) {
-            XposedHelpers.callMethod(holder, "e", paletteKey, Boolean.TRUE);
-        }
         if (seen.add("written:" + wv[0] + ":" + wv[1])) {
             Log.i(TAG, "palette on the capture request: tone=" + wv[0] + " saturation=" + wv[1]);
         }

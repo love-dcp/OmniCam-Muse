@@ -65,6 +65,14 @@ final class HighPixelDiagnostics {
                     logMetaSizes(mode, param);
                     // One full snapshot of the filter-related fields per mode *and* filter: 和光 and
                     // 反差黑白 each carry their own grain block, so every filter gets its own line.
+                    if (snap.add("allFields")) {
+                        StringBuilder every = new StringBuilder("tag fields:");
+                        for (java.lang.reflect.Field field : tag.getClass().getDeclaredFields()) {
+                            every.append(' ').append(field.getName()).append(':')
+                                .append(field.getType().getSimpleName());
+                        }
+                        Log.i(TAG, every.toString());
+                    }
                     Object filterType = XposedHelpers.getObjectField(tag, "mFilterType");
                     if (snap.add(String.valueOf(mode) + "|" + filterType)) {
                         StringBuilder text = new StringBuilder("snap mode=").append(mode).append(':');
