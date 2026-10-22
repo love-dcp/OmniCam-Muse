@@ -116,6 +116,7 @@ public final class HighPixelFilters {
         hookFeatureList(classLoader);
         hookFeatureGate(classLoader);
         hookCaptureTag(classLoader);
+        HighPixelPaletteCapture.install(classLoader);
     }
 
     /**
@@ -494,6 +495,20 @@ public final class HighPixelFilters {
     }
 
     /** True while the palette dial is off its neutral position. */
+    /** The dial's current tone/saturation from the LUT manager, or null when unreadable. */
+    static int[] paletteValues() {
+        try {
+            Class<?> holder = XposedHelpers.findClass(
+                "com.oplus.camera.common.utils.Lut3dDataManager$b", appLoader);
+            Object manager = XposedHelpers.getStaticObjectField(holder, "a");
+            if (manager == null) return null;
+            return new int[] {XposedHelpers.getIntField(manager, "w"),
+                XposedHelpers.getIntField(manager, "v")};
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
     private static boolean paletteActive() {
         try {
             Class<?> holder = XposedHelpers.findClass(
