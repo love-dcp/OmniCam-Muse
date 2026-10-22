@@ -42,8 +42,8 @@ public final class HighPixelFilters {
     private static final String FILTER_FEATURE = "com.oplus.camera.feature.filter";
     /** The capture stage that applies the filter LUT. */
     private static final String FILTER_ALGORITHM = "aps_algo_filter";
-    /** The LDR conversion the palette stage works on (the retro page always carries it). */
-    private static final String HDR_CONVERT_ALGORITHM = "aps_algo_fb_hdr_convert";
+    /** The node master mode's 50 MP capture applies the palette with (its config enables it). */
+    private static final String COLOR_PALETTE_ALGORITHM = "aps_algo_color_palette";
 
     /** The stage that applies the palette (tone / saturation) to a capture. */
     private static final String PALETTE_ALGORITHM = "aps_algo_basic_tone";
@@ -468,29 +468,28 @@ public final class HighPixelFilters {
             return;
         }
         String[] current = (String[]) value;
-        for (String name : current) if (PALETTE_ALGORITHM.equals(name)) return;
+        for (String name : current) if (COLOR_PALETTE_ALGORITHM.equals(name)) return;
+        // Master mode's 50 MP capture carries the palette as aps_algo_color_palette plus
+        // aps_algo_basic_tone; that is the pair this mode is given too.
+        java.util.List<String> next = new java.util.ArrayList<>();
         int at = 0;
         for (int i = 0; i < current.length; i++) {
-            if ("aps_algo_hybridraw".equals(current[i])) { at = i + 1; break; }
+            next.add(current[i]);
+            if ("aps_algo_hybridraw".equals(current[i])) {
+                next.add(COLOR_PALETTE_ALGORITHM);
+                next.add(PALETTE_ALGORITHM);
+                at = next.size();
+            }
         }
-        // The palette stage runs on the LDR conversion, and the retro page's chain always has that
-        // conversion right behind the tone stage. Without it the tone node had no input to work on:
-        // the dial's value was on the request and the jpeg did not move.
-        boolean convert = false;
-        for (String name : current) if (HDR_CONVERT_ALGORITHM.equals(name)) convert = true;
-        String[] next = new String[current.length + (convert ? 1 : 2)];
-        System.arraycopy(current, 0, next, 0, at);
-        next[at] = PALETTE_ALGORITHM;
-        int copyFrom = at;
-        if (!convert) {
-            next[at + 1] = HDR_CONVERT_ALGORITHM;
-            copyFrom = at + 1;
+        if (at == 0) {
+            next.add(0, PALETTE_ALGORITHM);
+            next.add(0, COLOR_PALETTE_ALGORITHM);
         }
-        System.arraycopy(current, at, next, copyFrom + 1, current.length - at);
-        boolean set = setAlgorithmList(meta, algorithmKey, next);
+        String[] result = next.toArray(new String[0]);
+        boolean set = setAlgorithmList(meta, algorithmKey, result);
         if (seen.add("paletteNode:" + set)) {
             Log.i(TAG, "palette stage " + (set ? "added" : "rejected") + ": "
-                + java.util.Arrays.toString(next));
+                + java.util.Arrays.toString(result));
         }
     }
 
