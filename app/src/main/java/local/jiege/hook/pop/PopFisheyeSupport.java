@@ -95,6 +95,22 @@ public final class PopFisheyeSupport {
         try {
             XposedHelpers.findAndHookMethod(SDK + "consumer.ApsProcessor", classLoader,
                 "createMetaItemInfo", SDK + "common.util.CameraRequestTag", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        // The tag carries the lens as two plain booleans and the capture pipeline
+                        // reads them before the metadata is built, so they have to be set first.
+                        try {
+                            if (!lensOn && !lensFromPreference()) return;
+                            Object tag = param.args[0];
+                            XposedHelpers.setBooleanField(tag, "mRetroFilterFishEyeEnable", true);
+                            XposedHelpers.setBooleanField(tag, "mbFishEyeEnable", true);
+                            if (traced.add("tag")) {
+                                Log.i(TAG, "capture tag carries mRetroFilterFishEyeEnable/mbFishEyeEnable");
+                            }
+                        } catch (Throwable error) {
+                            if (traced.add("tagError")) Log.i(TAG, "capture tag flag failed: " + error);
+                        }
+                    }
+
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         if (param.hasThrowable() || param.getResult() == null) return;
                         try {
@@ -119,6 +135,25 @@ public final class PopFisheyeSupport {
                             java.lang.reflect.Method set = param.getResult().getClass()
                                 .getMethod("setParameter", keyBase, Object.class);
                             set.invoke(param.getResult(), key, Boolean.TRUE);
+
+                            // The capture engine (libAlgoInterface) carries the renderer's
+                            // "Fish Eye Enable" name too, so it reads the request key the CCD
+                            // styles use for the same lens. Live photos play back with the effect,
+                            // which is the path that fills this key in; the still needs it too.
+                            try {
+                                Object ccdKey = XposedHelpers.getStaticObjectField(
+                                    XposedHelpers.findClass(SDK + "ipusdk.processunit.filter.key"
+                                        + ".FilterProcessKeySDK", classLoader),
+                                    "RETRO_CCD_FISHEYE_OPEN");
+                                XposedHelpers.callMethod(request, "setParameter", ccdKey, Boolean.TRUE);
+                                if (traced.add("ccd:" + mode)) {
+                                    Log.i(TAG, "capture request carries RETRO_CCD_FISHEYE_OPEN = true");
+                                }
+                            } catch (Throwable ccdError) {
+                                if (traced.add("ccdError")) {
+                                    Log.i(TAG, "ccd fisheye key failed: " + ccdError);
+                                }
+                            }
                             if (traced.add("capture:" + mode)) {
                                 Log.i(TAG, "capture metadata carries " + FISH_KEY + " = true");
                             }
