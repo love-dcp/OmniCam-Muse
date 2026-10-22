@@ -38,6 +38,7 @@
 #include <android/hardware_buffer.h>
 #include <android/log.h>
 #include <jni.h>
+#include <sys/stat.h>
 #include <sys/system_properties.h>
 
 #include <algorithm>
@@ -46,6 +47,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -1277,6 +1279,167 @@ int hookHardwareBuffer(void *core, void *effect, const HardwareBufferInfo *in, u
     return ret;
 }
 
+
+// ---- palette (调色盘) on the capture ---------------------------------------------------------
+//
+// The 哈苏超清 shot is an upscale of this 4096x3072 render, and its APS chain has no palette
+// stage: adding one - or stamping the capture keys - drops the upscale (3244x5132 instead of
+// 6484x10256). So the dial is applied here instead, on the very buffer the upscale starts from,
+// with the same 64-cube table the preview is drawn with (PaletteCaptureExport publishes it to
+// files/jiege/palette_lut.bin, with palette_state as the on/off byte).
+
+constexpr const char *kPaletteDir = "/data/user/0/com.oplus.camera/files/jiege";
+constexpr int kPaletteSize = 64;
+
+struct PaletteTable {
+    std::mutex lock;
+    std::vector<float> lut;   // kPaletteSize^3 * 3, r-major
+    bool on = false;
+    long long stateStamp = 0;
+    long long lutStamp = 0;
+};
+
+PaletteTable gPalette;
+
+long long fileStamp(const char *path) {
+    struct stat info {};
+    if (::stat(path, &info) != 0) return 0;
+    return static_cast<long long>(info.st_mtime) * 1000000LL + static_cast<long long>(info.st_size);
+}
+
+bool readWholeFile(const char *path, std::vector<uint8_t> &out) {
+    FILE *file = std::fopen(path, "rb");
+    if (!file) return false;
+    std::fseek(file, 0, SEEK_END);
+    long size = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    if (size <= 0 || size > 64 * 1024 * 1024) {
+        std::fclose(file);
+        return false;
+    }
+    out.resize(size_t(size));
+    size_t got = std::fread(out.data(), 1, size_t(size), file);
+    std::fclose(file);
+    return got == size_t(size);
+}
+
+void refreshPalette() {
+    char statePath[256];
+    char lutPath[256];
+    std::snprintf(statePath, sizeof(statePath), "%s/palette_state", kPaletteDir);
+    std::snprintf(lutPath, sizeof(lutPath), "%s/palette_lut.bin", kPaletteDir);
+    std::lock_guard<std::mutex> guard(gPalette.lock);
+    long long state = fileStamp(statePath);
+    if (state == 0 || state != gPalette.stateStamp) {
+        gPalette.stateStamp = state;
+        std::vector<uint8_t> raw;
+        bool on = false;
+        if (state != 0 && readWholeFile(statePath, raw) && !raw.empty()) on = raw[0] == '1';
+        if (on != gPalette.on) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "palette capture %s", on ? "on" : "off");
+        }
+        gPalette.on = on;
+    }
+    if (!gPalette.on) return;
+    long long stamp = fileStamp(lutPath);
+    if (stamp == 0 || stamp == gPalette.lutStamp) return;
+    std::vector<uint8_t> raw;
+    if (!readWholeFile(lutPath, raw)) return;
+    const size_t want = size_t(kPaletteSize) * kPaletteSize * kPaletteSize * 3 * sizeof(float);
+    if (raw.size() != want) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "palette table is %zu bytes, want %zu", raw.size(), want);
+        return;
+    }
+    std::vector<float> table(want / sizeof(float));
+    std::memcpy(table.data(), raw.data(), want);
+    gPalette.lut.swap(table);
+    gPalette.lutStamp = stamp;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "palette table loaded (%zu floats)", gPalette.lut.size());
+}
+
+inline float paletteAt(const float *lut, int r, int g, int b, int c) {
+    size_t index = ((size_t(r) * kPaletteSize + size_t(g)) * kPaletteSize + size_t(b)) * 3 + size_t(c);
+    return lut[index];
+}
+
+void paletteSample(const float *lut, float r, float g, float b, float out[3]) {
+    const float n = float(kPaletteSize - 1);
+    r = std::clamp(r, 0.0f, 1.0f) * n;
+    g = std::clamp(g, 0.0f, 1.0f) * n;
+    b = std::clamp(b, 0.0f, 1.0f) * n;
+    const int r0 = int(r), g0 = int(g), b0 = int(b);
+    const int r1 = std::min(r0 + 1, kPaletteSize - 1);
+    const int g1 = std::min(g0 + 1, kPaletteSize - 1);
+    const int b1 = std::min(b0 + 1, kPaletteSize - 1);
+    const float fr = r - float(r0), fg = g - float(g0), fb = b - float(b0);
+    for (int c = 0; c < 3; c++) {
+        const float c000 = paletteAt(lut, r0, g0, b0, c), c100 = paletteAt(lut, r1, g0, b0, c);
+        const float c010 = paletteAt(lut, r0, g1, b0, c), c110 = paletteAt(lut, r1, g1, b0, c);
+        const float c001 = paletteAt(lut, r0, g0, b1, c), c101 = paletteAt(lut, r1, g0, b1, c);
+        const float c011 = paletteAt(lut, r0, g1, b1, c), c111 = paletteAt(lut, r1, g1, b1, c);
+        const float c00 = c000 + (c100 - c000) * fr, c10 = c010 + (c110 - c010) * fr;
+        const float c01 = c001 + (c101 - c001) * fr, c11 = c011 + (c111 - c011) * fr;
+        const float c0 = c00 + (c10 - c00) * fg, c1 = c01 + (c11 - c01) * fg;
+        out[c] = c0 + (c1 - c0) * fb;
+    }
+}
+
+// Applies the table to a P010 capture buffer in place. Chroma is shared by each 2x2 block, so the
+// new chroma of the block is averaged back into the two pixels the block owns.
+bool applyPaletteToCapture(const HostBufferInfo &b, YuvCoding coding) {
+    const int w = int(b.width) & ~1, h = int(b.height) & ~1;
+    if (!b.plane[0] || !b.plane[1] || w < 64 || h < 64 || w > 8192 || h > 8192 ||
+        b.stride[0] < uint32_t(w) * 2 || b.stride[1] < uint32_t(w) * 2) {
+        return false;
+    }
+    std::vector<float> table;
+    {
+        std::lock_guard<std::mutex> guard(gPalette.lock);
+        if (!gPalette.on || gPalette.lut.size() != size_t(kPaletteSize) * kPaletteSize * kPaletteSize * 3) {
+            return false;
+        }
+        table = gPalette.lut;
+    }
+    P010 img;
+    img.w = w;
+    img.h = h;
+    img.planes.planeCount = 3;
+    img.planes.planes[0].data = b.plane[0];
+    img.planes.planes[0].rowStride = b.stride[0];
+    img.planes.planes[0].pixelStride = 2;
+    img.planes.planes[1].data = b.plane[1];
+    img.planes.planes[1].rowStride = b.stride[1];
+    img.planes.planes[1].pixelStride = 4;
+    img.planes.planes[2].data = static_cast<uint8_t *>(b.plane[1]) + 2;
+    img.planes.planes[2].rowStride = b.stride[1];
+    img.planes.planes[2].pixelStride = 4;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x += 2) {
+            const float u = codeToUnit(*img.u(x >> 1, y >> 1), coding);
+            const float v = codeToUnit(*img.v(x >> 1, y >> 1), coding);
+            float sumU = 0, sumV = 0;
+            for (int dx = 0; dx < 2; dx++) {
+                float rgb[3];
+                yuvToRgb(codeToUnit(*img.y(x + dx, y), coding), u, v, coding, rgb);
+                float mapped[3];
+                paletteSample(table.data(), rgb[0], rgb[1], rgb[2], mapped);
+                const float kg = 1 - coding.kr - coding.kb;
+                const float yy = coding.kr * mapped[0] + kg * mapped[1] + coding.kb * mapped[2];
+                const float cb = (mapped[2] - yy) / (2 * (1 - coding.kb));
+                const float cr = (mapped[0] - yy) / (2 * (1 - coding.kr));
+                const float scaleY = coding.full ? 1023.0f : 876.0f;
+                const float scaleC = coding.full ? 1023.0f : 896.0f;
+                *img.y(x + dx, y) = unitToCode(yy * scaleY + (coding.full ? 0.0f : 64.0f), coding);
+                sumU += cb * scaleC + 512.0f;
+                sumV += cr * scaleC + 512.0f;
+            }
+            *img.u(x >> 1, y >> 1) = unitToCode(sumU / 2, coding);
+            *img.v(x >> 1, y >> 1) = unitToCode(sumV / 2, coding);
+        }
+    }
+    return true;
+}
+
 // The capture on this device: MsRenderHDRHostBuffer, called once per shot right after the
 // shutter, with the stock soft light still switched on in the parameter block.
 int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, unsigned n, HostBufferInfo *out,
@@ -1284,6 +1447,14 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
     if (!origRenderHdrHostBuffer) return 0;
     if (!out) return origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
     logPass("host", out->width, out->height, out->pixFmt, out->transfer, out->stride[0], out->stride[1], param);
+    // The palette dial is applied to the same render the soft light works on (see below).
+    refreshPalette();
+    if (gPalette.on && applyPaletteToCapture(*out, yuvCoding(int(out->matrix), int(out->range)))) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 3) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "palette applied to the capture %ux%u", out->width, out->height);
+        }
+    }
     const SoftFilter *filter = filterFor(param);
     Transfer tr;
     if (!filter || !transferOf(out->transfer, tr)) {

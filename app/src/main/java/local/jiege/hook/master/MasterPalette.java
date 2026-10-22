@@ -999,11 +999,17 @@ public final class MasterPalette {
      * up on such a page.
      */
     private static void applyPreviewLut() {
-        if (!wantPreviewLut()) return;
-        Object renderer = rendererRef.get();
+        if (!wantPreviewLut()) {
+            // The capture hook keeps the last table until it is told to stop, so the off state has
+            // to be written too - otherwise a 0/0 shot would still carry the previous look.
+            PaletteCaptureExport.publish(paletteFilesDir, false, null);
+            return;
+        }
         Object manager = lut();
-        if (renderer == null || manager == null) return;
         float[] combined = combinedLut();
+        if (combined != null) PaletteCaptureExport.publish(paletteFilesDir, true, combined);
+        Object renderer = rendererRef.get();
+        if (renderer == null || manager == null) return;
         if (combined == null) return;
         try {
             Object task = XposedHelpers.newInstance(cls("nn.f"),
@@ -1101,6 +1107,9 @@ public final class MasterPalette {
      * The camera's own mode gate is answered for us while this holds - see {@link #install}.
      */
     private static volatile boolean directPaletteOpen;
+
+    /** The camera's files dir, where the capture hook reads the palette (see PaletteCaptureExport). */
+    private static volatile java.io.File paletteFilesDir;
 
     /** Mode the dial was last neutralised for, so a shutter-reopen keeps the user's values. */
     private static volatile String neutralizedMode = "";
@@ -2650,6 +2659,7 @@ public final class MasterPalette {
                 // kept the value, and the picture only changed when something else rebuilt the
                 // program, which is the "works after switching modes" the page showed.
                 directPaletteOpen = holder == null || retro;
+                paletteFilesDir = activity.getFilesDir();
                 forcePaletteFlag();
                 if (directPaletteOpen) ensureToneEnv();
                 // On a page the camera keeps the combined LUT away from (the video page) the palette
