@@ -48,6 +48,11 @@ public final class PopPort {
         } catch (Throwable error) {
             Log.e(TAG, "POP capture probe unavailable", error);
         }
+        try {
+            PopFisheyeSupport.install(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "POP fish-eye lens unavailable", error);
+        }
     }
 
     /**
