@@ -1586,6 +1586,12 @@ public final class MasterPalette {
                 decor.removeView(filterRow);
                 filterRow = null;
             }
+            // A switch that is still sliding must not leave the picture parked off screen.
+            View preview = find("gl_root_view");
+            if (preview != null && preview.getTranslationX() != 0f) {
+                preview.animate().cancel();
+                preview.setTranslationX(0f);
+            }
             if (chrome != null) {
                 decor.removeView(chrome);
                 chrome = null;
@@ -1646,6 +1652,42 @@ public final class MasterPalette {
             decor.addView(pill, pillParams);
             return new Readout(pill, text(view, "palette_tone_value"),
                 text(view, "palette_saturation_value"));
+        }
+
+        /**
+         * Photo mode switches filters by moving the frame, not the picture: the card travels the way
+         * the swipe went and the next card follows it, while the live image behind stays exactly
+         * where it is. The mask draws two windows - the card leaving and the card arriving - and a
+         * single animation carries the pair by one card width, so the picture never moves and the
+         * frame does.
+         */
+        void slideSwitch(final int direction) {
+            if (!(previewMask instanceof PreviewCardMask)) {
+                HighPixelFilters.swipe(direction);
+                return;
+            }
+            final PreviewCardMask mask = (PreviewCardMask) previewMask;
+            // The frame follows the finger: a leftward swipe carries it left.
+            final float step = mask.step();
+            final float sign = -direction;
+            android.animation.ValueAnimator animator =
+                android.animation.ValueAnimator.ofFloat(0f, sign * step);
+            animator.setDuration(180);
+            final boolean[] switched = {false};
+            animator.addUpdateListener(animation -> {
+                mask.setSlide((Float) animation.getAnimatedValue());
+                if (!switched[0] && animation.getAnimatedFraction() >= 0.5f) {
+                    switched[0] = true;
+                    HighPixelFilters.swipe(direction);
+                }
+            });
+            animator.addListener(new android.animation.AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(android.animation.Animator animation) {
+                    mask.setSlide(0f);
+                    if (!switched[0]) HighPixelFilters.swipe(direction);
+                }
+            });
+            animator.start();
         }
 
         /**
@@ -2504,7 +2546,7 @@ public final class MasterPalette {
                                     float dy = event.getY() - downY;
                                     if (Math.abs(dx) > dp(36) && Math.abs(dx) > Math.abs(dy)) {
                                         Log.i(TAG, "swipe " + (dx < 0 ? "next" : "prev") + " dx=" + (int) dx);
-                                        HighPixelFilters.swipe(dx < 0 ? 1 : -1);
+                                        slideSwitch(dx < 0 ? 1 : -1);
                                     } else if (Math.abs(dx) < dp(12) && Math.abs(dy) < dp(12)) {
                                         Log.i(TAG, "scrim tap");
                                         hide();
@@ -2606,6 +2648,8 @@ public final class MasterPalette {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float inset;
         private final float radius;
+        /** How far the pair of windows has travelled; one card width per switch. */
+        private float slide;
 
         PreviewCardMask(Context context, float inset, float radius) {
             super(context);
@@ -2616,11 +2660,32 @@ public final class MasterPalette {
             setFocusable(false);
         }
 
+        /**
+         * How far the pair of windows travels for a single filter switch: one card plus the inset,
+         * which is the strip's gap - at rest the incoming card ends exactly on the left edge.
+         */
+        float step() {
+            return Math.max(1f, getWidth() - inset);
+        }
+
+        void setSlide(float value) {
+            slide = value;
+            invalidate();
+        }
+
         @Override protected void onDraw(Canvas canvas) {
             Path path = new Path();
             path.setFillType(Path.FillType.EVEN_ODD);
             path.addRect(0f, 0f, getWidth(), getHeight(), Path.Direction.CW);
-            path.addRoundRect(inset, 0f, getWidth() - inset, getHeight(), radius, radius,
+            float step = step();
+            float hole = step - inset;
+            float left = inset + slide;
+            // The card, plus one on each side: whichever way the pair travels, the neighbour
+            // arrives exactly where the card left, and at rest the extra two are off screen.
+            path.addRoundRect(left, 0f, left + hole, getHeight(), radius, radius, Path.Direction.CW);
+            path.addRoundRect(left - step, 0f, left - step + hole, getHeight(), radius, radius,
+                Path.Direction.CW);
+            path.addRoundRect(left + step, 0f, left + step + hole, getHeight(), radius, radius,
                 Path.Direction.CW);
             canvas.drawPath(path, paint);
         }
