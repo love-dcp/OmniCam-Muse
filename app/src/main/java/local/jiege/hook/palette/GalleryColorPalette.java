@@ -26,6 +26,9 @@ import local.jiege.hook.common.Symbols;
  * Which photos the editor treats as palette photos: GalleryPaletteScope.
  */
 public final class GalleryColorPalette {
+    private static final java.util.concurrent.atomic.AtomicBoolean SIGNATURE =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
     private static final String TAG = "GalleryColorPalette";
     private static final String FEATURE = "feature_is_support_color_palette";
     private static final String SDK_JAR = "com.oplus.camera.unit.sdk.jar";
@@ -81,6 +84,22 @@ public final class GalleryColorPalette {
             private android.opengl.EGLContext context;
 
             @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (SIGNATURE.compareAndSet(false, true)) {
+                    java.lang.reflect.Method method = (java.lang.reflect.Method) param.method;
+                    StringBuilder text = new StringBuilder("processImage ");
+                    text.append(method.getName()).append('(');
+                    Class<?>[] types = method.getParameterTypes();
+                    for (int i = 0; i < types.length; i++) {
+                        if (i > 0) text.append(',');
+                        text.append(types[i].getSimpleName());
+                    }
+                    text.append(") -> ").append(method.getReturnType().getSimpleName());
+                    for (int i = 0; i < param.args.length; i++) {
+                        text.append(" arg").append(i).append('=')
+                            .append(param.args[i] == null ? "null" : param.args[i].getClass().getSimpleName());
+                    }
+                    Log.i(TAG, text.toString());
+                }
                 display = EGL14.eglGetCurrentDisplay();
                 context = EGL14.eglGetCurrentContext();
                 draw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW);
