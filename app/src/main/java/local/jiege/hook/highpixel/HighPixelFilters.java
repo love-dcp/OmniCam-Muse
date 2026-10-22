@@ -42,8 +42,6 @@ public final class HighPixelFilters {
     private static final String FILTER_FEATURE = "com.oplus.camera.feature.filter";
     /** The capture stage that applies the filter LUT. */
     private static final String FILTER_ALGORITHM = "aps_algo_filter";
-    /** The node master mode's 50 MP capture applies the palette with (its config enables it). */
-    private static final String COLOR_PALETTE_ALGORITHM = "aps_algo_color_palette";
 
     /** The stage that applies the palette (tone / saturation) to a capture. */
     private static final String PALETTE_ALGORITHM = "aps_algo_basic_tone";
@@ -469,22 +467,23 @@ public final class HighPixelFilters {
             return;
         }
         String[] current = (String[]) value;
-        for (String name : current) if (COLOR_PALETTE_ALGORITHM.equals(name)) return;
-        // Master mode's 50 MP capture carries the palette as aps_algo_color_palette plus
-        // aps_algo_basic_tone; that is the pair this mode is given too.
+        // Only the tone stage: adding aps_algo_color_palette next to it made the 50 MP request
+        // come back as a 12 MP image (measured 2026-10-23 07:03), so it stays out.
+        for (String name : current) if (PALETTE_ALGORITHM.equals(name)) return;
+        // The tone stage only: the capture params now carry KEY_MASTER_MODE_CONTRAST /
+        // SATURATION and KEY_PALETTE_CAPTURE_ENABLE (see HighPixelPaletteCapture) and that is
+        // what the node reads.
         java.util.List<String> next = new java.util.ArrayList<>();
         int at = 0;
         for (int i = 0; i < current.length; i++) {
             next.add(current[i]);
             if ("aps_algo_hybridraw".equals(current[i])) {
-                next.add(COLOR_PALETTE_ALGORITHM);
                 next.add(PALETTE_ALGORITHM);
                 at = next.size();
             }
         }
         if (at == 0) {
             next.add(0, PALETTE_ALGORITHM);
-            next.add(0, COLOR_PALETTE_ALGORITHM);
         }
         String[] result = next.toArray(new String[0]);
         boolean set = setAlgorithmList(meta, algorithmKey, result);
