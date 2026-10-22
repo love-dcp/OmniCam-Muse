@@ -62,11 +62,15 @@ final class HighPixelDiagnostics {
                         StringBuilder text = new StringBuilder("snap mode=").append(mode).append(':');
                         for (java.lang.reflect.Field field : tag.getClass().getDeclaredFields()) {
                             String name = field.getName();
-                            if (!name.toLowerCase().contains("filter")) continue;
+                            String lower = name.toLowerCase();
+                            if (!lower.contains("filter") && !lower.contains("palette")
+                                && !lower.contains("lut") && !lower.contains("tone")
+                                && !lower.contains("satur")) continue;
                             field.setAccessible(true);
                             try { text.append(' ').append(name).append('=').append(field.get(tag)); }
                             catch (Throwable ignored) { }
                         }
+                        text.append(" manager=").append(managerState());
                         Log.i(TAG, text.toString());
                     }
                 } catch (Throwable error) {
@@ -128,8 +132,26 @@ final class HighPixelDiagnostics {
         }
     }
 
-    private static long measure(Object value) {
-        if (value == null) return 0;
+    /**
+     * The palette the preview is drawing with: the LUT manager's tone/saturation and whether its
+     * combined table is up. A capture whose palette differs from these is what "成片和预览不一样"
+     * looks like, so the request snapshot carries them side by side.
+     */
+    private static String managerState() {
+        try {
+            Class<?> holder = XposedHelpers.findClass(
+                "com.oplus.camera.common.utils.Lut3dDataManager$b", null);
+            Object manager = XposedHelpers.getStaticObjectField(holder, "a");
+            if (manager == null) return "none";
+            return "tone=" + XposedHelpers.getIntField(manager, "w")
+                + " saturation=" + XposedHelpers.getIntField(manager, "v")
+                + " env=" + XposedHelpers.getBooleanField(manager, "N");
+        } catch (Throwable error) {
+            return "?" + error.getClass().getSimpleName();
+        }
+    }
+
+    private static long measure(Object value) {        if (value == null) return 0;
         if (value instanceof String) return ((String) value).length();
         if (value instanceof byte[]) return ((byte[]) value).length;
         if (value instanceof int[]) return ((int[]) value).length * 4L;
