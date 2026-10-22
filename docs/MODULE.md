@@ -172,7 +172,9 @@ GR 模式向相机的播放器请求自己的音效（14 快门，15/16 长曝�
 
 ### 界面
 
-滤镜由 `HighPixelFilters.carousel()` 画成照片模式那样的轮播：每屏一个卡片，黑带上滤镜名（资源串，`FilterGroup.sFilterGroup.getNameIdList`，跟随系统语言），白带上是该滤镜的类目标签（模块目录里的 `FilterEntry.label`，原厂预置滤镜显示「原生质感」），卡片下面一排小圆点跟随页码。`MasterPalette.open()` 在 `highPixel` 下走 lifted 分支——与照片模式同一套：控制栏上抬 95dp、预览遮成圆角卡片（`PreviewCardMask`）、顶部读出、圆盘停在卡片下方黑区；卡片与圆点画在卡片里，离画面底边 80dp（照片模式放自带滤镜轮播的位置），scrim 抬到它上方，否则滑动落到 scrim 上。滑动按页吸附，一次只走一个滤镜（`settle()` 里对页码按 ±1 截断，快划也不跳档），程序化吸附期间用 `snapping` 标志挡住自己触发的滚动回调，避免吸到一半又退回原页。入口仍是右侧那个 `camera_menu_right_enter_button`，`HighPixelEffects` 负责让它显示（`persist.omnicam.aura.hpentry=1`）并接管点击 → `MasterPalette.toggleFromEntry()`。
+滤镜选择是照片模式那套：卡片固定不动，只换文字——黑带上是滤镜名（资源串，`FilterGroup.sFilterGroup.getNameIdList`，跟随系统语言），白带上是该滤镜的类目标签（模块目录里的 `FilterEntry.label`，原厂预置滤镜显示「原生质感」）；卡片下面固定五个小圆点（`panel()` 里按 `index-2` 取窗口，只有选中的那个填白），列表再长也只显示五个。换滤镜靠**划动画面**，不是划卡片：`MasterPalette` 在 scrim 上装了 `OnTouchListener`，横向拖动超过 36dp 就调 `HighPixelFilters.swipe(±1)`，竖直/点按仍旧是关闭调色盘——卡片和圆点所在的底部一条不吃滑动，与照片模式一致（那条在手势区域之外）。顶部沿用相机自己的读出但套了一层圆角深色胶囊（`buildReadout`），左上角补了返回箭头、拨盘左侧补了「重置」（`buildHighPixelChrome`，点一下把影调/饱和度写回 0/0）。`MasterPalette.open()` 在 `highPixel` 下走 lifted 分支——与照片模式同一套：控制栏上抬 95dp、预览遮成圆角卡片（`PreviewCardMask`）、圆盘停在卡片下方黑区；卡片+圆点画在卡片里、离画面底边 80dp。入口仍是右侧那个 `camera_menu_right_enter_button`，`HighPixelEffects` 负责让它显示（`persist.omnicam.aura.hpentry=1`）并接管点击 → `MasterPalette.toggleFromEntry()`。
+
+chrome 这一层要压过 scrim：两者都是 decor 的直接子 View，只按加入顺序反查时 scrim 先吃到点击（实测返回键被 scrim 吞掉，点一下变成关闭调色盘）。给 chrome 的容器 `setElevation(2)` 之后，decor 按 Z 排子 View，返回键和「重置」才拿得到点击。
 
 三个坑：入口按钮一次点击会上报两次，`toggleFromEntry()` 需要 600ms 去抖；`MenuRightButton` 跨模式复用同一个实例，替换它的监听会把照片模式的效果栏一起弄坏，只在没有监听时补装、且不要在 `onTouchEvent` 里手动 `performClick()`；相机空闲几秒后会合成一次点击去隐藏控件，会落到 `onForeignClick` 上把面板关掉，那里要先判 `view.isShown()`。
 

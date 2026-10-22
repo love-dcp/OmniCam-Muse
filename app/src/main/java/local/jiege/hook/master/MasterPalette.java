@@ -1212,6 +1212,8 @@ public final class MasterPalette {
         View previewMask;
         /** 哈苏超清's filter row, drawn separately from the dial (it sits over the picture). */
         View filterRow;
+        /** 哈苏超清's borrowed chrome: the back arrow and the 重置 button. */
+        View chrome;
         View thumb;
         float thumbBase;
         float thumbShift;
@@ -1584,6 +1586,10 @@ public final class MasterPalette {
                 decor.removeView(filterRow);
                 filterRow = null;
             }
+            if (chrome != null) {
+                decor.removeView(chrome);
+                chrome = null;
+            }
             if (scrim != null) {
                 decor.removeView(scrim);
                 scrim = null;
@@ -1608,8 +1614,9 @@ public final class MasterPalette {
         }
 
         /**
-         * Inflates the app's own 影调/饱和度 readout and hangs it on the decor. The 柔光 group is
-         * dropped because master mode's palette writes tone and saturation only.
+         * Inflates the app's own 影调/饱和度 readout and hangs it on the decor, inside the rounded
+         * pill photo mode frames it with. The 柔光 group is dropped because master mode's palette
+         * writes tone and saturation only.
          */
         Readout buildReadout() {
             int layout = activity.getResources().getIdentifier(READOUT_LAYOUT, "layout",
@@ -1624,9 +1631,88 @@ public final class MasterPalette {
             if (softLight != null) softLight.setVisibility(View.GONE);
             // Nothing here is interactive, and it sits over the top bar: let taps fall through.
             disableTouch(view);
-            decor.addView(view);
-            return new Readout(view, text(view, "palette_tone_value"),
+            FrameLayout pill = new FrameLayout(activity);
+            GradientDrawable pillBackground = new GradientDrawable();
+            pillBackground.setColor(0xFF262626);
+            pillBackground.setCornerRadius(dp(24));
+            pill.setBackground(pillBackground);
+            pill.setPadding(dp(20), dp(6), dp(20), dp(6));
+            pill.addView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            FrameLayout.LayoutParams pillParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            pillParams.topMargin = dp(40);
+            decor.addView(pill, pillParams);
+            return new Readout(pill, text(view, "palette_tone_value"),
                 text(view, "palette_saturation_value"));
+        }
+
+        /**
+         * The chrome photo mode puts around its dial: the back arrow in the top-left corner and
+         * 重置 on the left of the dial. 哈苏超清 has neither of its own, and without them the page
+         * does not read like the camera's.
+         */
+        View buildHighPixelChrome(int dialTop, int dialPx) {
+            FrameLayout frame = new FrameLayout(activity);
+
+            TextView back = new TextView(activity);
+            back.setText("\u2190");
+            back.setTextColor(0xFFFFFFFF);
+            back.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+            back.setGravity(Gravity.CENTER);
+            GradientDrawable backBackground = new GradientDrawable();
+            backBackground.setShape(GradientDrawable.OVAL);
+            backBackground.setColor(0x66000000);
+            back.setBackground(backBackground);
+            back.setOnClickListener(v -> {
+                Log.i(TAG, "chrome back clicked");
+                hide();
+            });
+            FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(
+                dp(40), dp(40), Gravity.TOP | Gravity.START);
+            backParams.leftMargin = dp(16);
+            backParams.topMargin = dp(34);
+            frame.addView(back, backParams);
+
+            LinearLayout reset = new LinearLayout(activity);
+            reset.setOrientation(LinearLayout.VERTICAL);
+            reset.setGravity(Gravity.CENTER_HORIZONTAL);
+            TextView icon = new TextView(activity);
+            icon.setText("\u27F2");
+            icon.setTextColor(0xFFFFFFFF);
+            icon.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+            icon.setGravity(Gravity.CENTER);
+            GradientDrawable iconBackground = new GradientDrawable();
+            iconBackground.setShape(GradientDrawable.OVAL);
+            iconBackground.setColor(0x66000000);
+            icon.setBackground(iconBackground);
+            reset.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            TextView label = new TextView(activity);
+            label.setText("重置");
+            label.setTextColor(0xFFFFFFFF);
+            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+            label.setGravity(Gravity.CENTER);
+            reset.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            reset.setOnClickListener(v -> {
+                Log.i(TAG, "chrome reset clicked");
+                if (pending != null) pending.change(0, 0);
+                if (readout != null) readout.show(0, 0);
+            });
+            FrameLayout.LayoutParams resetParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+            resetParams.leftMargin = dp(36);
+            resetParams.topMargin = dialTop + Math.max(0, (dialPx - dp(56)) / 2);
+            frame.addView(reset, resetParams);
+
+            decor.addView(frame, new FrameLayout.LayoutParams(-1, -1));
+            // The scrim below takes every touch in this region; a Z above it puts the chrome first
+            // in the touch dispatch (the camera's decor sorts children by Z once one has any).
+            frame.setElevation(dp(2));
+            decor.bringChildToFront(frame);
+            return frame;
         }
 
         void disableTouch(View view) {
@@ -2259,9 +2345,9 @@ public final class MasterPalette {
                 View filterBar = null;
                 int filterBarH = 0;
                 if (highPixel) {
-                    filterBar = HighPixelFilters.carousel(activity, null);
+                    filterBar = HighPixelFilters.panel(activity, null);
                     if (filterBar != null) {
-                        filterBarH = HighPixelFilters.carouselHeight(activity);
+                        filterBarH = HighPixelFilters.panelHeight(activity);
                     } else {
                         Log.i(TAG, "no filter row for this page: " + HighPixelFilters.describe());
                     }
@@ -2308,12 +2394,18 @@ public final class MasterPalette {
 
                     // The thumbnail rides with the control panel, which would park it next to the
                     // shutter over the preview. Photo mode puts its 重置 button in the bottom-left
-                    // corner of the palette row (1932..2039), so the thumbnail goes there.
-                    thumb = find("thumbnail");
-                    if (thumb != null && thumb.getHeight() > 0) {
-                        thumbBase = thumb.getTranslationY();
-                        thumbShift = (dialTop + dialPx / 2f) - (screenTop(thumb) + thumb.getHeight() / 2f);
-                        thumb.setTranslationY(thumbBase + thumbShift);
+                    // corner of the palette row (1932..2039), so the thumbnail goes there - except
+                    // on 哈苏超清, whose page puts a real 重置 button there and, like photo mode,
+                    // leaves the thumbnail out while the palette is up.
+                    if (highPixel) {
+                        hideView("thumbnail");
+                    } else {
+                        thumb = find("thumbnail");
+                        if (thumb != null && thumb.getHeight() > 0) {
+                            thumbBase = thumb.getTranslationY();
+                            thumbShift = (dialTop + dialPx / 2f) - (screenTop(thumb) + thumb.getHeight() / 2f);
+                            thumb.setTranslationY(thumbBase + thumbShift);
+                        }
                     }
                 }
 
@@ -2392,9 +2484,45 @@ public final class MasterPalette {
                 View scrimView = new View(activity);
                 scrimView.setBackgroundColor(0x01000000);
                 scrimView.setClickable(true);
-                scrimView.setOnClickListener(v -> hide());
+                if (highPixel && filterBar != null) {
+                    // Photo mode switches filters by swiping the picture above the card, not by
+                    // touching the card itself - and the bottom strip, where the card and the dots
+                    // sit, does not switch at all. The scrim is that region, so the swipe lives
+                    // here: horizontal drags pick the next/previous filter, taps still close.
+                    scrimView.setOnTouchListener(new View.OnTouchListener() {
+                        private float downX;
+                        private float downY;
+
+                        @Override public boolean onTouch(View v, android.view.MotionEvent event) {
+                            switch (event.getActionMasked()) {
+                                case android.view.MotionEvent.ACTION_DOWN:
+                                    downX = event.getX();
+                                    downY = event.getY();
+                                    return true;
+                                case android.view.MotionEvent.ACTION_UP:
+                                    float dx = event.getX() - downX;
+                                    float dy = event.getY() - downY;
+                                    if (Math.abs(dx) > dp(36) && Math.abs(dx) > Math.abs(dy)) {
+                                        Log.i(TAG, "swipe " + (dx < 0 ? "next" : "prev") + " dx=" + (int) dx);
+                                        HighPixelFilters.swipe(dx < 0 ? 1 : -1);
+                                    } else if (Math.abs(dx) < dp(12) && Math.abs(dy) < dp(12)) {
+                                        Log.i(TAG, "scrim tap");
+                                        hide();
+                                    }
+                                    return true;
+                                default:
+                                    return true;
+                            }
+                        }
+                    });
+                } else {
+                    scrimView.setOnClickListener(v -> hide());
+                }
                 decor.addView(scrimView, new FrameLayout.LayoutParams(-1, Math.max(dp(1), scrimBottom), Gravity.TOP));
                 scrim = scrimView;
+                // Photo mode's chrome around the dial: the back arrow and 重置. Added after the
+                // scrim so they sit on top of it.
+                if (highPixel) chrome = buildHighPixelChrome(dialTop, dialPx);
                 postDump("master-palette");
                 // Two later snapshots: if the user goes on to open the filter page, the state that
                 // broke the drag is captured even when the auto-close above does not fire.
