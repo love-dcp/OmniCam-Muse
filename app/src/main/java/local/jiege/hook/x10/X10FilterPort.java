@@ -496,7 +496,22 @@ public final class X10FilterPort {
      * engine NOP patch and the same combination was verified good there.
      */
     private static boolean stampsPalette(String mode) {
-        return "high_pixel_mode".equals(mode);
+        if (!"high_pixel_mode".equals(mode)) return false;
+        // Off by default since 2026-10-23: the stamp makes the shot carry src.image + filter.info,
+        // and the gallery then re-renders it from that source - which comes out turned 90 degrees and
+        // neutral on the first draw on this mode. Without it the photo opens in 色彩风格 the way
+        // master's does, showing the look that was baked into the pixels.
+        return "1".equals(prop("persist.omnicam.aura.hppalstamp"));
+    }
+
+    private static String prop(String name) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            return String.valueOf(type.getMethod("get", String.class, String.class)
+                .invoke(null, name, ""));
+        } catch (Throwable error) {
+            return "";
+        }
     }
 
     private static void stampPalette(Object tag) {
