@@ -21,3 +21,7 @@ __pycache__/
 /gradle_*.txt
 /javac_*.txt
 /pkg_err.txt
+
+# user-made module archives and local screenshots
+/*.zip.bak-*
+/zz_*
