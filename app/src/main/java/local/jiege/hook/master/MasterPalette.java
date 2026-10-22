@@ -1719,7 +1719,15 @@ public final class MasterPalette {
                     .intValue();
                 int next = Math.max(0, Math.min(size - 1, current + direction));
                 if (next == current) return;
-                symbols.call("FilterPresenter.applyFilter", presenter, Integer.valueOf(next));
+                // Same two calls the camera's strip makes on a tap: select() records the index, and
+                // apply(index, softLight, style, group) is what draws it. applyFilter alone only moved
+                // the selection on this build (measured in 哈苏超清), so it is not used here either.
+                symbols.call("FilterPresenter.select", presenter, Integer.valueOf(next));
+                symbols.call("FilterPresenter.apply", presenter, Integer.valueOf(next),
+                    symbols.call("FilterPresenter.softLightIndex", presenter),
+                    symbols.call("FilterPresenter.styleIndex", presenter),
+                    symbols.call("FilterPresenter.groupIndex", presenter));
+                symbols.call("FeaturePresenter.resetState", presenter);
                 Log.i(TAG, "palette step " + current + " -> " + next + "/" + size);
             } catch (Throwable error) {
                 Log.i(TAG, "palette step failed: " + error);
