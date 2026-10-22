@@ -94,6 +94,12 @@ POP 在 0.6x 拍照会让 HAL（`vendor.qti.camera.provider-service`）在 `Node
 
 设置「POP 使用 SDR 风格」（`pop_sdr_style`，默认关）。成片是 SDR 还是 Ultra HDR 只取决于 `retroCamera` 在不在 `capture.hdr.cap.mode.value` 名单里；`hook/pop/PopSdrStyle` 钩 `CameraConfig.list`（`CameraConfig.u(String)`），开关打开时对该键返回去掉 `retroCamera` 的新列表（原列表是定长的）。名单在每次建会话时读取，切模式或切镜头后生效。模块侧的名单不变，SDR 路径需要的引擎补丁（上面的 NOP、决策里的 POP 分支）都已在。
 
+## POP 的 CCD 成片发黑
+
+CCD 风格拍出来的成片比预览暗四档多（实测成片平均亮度 30，预览 101；白纸 230 → 95）。原因不是链路，是 `meishe_lut/ccd_promist_neutral.bin` 这张表：相机把成片的 `filter_type` 设成它（logcat 的 `IPU_BaseProcessUnitSDK: filter_type, ccd_promist_neutral.bin`），引擎按颜色 LUT 套用，而表的曲线把中灰压到 6/255（0.25→0，0.5→6，0.75→149），整幅被压暗。预览那条 `IPU_FilterProcessUnitSDK` 的 `filter_open` 是 false，根本不套这张表，所以预览正常——两边才差得离谱。
+
+修法：把这张表换成恒等表（`module/payload/meishe_lut/ccd_promist_neutral.bin`），成片亮度随即与预览一致（平均 30 → 92）。换表时注意引擎读的轴序是 `[r][g][b]`（首轴红、末轴蓝）：按 `[b][g][r]` 写会把红蓝对调，成片整幅发蓝（木头变蓝、蓝筐变橙）。
+
 ## 前置 POP 拍完点缩略图闪退
 
 Ultra HDR 拍摄后走“无缝 UI”路径：`PreviewRenderer.setSeamlessGaussianBlurBitmap` 在预览缩放状态下调 `BitmapUtil.cropCenterBitmapByScale`；缩放值小于 1（前置广角）时裁剪框大于位图，方法返回 null，调用方不检查就包成纹理，下一帧 GL 线程空指针，相机关闭。另外三处调用都判断了“缩放值 ≥ 1”。`hook/seamless/SeamlessBlurGuard` 在返回 null 时改返回原位图；目标方法由 `symbols.json` 的 `BitmapUtil.cropCenterByScale` 按错误日志字符串 `cropCenterBitmapByScale, error, sw: ` 定位。这是竞态，不是每次都崩。
@@ -122,7 +128,7 @@ GR 模式向相机的播放器请求自己的音效（14 快门，15/16 长曝�
 
 光晕是镜头前的角度，在画面里随焦距缩放：Java 侧（`softlight/SoftLight.java`）在变焦条创建时报 1x、`Zoom.setZoom` 时报当前变焦对应的等效焦距（`common/ZoomFocal.java`，按相机配置的变焦档位插值），原生侧按 log₂(焦距像素数) 在权重表里插值；超出表尾时金字塔基准每倍焦距上移一级。
 
-挡位与强度也放在系统属性里，因为相机进程读不到模块的 SharedPreferences（跨 uid 且跨 SELinux MLS 类别，`XSharedPreferences` 恒空）：`persist.omnicam.aura.softlight` 是位掩码，`persist.omnicam.aura.slgain` 是强度百分比（原生接受 0–400，默认 100，UI 给 0–100），每次渲染现读，所以调强度不需要重启相机；`persist.omnicam.aura.slkeep=1` 是诊断开关，保留原厂柔光、只叠加替换。强度把权重整体乘 s、core 收回 `(1−s)·Σw`：权重表本身满足 `core + Σw = transmission`，所以等价于原片与滤镜的线性混合，s=0 时写回严格恒等（日志 `0.0% of pixels changed`）。同一缓冲 500 ms 内的第二次散射会跳过（`already scattered, skipping`），免得重试或第二遍把光晕叠两次。
+挡位与强度也放在系统属性里，因为相机进程读不到模块的 SharedPreferences（跨 uid 且跨 SELinux MLS 类别，`XSharedPreferences` 恒空）：`persist.omnicam.aura.softlight` 是位掩码，`persist.omnicam.aura.slgain` 是强度百分比（原生接受 0–400，默认 100，UI 给 0–100），每次渲染现读，所以调强度不需要重启相机；`persist.omnicam.aura.slkeep=1` 是诊断开关，保留原厂柔光、只叠加替换。强度把权重整体乘 s、core 收回 `(1−s)·Σw`：宽画幅的行满足 `core + Σw = transmission`，所以等价于原片与滤镜的线性混合，s=0 时写回恒等（日志 `0.0% of pixels changed`）。窄视场的白柔行不满足：row 10 起（代理帧上 3.4×–6.8×，全尺寸帧上 1.1×–2.1×，行是按「等效焦距 × 画幅像素数」索引的）缺 1.3% 到 9.9%，row 14 最缺；缺的是落到画框外的那部分宽光晕，画面按同样比例压暗——这是表里本来就有的减光，不是实现偏差，黑柔与 HDF 各行都在 5e-3 以内。同一缓冲 500 ms 内的第二次散射会跳过（`already scattered, skipping`），免得重试或第二遍把光晕叠两次。
 
 成片这一级在 X8U 上有两条通道：相机重启后的第一张（以及长时间空闲后的第一张）走 `4096×3072` 全尺寸，之后每张走 `1280×960` 代理帧（连拍时也是代理帧）。两条都把效果带进最终 JPEG，只是光晕在代理帧上算完再抬回原尺寸；耗时因此差一个量级（全尺寸约 0.6 s，代理帧约 0.16 s），连拍不会因为散射而掉帧。`pass` 日志在渲染形状变化时打一行（入口、尺寸、兆像素、像素格式、色彩编码、行距、原厂柔光开关与类型、替换挡位掩码），一张片子的日志就能看出它走的是哪条；早先那里打的是“面积占本进程最大帧的比例”，分母会随拍摄推进变大，代理帧先出现时读成 0.44 而非 0.10，已改为兆像素。
 
@@ -131,6 +137,8 @@ GR 模式向相机的播放器请求自己的音效（14 快门，15/16 长曝�
 强度超过 100% 时 `core` 会先归零再继续放大权重：不归零的话 core 变负，会在每条边周围“吸光”，画面出现暗边。归零之后超限只是把滤镜推向纯扩散，不会反相。
 
 成片缓冲的尺寸不固定：同一台机器上 3072×4096 的照片有时在 1280×960 的代理帧上渲染。差的是锐化而不是分辨率 —— 3.2 倍硬降采样的画面在 1024 宽上的拉普拉斯会掉七成以上，实测只掉 24%，径向频谱也只是平缓的 −2~−6 dB；两族的 JPEG 量化表逐项相同，差的只是一层多帧降噪/锐化（大族 6.4–7.0 MB、噪声低 24%，小族 3.0–3.5 MB）。跨族比较 A/B 无效，先看两张的字节数是否同族。
+
+柔光 A/B 还多一条：**先弃一张**。相机重启（或长时间空闲）后的第一张走 `4096×3072` 全尺寸，之后才是代理帧，所以第一张要么丢掉、要么整组重拍，让四档都落在代理帧上再比。不弃这一张就会把上采样损失算成滤镜损失——实测把「关→HDF 只掉 9%」误读成「掉了 64%」，因为拿的是全尺寸关档（lapE 3.80）比代理帧滤镜档（1.5）。同族四张：lapE 1.73 / 1.57 / 1.53 / 1.55，高频保留 100% / 90.9% / 88.6% / 89.6%，JPEG 3.35 / 2.92 / 2.80 / 2.77 MB。区分度（HDF 到黑柔的 lapE 差）从 1.42 升到 3.18，差超过 8 级的像素 0.9% → 7.4%，肉眼可辨。三档的特征因此各不相同：弱=轻度近场柔化，中=局部最糊，强=靠压缩对比泛白（暗部 p1 抬 8 级、高光 p95 压 8 级，局部对比 89.6% 反而比黑柔的 88.6% 清楚）。强度 100% 是合适的，不必下调。
 
 ## 大师调节栏的颗粒
 
