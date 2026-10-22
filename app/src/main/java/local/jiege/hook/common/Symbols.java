@@ -70,8 +70,9 @@ public final class Symbols {
         current = symbols;
         long start = System.currentTimeMillis();
         String how = "error";
+        JSONObject spec = null;
         try {
-            JSONObject spec = new JSONObject(readSpec()).getJSONObject(section);
+            spec = new JSONObject(readSpec()).getJSONObject(section);
             File apk = new File(apkPath);
             String key = CACHE_VERSION + "|" + sha1(spec.toString()) + "|" + apk.getAbsolutePath() + "|" + apk.length() + "|" + apk.lastModified();
             File cache = new File(dataDir, "cache/jiege_symbols_" + section + ".json");
@@ -88,6 +89,7 @@ public final class Symbols {
         } catch (Throwable error) {
             Log.e(TAG, "symbol resolution failed", error);
         }
+        symbols.dropOptional(spec);
         Log.i(TAG, section + ": " + symbols.resolved.size() + " resolved, " + symbols.failures.size() + " missing ("
             + how + ", " + (System.currentTimeMillis() - start) + " ms)");
         for (Map.Entry<String, String> failure : symbols.failures.entrySet()) {
@@ -108,6 +110,24 @@ public final class Symbols {
     /** Read-only view for the port report: id -> why it could not be resolved. */
     Map<String, String> failureEntries() {
         return failures;
+    }
+
+    /**
+     * Drops the misses the spec marks {@code "optional"}: symbols another build of the same app has
+     * and this one does not. They are still reported in the log, but not as failures - the status
+     * page reads the count, and a symbol nothing here calls should not raise it.
+     */
+    private void dropOptional(JSONObject spec) {
+        if (spec == null) return;
+        for (String id : new java.util.ArrayList<>(failures.keySet())) {
+            try {
+                JSONObject entry = spec.optJSONObject(id);
+                if (entry == null || !entry.optBoolean("optional", false)) continue;
+                Log.i(TAG, "  optional " + id + " absent: " + failures.remove(id));
+            } catch (Throwable ignored) {
+                // an unreadable entry stays a failure
+            }
+        }
     }
 
     public boolean has(String... ids) {

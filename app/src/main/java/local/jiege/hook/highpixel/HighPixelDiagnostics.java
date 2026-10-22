@@ -150,9 +150,17 @@ final class HighPixelDiagnostics {
             Log.i(TAG, "meta " + meta.getClass().getName() + " items=" + count + " bytes=" + total
                 + " biggest=" + biggest + "/" + biggestSize + " big:" + top);
         } catch (Throwable error) {
-            Log.e(TAG, "meta sizes", error);
+            // Diagnostic only, and on this build reading the meta item's keys throws out of the app
+            // (NoSuchMethodError in its own adapter). It must not raise the status page's error
+            // count, so it is reported once as information.
+            if (!sizesFailed) {
+                sizesFailed = true;
+                Log.i(TAG, "meta sizes unavailable: " + error);
+            }
         }
     }
+
+    private static boolean sizesFailed;
 
     /**
      * The palette the preview is drawing with: the LUT manager's tone/saturation and whether its
