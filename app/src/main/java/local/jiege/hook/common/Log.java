@@ -13,9 +13,12 @@ public final class Log {
     }
 
     public static void e(String tag, String message, Throwable error) {
-        String line = tag + ": " + message + " " + error;
+        // The stack goes to the LSPosed log as well: the exported copy is only reachable through the
+        // settings app, and a failure that repeats on every frame is hard to place without it.
+        String stack = android.util.Log.getStackTraceString(error);
+        String line = tag + ": " + message + " " + error + "\n" + stack;
         XposedBridge.log(line);
-        Diagnostics.record("E", line + "\n" + android.util.Log.getStackTraceString(error));
+        Diagnostics.record("E", line);
     }
 
     /**

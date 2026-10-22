@@ -2791,6 +2791,8 @@ public final class MasterPalette {
         private int appliedSaturation;
         private int lastLoggedTone = Integer.MIN_VALUE;
         private int lastLoggedSaturation = Integer.MIN_VALUE;
+        /** Last readout failure, so a per-frame one is logged once. */
+        private String lastError = "";
         private boolean queued;
 
         Pending(Object presenter, Object callback, View panel, Readout readout, String mode,
@@ -2834,7 +2836,19 @@ public final class MasterPalette {
             // presenter at all (POP built outside the pro feature) the direct route is the only one,
             // and it stays valid for as long as the palette is on screen.
             if (presenter != null && palettePresenter(mode) != presenter) return;
-            if (readout != null) readout.show(tone, saturation);
+            // Each step is guarded on its own: a readout that cannot draw must not stop the value
+            // from reaching the manager (it used to throw out of here on 哈苏超清, and the whole
+            // update - tone/saturation and the LUT hand-over - went with it).
+            if (readout != null) {
+                try {
+                    readout.show(tone, saturation);
+                } catch (Throwable error) {
+                    if (!String.valueOf(error).equals(lastError)) {
+                        lastError = String.valueOf(error);
+                        Log.e(TAG, "readout failed", error);
+                    }
+                }
+            }
             if (tone != appliedTone) {
                 if (callback != null) call(callback, "a", tone, toneKey);
                 else {
