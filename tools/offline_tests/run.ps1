@@ -20,6 +20,7 @@ $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/Diagnost
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Settings.java')
 # FilterGroupInjector reaches the camera through Symbols (DexKit-backed); compile against the DexKit AAR.
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Symbols.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/PortReport.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/SymbolSearch.java')
 $dexkitAar = Get-ChildItem (Join-Path $env:USERPROFILE '.gradle/caches/modules-2/files-2.1/org.luckypray/dexkit') -Recurse -Filter 'dexkit-*.aar' |
     Where-Object { $_.Name -notlike '*sources*' } | Sort-Object Name -Descending | Select-Object -First 1
