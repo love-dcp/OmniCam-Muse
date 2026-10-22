@@ -196,6 +196,12 @@ public final class MasterPalette {
     private static final int PREVIEW_CARD_INSET_DP = 14;
     private static final int PREVIEW_CARD_RADIUS_DP = 16;
     /**
+     * 哈苏超清's filter row sits inside the card where photo mode draws its own filter carousel:
+     * that carousel runs 1390..1500 with the card bottom at 1770, so the row's bottom edge is 90dp
+     * above the picture.
+     */
+    private static final int HIGHPIXEL_FILTER_BOTTOM_DP = 90;
+    /**
      * The app's own 影调/饱和度 readout, shown along the top edge while its palette is up. Inflating
      * the layout keeps the labels (string/tone, string/camera_master_saturation), font and spacing
      * identical, and it takes the top bar's place rather than sharing it - see the hide lists.
@@ -1204,6 +1210,8 @@ public final class MasterPalette {
         View scrim;
         View controlBar;
         View previewMask;
+        /** 哈苏超清's filter row, drawn separately from the dial (it sits over the picture). */
+        View filterRow;
         View thumb;
         float thumbBase;
         float thumbShift;
@@ -1572,6 +1580,10 @@ public final class MasterPalette {
                 decor.removeView(shelf);
                 shelf = null;
             }
+            if (filterRow != null) {
+                decor.removeView(filterRow);
+                filterRow = null;
+            }
             if (scrim != null) {
                 decor.removeView(scrim);
                 scrim = null;
@@ -1678,16 +1690,6 @@ public final class MasterPalette {
         View find(String id) {
             int res = activity.getResources().getIdentifier(id, "id", activity.getPackageName());
             return res == 0 ? null : decor.findViewById(res);
-        }
-
-        /** Screen top of the first of these ids that is on screen, or 0 when none is. */
-        int firstTop(String... ids) {
-            for (String id : ids) {
-                View view = find(id);
-                if (view == null || !view.isShown() || view.getHeight() <= 0) continue;
-                return screenTop(view);
-            }
-            return 0;
         }
 
         /** Camera paused (gallery, another app): take the palette down but keep the session. */
@@ -2193,24 +2195,28 @@ public final class MasterPalette {
                 return;
             }
             Object presenter = palettePresenter(retro ? MODE_RETRO : MODE_MASTER);
-            // 哈苏超清 always takes the shelf page (filter row + dial). The master page has no filter
-            // row at all, and the pro presenter only shows up after the camera has built its palette
-            // once - so the same button opened the good page first and a filterless page every time
-            // after. Ignoring the presenter here keeps the page stable and writes through the LUT
+            // 哈苏超清 takes the shelf page (filter row + dial): the master page has no filter row
+            // at all, and the pro presenter only shows up after the camera has built its palette
+            // once. Ignoring the presenter here keeps the page stable and writes through the LUT
             // manager, the path POP already uses.
-            if (!retro && isHighPixelMode(currentMode())) presenter = null;
+            boolean highPixel = !retro && isHighPixelMode(currentMode());
+            if (highPixel) presenter = null;
             // Master goes through the pro presenter. Without one - POP, and the video pages, whose
             // pro feature is never built - tone and saturation still work, because they live in the
             // LUT manager rather than in a presenter.
             if (presenter == null
-                && !(retro || isHighPixelMode(currentMode()) || (isVideoMode(currentMode()) && lut() != null))) {
+                && !(retro || highPixel || (isVideoMode(currentMode()) && lut() != null))) {
                 return;
             }
             // Only the pro page has room for - and matches - the camera's own lifted arrangement.
             // Everything else keeps its layout and docks the dial under the shutter instead. POP is
             // stacked whether or not a pro presenter happens to be alive: its preview card ends at
             // 1590 with the filter strip filling 1590..1770, so the lift would bury that strip.
-            boolean stacked = retro || presenter == null;
+            // 哈苏超清 is not: it has the same 4:3 frame and control panel as photo mode, and the
+            // lifted arrangement (rounded card, dial under the picture, readout on top) is exactly
+            // the page the user asked it to look like, so it takes the photo-mode layout with the
+            // module's filter row drawn into the card.
+            boolean stacked = retro || (presenter == null && !highPixel);
             View panel;
             Object recipe;
             String filter;
@@ -2247,9 +2253,19 @@ public final class MasterPalette {
                     : decor.getHeight() - dp(202);
                 int dialPx = dial();
                 int dialTop;
-                // 哈苏超清 has no filter UI of its own; the row is drawn here and sits above the dial.
+                // 哈苏超清 has no filter UI of its own. The row is drawn here: under the dial on the
+                // docked pages, inside the preview card above the shutter on the lifted one (where
+                // photo mode puts its own filter carousel).
                 View filterBar = null;
                 int filterBarH = 0;
+                if (highPixel) {
+                    filterBar = HighPixelFilters.bar(activity, null);
+                    if (filterBar != null) {
+                        filterBarH = dp(34);
+                    } else {
+                        Log.i(TAG, "no filter row for this page: " + HighPixelFilters.describe());
+                    }
+                }
                 if (stacked) {
                     // No room for the lift on these pages. POP's preview card ends at 1590 with its
                     // filter strip filling 1590..1770, and the video page's preview runs to 2070 with
@@ -2263,28 +2279,7 @@ public final class MasterPalette {
                         hidden.put(view, view.getVisibility());
                         view.setVisibility(View.GONE);
                     }
-                    if (isHighPixelMode(currentMode())) {
-                        // The 哈苏超清 page has a 4:3 preview that ends well above the shutter row, so
-                        // the dial sits on the lower edge of the picture like the camera's own panel
-                        // does; docking it under the shutter left it floating over the zoom row.
-                        View frame = find("frame_layout");
-                        int frameBottom = frame != null && frame.getHeight() > 0
-                            ? screenTop(frame) + frame.getHeight() : decor.getHeight() - dp(500);
-                        // The zoom row sits on the bottom edge of the picture; the block goes above it
-                        // rather than over it, so both stay usable.
-                        int zoomTop = firstTop("zoom_seek_bar_container", "zoom_seek_bar", "inertial_zoom_view");
-                        if (zoomTop > dp(200) && zoomTop < frameBottom) frameBottom = zoomTop;
-                        dialTop = Math.max(dp(140), frameBottom - dialPx - dp(16));
-                        filterBar = HighPixelFilters.bar(activity, null);
-                        if (filterBar != null) {
-                            filterBarH = dp(34);
-                            dialTop = Math.max(dp(96), dialTop - filterBarH - dp(6));
-                        } else {
-                            Log.i(TAG, "no filter row for this page: " + HighPixelFilters.describe());
-                        }
-                    } else {
-                        dialTop = decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP);
-                    }
+                    dialTop = decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP);
                 } else {
                     if (controlBar != null) controlBar.setTranslationY(-dp(PALETTE_PANEL_LIFT_DP));
                     panelTop = controlBar != null ? screenTop(controlBar)
@@ -2322,7 +2317,8 @@ public final class MasterPalette {
                     }
                 }
 
-                if (filterBar != null) {
+                int highPixelBarTop = -1;
+                if (filterBar != null && !highPixel) {
                     LinearLayout block = new LinearLayout(activity);
                     block.setOrientation(LinearLayout.VERTICAL);
                     block.addView(filterBar,
@@ -2353,6 +2349,24 @@ public final class MasterPalette {
                     decor.bringChildToFront(panel);
                 }
 
+                // 哈苏超清: the row goes inside the card, where photo mode draws its own filter
+                // carousel - just above the shutter, not under the picture with the dial.
+                if (filterBar != null && highPixel) {
+                    View card = find("frame_layout");
+                    int frameBottom = card != null && card.getHeight() > 0
+                        ? screenTop(card) + card.getHeight() : decor.getHeight() - dp(500);
+                    highPixelBarTop = Math.max(dp(140), frameBottom - dp(HIGHPIXEL_FILTER_BOTTOM_DP) - filterBarH);
+                    FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, filterBarH, Gravity.TOP);
+                    barParams.leftMargin = dp(4);
+                    barParams.rightMargin = dp(4);
+                    barParams.topMargin = highPixelBarTop;
+                    decor.addView(filterBar, barParams);
+                    decor.bringChildToFront(filterBar);
+                    filterRow = filterBar;
+                    Log.i(TAG, "filter row at " + highPixelBarTop + " (card bottom " + frameBottom + ")");
+                }
+
                 readout = buildReadout();
                 if (readout != null) readout.show(tone, saturation);
 
@@ -2369,6 +2383,11 @@ public final class MasterPalette {
                     // below it: without this the scrim covered the dial, so a drag landed on the scrim
                     // and only closed the palette.
                     scrimBottom = Math.max(dp(80), Math.min(scrimBottom, dialTop - dp(6)));
+                }
+                // The 哈苏超清 filter row sits over the picture, so the scrim has to stop above it or
+                // the row never sees a tap.
+                if (highPixelBarTop > 0) {
+                    scrimBottom = Math.max(dp(80), Math.min(scrimBottom, highPixelBarTop - dp(6)));
                 }
                 View scrimView = new View(activity);
                 scrimView.setBackgroundColor(0x01000000);
