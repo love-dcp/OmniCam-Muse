@@ -94,10 +94,21 @@ public final class Symbols {
             Log.i(TAG, "  missing " + failure.getKey() + ": " + failure.getValue());
         }
         Diagnostics.begin(section, loader, apkPath, symbols.resolved.size(), symbols.failures.size());
+        PortReport.write(section, apkPath, dataDir, symbols);
         return symbols;
     }
 
     // --- lookups used by the hooks ------------------------------------------------------------
+
+    /** Read-only view for the port report: id -> resolved reflection objects. */
+    Map<String, List<Object>> resolvedEntries() {
+        return resolved;
+    }
+
+    /** Read-only view for the port report: id -> why it could not be resolved. */
+    Map<String, String> failureEntries() {
+        return failures;
+    }
 
     public boolean has(String... ids) {
         for (String id : ids) if (!resolved.containsKey(id)) return false;

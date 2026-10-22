@@ -235,3 +235,37 @@ X8U（PKJ110）上的现实边界：tuning json 存在且 `EnhanceNetParamsSet` 
 - 后处理路线试过：模块在 `onJpegReceived` 后轮询 `/sdcard/DCIM/Camera`，解码后把画面压进圆、圆外填黑再回写，效果正确，但相机会把同一张 JPEG 分多次写完，早写的副本会被最后一次覆盖——表现为「刚拍完缩略图是鱼眼、点开变回普通照片」。文件尾是补零而不是 EOI 标记，也据此排除了「写完」判定。`PopFisheyeSave` 因此从安装链移除，入口保留。
 
 下一步可选：命中相机真正写盘完成的位置（MediaStore 插入之后）再做重写，或在 APS 管线构建处只给拍照插入该节点并补齐它的初始化参数。
+
+## 移植自检报告（升级后先看这个）
+
+`hook/common/PortReport.java` 在相机与相册进程启动、符号解析完成后各写一份清单，系统升级（OTA）后先读它就知道哪些钩子失配，不用凭感觉试：
+
+```
+/data/user/0/com.oplus.camera/files/jiege/port_status_camera.txt
+/data/user/0/com.coloros.gallery3d/files/jiege/port_status_gallery.txt
+```
+
+文件结构：
+
+```
+# port status, camera
+time=…  pid=… process=…
+app_apk=/product/app/OplusCamera/OplusCamera.apk
+app_size=… app_time=…               ← 这三个值唯一标识一次 APK 构建
+app_version=7.006.123 (60000)
+switches=npop=1 …                   ← persist.omnicam.aura.* 里被显式关掉的半边
+module_apk=…
+
+resolved 256
+  OK   <符号 id> -> class/method/field 实际落点
+missing 0
+  MISS <符号 id> : <解析器给出的原因>
+```
+
+用法：
+
+- 升级后把新报告与旧报告 diff，`MISS` 行就是这次要修的符号；`OK` 行同时给出该符号**这次落在哪个混淆类**，需要改锚点时直接参照；
+- `app_size/app_time/app_version` 变了说明相机或相册换了构建，`cache/jiege_symbols_*.json` 会自动失效重搜（缓存键含 APK 路径、大小与时间）；
+- `switches` 里出现 `=0` 说明该项被系统属性关掉了（例如 `nfish=0` 关掉鱼眼的原生半边），不是符号问题。
+
+报告只包含符号解析结果，不含行为级钩子；APS 管线、鱼眼这类语义相关的改动仍需按 `docs/MODULE.md` 的清单逐项冒烟。
