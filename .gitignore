@@ -25,3 +25,5 @@ __pycache__/
 # user-made module archives and local screenshots
 /*.zip.bak-*
 /zz_*
+
+/shots/
