@@ -129,11 +129,36 @@ final class GrEffectTransport {
         Object presenter = GrModeHooks.captureParams(symbols);
         if (presenter == null) return null;
         Object panel = Reflection.findFieldByType(presenter, symbols.cls("GrStylePanel").getName());
-        if (panel != null) return structBytes(symbols, symbols.call("GrStylePanel.effect", panel));
+        if (panel != null) {
+            byte[] bytes = structBytes(symbols, symbols.call("GrStylePanel.effect", panel));
+            traceEffect("panel", bytes);
+            return bytes;
+        }
+        // Silent fallback: with no panel field there is nothing to read the user's axes from, so a
+        // freshly built GrEffectTable is used -- whose values are the GR defaults (the positive
+        // film ones). That is indistinguishable on screen from "the colour mode is ignored", so it
+        // is reported: a capture taken before the panel ever existed would otherwise be blamed on
+        // the LUT. Keep this line; it is the only way to tell which source a shot used.
         Class<?> tableType = symbols.cls("GrEffectTable");
         Object table = Reflection.findFieldByType(presenter, tableType.getName());
+        String source = table != null ? "presenter-table" : "DEFAULT-table";
         if (table == null) table = XposedHelpers.newInstance(tableType);
-        return structBytes(symbols, XposedHelpers.newInstance(symbols.cls("GrEffect"), table));
+        byte[] bytes = structBytes(symbols, XposedHelpers.newInstance(symbols.cls("GrEffect"), table));
+        traceEffect(source, bytes);
+        return bytes;
+    }
+
+    /** One line per capture attempt: which source the effect struct came from, and its payload. */
+    private static void traceEffect(String source, byte[] bytes) {
+        if (bytes == null) {
+            Log.i(TAG, "GR effect source=" + source + " (null)");
+            return;
+        }
+        StringBuilder head = new StringBuilder();
+        for (int i = 0; i < Math.min(12, bytes.length); i++) {
+            head.append(String.format("%02x", bytes[i]));
+        }
+        Log.i(TAG, "GR effect source=" + source + " len=" + bytes.length + " head=" + head);
     }
 
     private static byte[] structBytes(Symbols symbols, Object effect) throws Throwable {
