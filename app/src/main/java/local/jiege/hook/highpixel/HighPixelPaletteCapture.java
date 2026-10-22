@@ -30,7 +30,6 @@ final class HighPixelPaletteCapture {
 
     static void install(ClassLoader loader) {
         try {
-            if ("0".equals(prop())) return;
             Class<?> presenter = XposedHelpers.findClass(PRESENTER, loader);
             XposedBridge.hookAllMethods(presenter, "U1", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -49,6 +48,11 @@ final class HighPixelPaletteCapture {
 
     private static void stamp(ClassLoader loader, Object message) {
         if (message == null) return;
+        // Off by default: stamping KEY_MASTER_MODE_CONTRAST / KEY_MASTER_MODE_SATURATION on this
+        // mode made the camera take the shot down a palette-capable pipeline that returns
+        // 3244x5132 instead of 6484x10256 (measured 2026-10-23 07:10, identical dial, only the stamp
+        // differing). persist.omnicam.aura.hppalcapture=1 turns it back on for experiments.
+        if (!"1".equals(prop())) return;
         int[] wv = HighPixelFilters.paletteValues();
         if (wv == null || (wv[0] == 0 && wv[1] == 0)) return;
         Object holder = XposedHelpers.getObjectField(message, "D");
