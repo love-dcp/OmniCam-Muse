@@ -202,6 +202,26 @@ chrome 这一层要压过 scrim：两者都是 decor 的直接子 View，只按�
 
 排查时走过的弯路（别再重走）：把 `aps_algo_filter` 挪到链尾、补 `aps_algo_basic_tone`（`MetaItemInfo` 不能加长，换掉 watermark 槽位也没用）、把 `highPictureSize`/`aiHighPixel` 置假强制降成 12 MP（不生效，成片仍是 50 MP）、把 `_normal` 换成 `_master` 变体、改 `mFilterEnumType`、写 `mFilterId`（该字段不存在）。真正有效的方法是：让所有滤镜各拍一张做 A/B，再对比大师模式同一滤镜的请求字段快照——`HighPixelRequest` 诊断会按“模式 × 滤镜”各打一行全部滤镜字段的值。
 
+### 调色盘的成片（未解决，2026-10-22）
+
+预览侧是好的：调色盘一划预览就变。成片侧目前不带调色盘的影调/饱和度，这里记结论和下次的入口。
+
+试过并否掉的：
+
+1. 给 50 MP 的算法链插 `aps_algo_basic_tone`。`createMetaItemInfo` 返回的 `MetaItemInfo` 没有任何 setter（`setValue`/`set`/`put` 都试过），但它内部有个 Map 字段，改那个字段能真正把节点插进链里（日志 `algorithm list replaced through …`，请求变成 `[aps_algo_hybridraw, aps_algo_basic_tone, aps_algo_filter, …]`）。成片无变化：同一构图两组（tone 100 / 饱和 -100 对 0/0）亮度差 3.5 级、色度差 0.34%，等于没生效。
+2. 再补 `aps_algo_fb_hdr_convert`（POP 的链里 `basic_tone` 后面紧跟它）。节点进了链，成片仍然无变化（两组 RGB 逐项几乎相同）。
+3. 改用大师 50 MP 的节点组合：`aps_algo_color_palette` + `aps_algo_basic_tone`。仍然无变化。
+
+关键对照：大师 JPG MAX 也是 50 MP，调色盘在它那儿是有效的（两张：色度 11.15% vs 51.68%、亮度 147 vs 105），但它的请求里 `mbPaletteEnable=false`、`mSaturationValue=-1`、`mb3DLutEnable=false`——没有任何"调色盘字段"，和哈苏超清的请求结构一致。也就是说大师的调色盘不是靠 APS 链节点带进成片的，而是走模块自己的原生大师管线（`master_core` / `master_lut_slots`，只作用于 `basicToneMasterFrame()` 标记的帧），哈苏超清不在这个集合里。
+
+用户观察（下次的入口）：这个问题以前修好过，2026-10-22 当晚也偶发成功过一次，触发方式疑似"先切到该模式、再切回来"再拍。下次排查应该抓这个时序，对比"成功那次"和"失败那次"的：
+
+- `Lut3dDataManager` 的实例与 `N`/`W`/`P` 状态（`MasterPalette` 的 `lutState()` 会打）；
+- 请求里的 `paletteState=`（`HighPixelRequest` 每次快门一行）；
+- 切换模式时相机重建了什么（调色盘引擎 `PalettePreview`、tone 环境）。
+
+现状：预览有效、成片不带。链里插节点那段（`HighPixelFilters.addPaletteNode`）留着，实测不会破坏成片（多张 20-30 MB 正常图像），但也没有效果，随时可删。
+
 ### 属性开关
 
 - `persist.omnicam.aura.hires` — 哈苏超清模式入口（`setprop … 0` 后重启相机即隐藏）。
