@@ -59,19 +59,28 @@ final class HighPixelPaletteCapture {
         Object paletteKey = XposedHelpers.getStaticObjectField(parameters, "KEY_PALETTE_CAPTURE_ENABLE");
         XposedHelpers.callMethod(holder, "e", toneKey, Integer.valueOf(wv[0]));
         XposedHelpers.callMethod(holder, "e", saturationKey, Integer.valueOf(wv[1]));
-        XposedHelpers.callMethod(holder, "e", paletteKey, Boolean.TRUE);
+        // KEY_PALETTE_CAPTURE_ENABLE is deliberately left alone: with it set, the camera takes this
+        // mode's shot down a palette-capable pipeline that returns 3244x5132 instead of the 6484x10256
+        // the plain request produces (measured 2026-10-23 07:08, chain unchanged between the two).
+        if ("1".equals(prop("persist.omnicam.aura.hppalenable", ""))) {
+            XposedHelpers.callMethod(holder, "e", paletteKey, Boolean.TRUE);
+        }
         if (seen.add("written:" + wv[0] + ":" + wv[1])) {
             Log.i(TAG, "palette on the capture request: tone=" + wv[0] + " saturation=" + wv[1]);
         }
     }
 
     private static String prop() {
+        return prop("persist.omnicam.aura.hppalcapture", "");
+    }
+
+    private static String prop(String name, String fallback) {
         try {
             Class<?> type = Class.forName("android.os.SystemProperties");
             return String.valueOf(type.getMethod("get", String.class, String.class)
-                .invoke(null, "persist.omnicam.aura.hppalcapture", ""));
+                .invoke(null, name, fallback));
         } catch (Throwable error) {
-            return "";
+            return fallback;
         }
     }
 }
