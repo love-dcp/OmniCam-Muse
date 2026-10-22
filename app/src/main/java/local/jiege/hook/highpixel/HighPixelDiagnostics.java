@@ -57,7 +57,7 @@ final class HighPixelDiagnostics {
                         + " filterOpen=" + XposedHelpers.getBooleanField(tag, "mbFilterOpen")
                         + " filter=" + XposedHelpers.getObjectField(tag, "mFilterType")
                         + " softLight=" + XposedHelpers.getBooleanField(tag, "mbSoftLightOpen") + "/" + XposedHelpers.getObjectField(tag, "mSoftLightType")
-                        + " algorithms=" + algorithms);
+                        + " paletteState=" + managerState(appLoader) + " algorithms=" + algorithms);
                     logMetaSizes(mode, param);
                     // One full snapshot of the filter-related fields per mode *and* filter: 和光 and
                     // 反差黑白 each carry their own grain block, so every filter gets its own line.
