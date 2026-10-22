@@ -34,8 +34,12 @@ final class HighPixelDiagnostics {
                     Object mode = XposedHelpers.getObjectField(tag, "mCaptureMode");
                     // Log every mode that carries a filter: 大师 / photo / 哈苏超清 / video, so the
                     // working ones (大师) can be read off the same line as the broken one.
+                    // Also log a capture that carries the palette but no filter: master's 50 MP
+                    // request is the one that gets the palette into the file, and comparing its
+                    // fields with this mode's is how the missing piece has to be found.
                     if (XposedHelpers.getBooleanField(tag, "mbFilterOpen") == false
-                        && !MODE.equals(mode)) return;
+                        && !MODE.equals(mode)
+                        && XposedHelpers.getBooleanField(tag, "mbPaletteEnable") == false) return;
                     Object aps = XposedHelpers.getObjectField(tag, "mApsRequestTag");
                     String algorithms = "?";
                     if (!param.hasThrowable() && param.getResult() != null) {
