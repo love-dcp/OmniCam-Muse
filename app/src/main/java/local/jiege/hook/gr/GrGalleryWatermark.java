@@ -42,12 +42,50 @@ public final class GrGalleryWatermark {
         Symbols symbols = Symbols.get();
         hookFeatureGates(symbols);
         hookStyleSource(symbols);
+        hookStyleAssets();
         hookArtwork(classLoader);
         hookEditorSection(symbols);
         hookModelTextLabel(symbols);
         hookGrPhotoInfo(symbols);
         hookMasterFilterName(classLoader);
         Log.i(TAG, "gallery GR watermark hooks installed");
+    }
+
+    /**
+     * The watermark is rendered by the gallery (session {@code watermark_camera_setting_session}),
+     * and it reads the GR styles from its <b>own</b> assets -
+     * {@code watermark_master_styles/gr_style_N.json}, which the ColorOS gallery does not ship. The
+     * style-source redirect above depends on obfuscated classes and fails on this gallery build
+     * ({@code NoSuchMethodError ... h9i}), which left the camera's watermark setting spinning: the
+     * style json came back null and the editor pipeline rejected the frame as an invalid param.
+     * Serving those few assets from the staged directory fixes it one level lower.
+     */
+    private static void hookStyleAssets() {
+        try {
+            XposedBridge.hookAllMethods(android.content.res.AssetManager.class, "open",
+                new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        if (param.args == null || param.args.length == 0) return;
+                        Object name = param.args[0];
+                        if (!(name instanceof String)) return;
+                        String asset = (String) name;
+                        if (!asset.startsWith("watermark_master_styles/")) return;
+                        String file = asset.substring(asset.lastIndexOf('/') + 1);
+                        File staged = new File(STYLE_DIR, file);
+                        if (!staged.isFile()) {
+                            Log.i(TAG, "gallery GR asset missing " + staged);
+                            return;
+                        }
+                        try {
+                            param.setResult(new FileInputStream(staged));
+                        } catch (Throwable error) {
+                            Log.e(TAG, "gallery GR asset open failed", error);
+                        }
+                    }
+                });
+        } catch (Throwable error) {
+            Log.e(TAG, "gallery GR asset hook failed", error);
+        }
     }
 
     private static void hookFeatureGates(Symbols symbols) {
