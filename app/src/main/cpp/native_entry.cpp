@@ -41,6 +41,7 @@ void onLibraryLoaded(const char *name, void *handle) {
     if (moduleOn(kPropGr)) onLibraryLoadedForGr(installHook, name, handle);
     if (moduleOn(kPropSoft)) onLibraryLoadedForSoftLight(installHook, name, handle);
     if (moduleOn(kPropLut)) onLibraryLoadedForLutSlots(installHook, name, handle);
+    onLibraryLoadedForPopFisheye(installHook, name, handle);
 }
 
 // The library is also loaded in system_server and the gallery (release license check). Patching libc

@@ -18,7 +18,8 @@ add_library(jiege_native SHARED
     master_dt.cpp
     master_canon.cpp
     soft_light.cpp
-    master_lut_slots.cpp)
+    master_lut_slots.cpp
+    pop_fisheye.cpp)
 
 target_compile_options(jiege_native PRIVATE -O2 -fvisibility=hidden)
 target_link_libraries(jiege_native log dl camera2ndk android EGL GLESv3)

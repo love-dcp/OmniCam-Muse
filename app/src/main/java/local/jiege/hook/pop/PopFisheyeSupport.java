@@ -140,6 +140,7 @@ public final class PopFisheyeSupport {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (param.args.length == 1 && param.args[0] instanceof Boolean) {
                         lensOn = (Boolean) param.args[0];
+                        writeLensState(lensOn);
                         Log.i(TAG, "lens toggled " + lensOn);
                     }
                 }
@@ -149,9 +150,23 @@ public final class PopFisheyeSupport {
         }
     }
 
-    /** The toggle is persisted per mode; ask the same preference the presenter reads. */
-    private static boolean lensFromPreference() {
+    /**
+     * The native half (pop_fisheye.cpp) has no JNI handle of its own, so the lens state is handed
+     * over as a one-byte file in the app's private directory, which this process owns.
+     */
+    private static void writeLensState(boolean on) {
         try {
+            java.io.FileOutputStream out = new java.io.FileOutputStream(
+                "/data/user/0/com.oplus.camera/files/fisheye_lens", false);
+            out.write(on ? '1' : '0');
+            out.close();
+        } catch (Throwable error) {
+            Log.i(TAG, "lens state write failed: " + error);
+        }
+    }
+
+    /** The toggle is persisted per mode; ask the same preference the presenter reads. */
+    private static boolean lensFromPreference() {        try {
             Class<?> prefs = XposedHelpers.findClass("ia.s1", null);
             Object value = XposedHelpers.callStaticMethod(prefs, "e", RETRO_MODE);
             return Boolean.TRUE.equals(value);

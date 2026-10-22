@@ -61,3 +61,6 @@ bool masterColorCaptureInfo(void *frame, int cctFromParams, MasterColorCapture &
 std::string masterColorCaptureDir(const MasterColorCapture &capture, int width, int height);
 void masterColorPreparePath(const char *path);
 const char *masterColorRemapPath(const char *path, char *buf, size_t n);
+
+// POP fish-eye at capture (pop_fisheye.cpp): sets the renderer's fish-eye byte while the POP lens is on.
+void onLibraryLoadedForPopFisheye(HookFunction hook, const char *name, void *handle);
