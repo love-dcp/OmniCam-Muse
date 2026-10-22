@@ -2634,8 +2634,12 @@ public final class MasterPalette {
                     retro ? MODE_RETRO : MODE_MASTER, tone, saturation);
                 this.pending = pending;
                 // No presenter means the LUT manager is the only write path, so the camera's mode
-                // gate has to be answered for us while the dial is up (see install).
-                directPaletteOpen = holder == null;
+                // gate has to be answered for us while the dial is up (see install). POP takes the
+                // same route even with a presenter alive: the camera's own palette gate does not list
+                // retroCamera, so its rebuild (p()) never runs there - the dial moved, the manager
+                // kept the value, and the picture only changed when something else rebuilt the
+                // program, which is the "works after switching modes" the page showed.
+                directPaletteOpen = holder == null || retro;
                 forcePaletteFlag();
                 if (directPaletteOpen) ensureToneEnv();
                 // On a page the camera keeps the combined LUT away from (the video page) the palette
@@ -2850,7 +2854,7 @@ public final class MasterPalette {
             } else if (callback != null) {
                 paletteDirectFallback = false;
             }
-            boolean direct = stale || callback == null;
+            boolean direct = stale || callback == null || MODE_RETRO.equals(mode);
             // Each step is guarded on its own: a readout that cannot draw must not stop the value
             // from reaching the manager (it used to throw out of here on 哈苏超清, and the whole
             // update - tone/saturation and the LUT hand-over - went with it).
