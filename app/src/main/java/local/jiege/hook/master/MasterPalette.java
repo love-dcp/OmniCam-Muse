@@ -1066,7 +1066,7 @@ public final class MasterPalette {
         // and nothing hands that table to the preview renderer. The camera only re-reads it when it
         // rebuilds its preview program, which is why the dial seemed dead until a mode switch: the
         // switch rebuilt the program and the table came along. Hand it over on these pages too.
-        return directPaletteOpen && !isVideoMode(currentMode());
+        return (directPaletteOpen || paletteDirectFallback) && !isVideoMode(currentMode());
     }
 
     /** True while tone or saturation is off-centre, read from the LUT manager's own two fields. */
@@ -1094,6 +1094,9 @@ public final class MasterPalette {
      * The camera's own mode gate is answered for us while this holds - see {@link #install}.
      */
     private static volatile boolean directPaletteOpen;
+
+    /** Set while a page whose presenter was replaced writes through the LUT manager instead. */
+    private static volatile boolean paletteDirectFallback;
 
     /**
      * {@code Lut3dDataManager.p()} only rebuilds the combined LUT when it is initialised (<b>N</b>),
@@ -2832,10 +2835,22 @@ public final class MasterPalette {
         }
 
         private void apply() throws Throwable {
-            // Mode left (or the camera rebuilt its presenter): stop pushing values into it. With no
-            // presenter at all (POP built outside the pro feature) the direct route is the only one,
-            // and it stays valid for as long as the palette is on screen.
-            if (presenter != null && palettePresenter(mode) != presenter) return;
+            // The camera rebuilds its presenter when it recreates a page (entering POP, coming back
+            // from another mode, after a capture). Writing into the old one used to be the end of the
+            // update - the dial moved and nothing happened until the page was rebuilt again by a mode
+            // switch. Fall through to the LUT manager instead: it is the same path a page without a
+            // presenter already uses, and the table below hands the result to the preview.
+            boolean stale = presenter != null && palettePresenter(mode) != presenter;
+            if (stale) {
+                paletteDirectFallback = true;
+                if (!staleLogged) {
+                    staleLogged = true;
+                    Log.i(TAG, "presenter replaced on " + mode + ", writing through the LUT manager");
+                }
+            } else if (callback != null) {
+                paletteDirectFallback = false;
+            }
+            boolean direct = stale || callback == null;
             // Each step is guarded on its own: a readout that cannot draw must not stop the value
             // from reaching the manager (it used to throw out of here on 哈苏超清, and the whole
             // update - tone/saturation and the LUT hand-over - went with it).
@@ -2850,7 +2865,7 @@ public final class MasterPalette {
                 }
             }
             if (tone != appliedTone) {
-                if (callback != null) call(callback, "a", tone, toneKey);
+                if (!direct) call(callback, "a", tone, toneKey);
                 else {
                     writeDirect("P0", tone);
                     notifyMode("P0", tone);
@@ -2858,7 +2873,7 @@ public final class MasterPalette {
                 appliedTone = tone;
             }
             if (saturation != appliedSaturation) {
-                if (callback != null) call(callback, "a", saturation, saturationKey);
+                if (!direct) call(callback, "a", saturation, saturationKey);
                 else {
                     writeDirect("O0", saturation);
                     notifyMode("O0", saturation);
@@ -2869,10 +2884,13 @@ public final class MasterPalette {
                 lastLoggedTone = tone;
                 lastLoggedSaturation = saturation;
                 Log.i(TAG, "apply tone=" + tone + " saturation=" + saturation
-                    + " via=" + (callback != null ? "presenter" : "lut"));
+                    + " via=" + (direct ? "lut" : "presenter"));
             }
             // The combined LUT changed, so re-hand it to the preview where the camera does not.
             applyPreviewLut();
         }
+
+        /** Set when the presenter this page was opened with has been replaced by the camera. */
+        private boolean staleLogged;
     }
 }
