@@ -20,7 +20,7 @@ import local.jiege.hook.common.Log;
  *       preview is drawn with.</li>
  * </ul>
  */
-final class PaletteCaptureExport {
+public final class PaletteCaptureExport {
     private static final String TAG = "PaletteCapture";
     private static final String DIR = "jiege";
     private static long lastWrite;
@@ -28,6 +28,27 @@ final class PaletteCaptureExport {
     private static long lastHash;
 
     private PaletteCaptureExport() {}
+
+    /**
+     * Disarms the capture hook. Called when the camera process starts: the state file outlives a
+     * restart, and a table left armed from an earlier session then washed out every later shot (the
+     * preview looked right because it draws the filter, not this table).
+     */
+    public static void clear(java.io.File filesDir) {
+        if (filesDir == null) return;
+        try {
+            java.io.File dir = new java.io.File(filesDir, DIR);
+            java.io.File state = new java.io.File(dir, "palette_state");
+            if (!state.isFile()) return;
+            write(state, "0".getBytes("UTF-8"));
+            lastEnabled = false;
+            lastHash = 0;
+            lastWrite = System.currentTimeMillis();
+            Log.i(TAG, "palette cleared for the capture");
+        } catch (Throwable error) {
+            Log.e(TAG, "clear failed", error);
+        }
+    }
 
     /** Writes the current state, throttled: the dial flushes several times per gesture. */
     static void publish(File filesDir, boolean enabled, float[] lut) {

@@ -115,6 +115,8 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             // Every install below can be taken out at runtime through persist.omnicam.aura.skip
             // (see Skip) so a hang can be bisected by group without a rebuild.
             if (!Skip.off("native")) System.loadLibrary("jiege_native");
+            // A palette table left armed by an earlier session would tint every shot taken here.
+            local.jiege.hook.master.PaletteCaptureExport.clear(new java.io.File(param.appInfo.dataDir, "files"));
             // Upstream 4.4.4: RAW / ccmVec / HDRTransform / capture dumps, each with its own switch.
             if (!Skip.off("dump")) CaptureDumps.installCamera();
             if (CAMERA.equals(param.processName)) MainThreadWatchdog.install();
