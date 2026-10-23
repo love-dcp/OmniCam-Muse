@@ -1796,10 +1796,13 @@ public final class MasterPalette {
             TextView label = new TextView(activity);
             label.setText("重置");
             label.setTextColor(0xFFFFFFFF);
-            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 9);
             label.setGravity(Gravity.CENTER);
+            // TextView adds space for ascenders/descenders by default; inside a thumbnail-sized box
+            // that padding is what pushed the glyphs under the frame's bottom edge.
+            label.setIncludeFontPadding(false);
             reset.addView(label, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             reset.setOnClickListener(v -> {
                 Log.i(TAG, "reset clicked");
                 if (pending != null) pending.change(0, 0);
@@ -1856,10 +1859,16 @@ public final class MasterPalette {
                 thumbView.getLocationOnScreen(at);
                 int screenWidth = activity.getResources().getDisplayMetrics().widthPixels;
                 FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) reset.getLayoutParams();
-                params.width = width;
-                params.height = height;
-                params.leftMargin = screenWidth - at[0] - width;
-                params.topMargin = at[1];
+                // 1 mm larger than the thumbnail in both directions, grown around its centre so the
+                // mirroring with the left-hand button still holds.
+                int grow = dp(6);
+                int outerWidth = width + grow;
+                int outerHeight = height + grow;
+                int centerX = screenWidth - (at[0] + width / 2);
+                params.width = outerWidth;
+                params.height = outerHeight;
+                params.leftMargin = centerX - outerWidth / 2;
+                params.topMargin = at[1] + (height - outerHeight) / 2;
                 reset.setLayoutParams(params);
                 // The thumbnail's frame: the same size, the same corner radius, a white outline.
                 GradientDrawable frame = new GradientDrawable();
@@ -1867,13 +1876,22 @@ public final class MasterPalette {
                 frame.setStroke(dp(1.5f), 0xFFFFFFFF);
                 frame.setCornerRadius(thumbnailRadius(thumbView));
                 reset.setBackground(frame);
-                reset.setPadding(dp(2), dp(2), dp(2), dp(2));
+                // 1 mm of clearance under the label: without it the glyphs sat on the frame's bottom
+                // edge (the padding is inside the outline, so this lifts the whole column).
+                reset.setPadding(dp(2), dp(2), dp(2), dp(8));
                 // Icon over its label, the two together exactly the thumbnail's size: the icon takes
                 // whatever height the label leaves.
-                int labelHeight = dp(14);
-                int iconSize = Math.max(dp(20), height - labelHeight);
+                // The frame has 2dp of padding on every side; the column fills what is left, which is
+                // what keeps the label inside the box instead of under its bottom edge.
+                int padding = dp(2);
+                int bottom = dp(8);
+                int inner = outerHeight - padding - bottom;
+                int labelHeight = dp(11);
+                int iconSize = Math.max(dp(14), inner - labelHeight - dp(2));
                 if (reset instanceof LinearLayout) {
                     LinearLayout column = (LinearLayout) reset;
+                    column.setGravity(android.view.Gravity.CENTER_HORIZONTAL
+                        | android.view.Gravity.CENTER_VERTICAL);
                     if (column.getChildCount() > 0) {
                         column.getChildAt(0).setLayoutParams(
                             new LinearLayout.LayoutParams(iconSize, iconSize));
