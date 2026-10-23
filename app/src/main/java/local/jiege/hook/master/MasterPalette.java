@@ -1635,6 +1635,10 @@ public final class MasterPalette {
                 decor.removeView(chrome);
                 chrome = null;
             }
+            if (resetButton != null) {
+                decor.removeView(resetButton);
+                resetButton = null;
+            }
             if (scrim != null) {
                 decor.removeView(scrim);
                 scrim = null;
@@ -1810,25 +1814,31 @@ public final class MasterPalette {
          */
         void attachMasterReset() {
             if (resetButton != null) return;
-            View shutter = find("shutter_button");
-            if (shutter == null) return;
+            View thumbView = find("thumbnail");
+            if (thumbView == null) return;
             View reset = buildResetButton();
+            reset.setElevation(dp(2));
             decor.addView(reset, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            decor.bringChildToFront(reset);
             resetButton = reset;
+            // Mirror the thumbnail: same size, same height, the same distance from the opposite edge.
             Runnable place = () -> {
+                int width = thumbView.getWidth() > 0 ? thumbView.getWidth() : dp(48);
+                int height = thumbView.getHeight() > 0 ? thumbView.getHeight() : dp(48);
                 int[] at = new int[2];
-                shutter.getLocationOnScreen(at);
-                int width = reset.getWidth() > 0 ? reset.getWidth() : dp(40);
-                int height = reset.getHeight() > 0 ? reset.getHeight() : dp(56);
+                thumbView.getLocationOnScreen(at);
+                int screenWidth = activity.getResources().getDisplayMetrics().widthPixels;
                 FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) reset.getLayoutParams();
-                params.leftMargin = Math.min(at[0] + shutter.getWidth() + dp(24),
-                    activity.getResources().getDisplayMetrics().widthPixels - width - dp(8));
-                params.topMargin = at[1] + (shutter.getHeight() - height) / 2;
+                params.width = width;
+                params.height = height;
+                params.leftMargin = screenWidth - at[0] - width;
+                params.topMargin = at[1];
                 reset.setLayoutParams(params);
+                reset.requestLayout();
             };
             reset.post(place);
-            shutter.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> place.run());
+            thumbView.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> place.run());
         }
 
         View buildHighPixelChrome(int dialTop, int dialPx) {
@@ -1958,7 +1968,7 @@ public final class MasterPalette {
             // resetting the dial, because its click reached this handler as a foreign one.
             for (View node = view; node != null; ) {
                 if (entryId != 0 && node.getId() == entryId) return;
-                if (node == shelf || node == button || node == chrome) return;
+                if (node == shelf || node == button || node == chrome || node == resetButton) return;
                 ViewParent parent = node.getParent();
                 node = parent instanceof View ? (View) parent : null;
             }
