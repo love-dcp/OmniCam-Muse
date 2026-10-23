@@ -1812,6 +1812,32 @@ public final class MasterPalette {
          * 大师 gets the same 重置, mirrored to the thumbnail: it sits to the right of the shutter at
          * the same height, so the two frame the shutter the way photo mode's do.
          */
+
+    /** The thumbnail's corner radius, read off its background; 8dp when it is not a shape. */
+    private float thumbnailRadius(View thumbnail) {
+        try {
+            android.graphics.drawable.Drawable background = thumbnail.getBackground();
+            if (background instanceof GradientDrawable) {
+                for (java.lang.reflect.Field field : background.getClass().getDeclaredFields()) {
+                    if (!field.getName().contains("Radius") && !field.getName().contains("State")) continue;
+                    field.setAccessible(true);
+                    Object value = field.get(background);
+                    if (value instanceof Float) return (Float) value;
+                    if (value != null) {
+                        for (java.lang.reflect.Field inner : value.getClass().getDeclaredFields()) {
+                            if (!inner.getName().contains("adius")) continue;
+                            inner.setAccessible(true);
+                            Object radius = inner.get(value);
+                            if (radius instanceof Float) return (Float) radius;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return dp(8);
+    }
+
         void attachMasterReset() {
             if (resetButton != null) return;
             View thumbView = find("thumbnail");
@@ -1835,6 +1861,28 @@ public final class MasterPalette {
                 params.leftMargin = screenWidth - at[0] - width;
                 params.topMargin = at[1];
                 reset.setLayoutParams(params);
+                // The thumbnail's frame: the same size, the same corner radius, a white outline.
+                GradientDrawable frame = new GradientDrawable();
+                frame.setColor(0x00000000);
+                frame.setStroke(dp(1.5f), 0xFFFFFFFF);
+                frame.setCornerRadius(thumbnailRadius(thumbView));
+                reset.setBackground(frame);
+                reset.setPadding(dp(2), dp(2), dp(2), dp(2));
+                // Icon over its label, the two together exactly the thumbnail's size: the icon takes
+                // whatever height the label leaves.
+                int labelHeight = dp(14);
+                int iconSize = Math.max(dp(20), height - labelHeight);
+                if (reset instanceof LinearLayout) {
+                    LinearLayout column = (LinearLayout) reset;
+                    if (column.getChildCount() > 0) {
+                        column.getChildAt(0).setLayoutParams(
+                            new LinearLayout.LayoutParams(iconSize, iconSize));
+                    }
+                    if (column.getChildCount() > 1) {
+                        column.getChildAt(1).setLayoutParams(new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, labelHeight));
+                    }
+                }
                 reset.requestLayout();
             };
             reset.post(place);
