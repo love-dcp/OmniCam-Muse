@@ -234,6 +234,20 @@ MuseSoftLight: palette applied to the capture 4096x3072
 
 另外修掉一个真 bug：模块热更新后，还活着的进程会读到已删除的旧 APK 路径，符号表解析成 0（相册「色彩风格」入口因此整片消失）。`Symbols.readSpec()` 现在优先用自身 code source 指向的 APK。
 
+### 相册「色彩风格」的显示偏差：试过、决定不做（2026-10-23 上午）
+
+现象：哈苏超清的照片点进「色彩风格」，首屏显示的是中性效果、而且转了 90°；切换一次滤镜再切回来就正常。大师 JPG MAX 的照片没有这个问题。
+
+原因是拍照时盖了 `mbPaletteEnable`（这一步不能去掉，它决定成片走 `MsRenderHDRHostBuffer`，原生调色盘就在那儿应用），照片于是带上 `src.image` + `filter.info`，相册按源图重渲。
+
+方案 2（跳过重渲、直接显示成片）查到的地方：
+
+- `PaletteProcessUnitSDK.processImage()`：**无参、返回 void**，返回时 `mBitmapOutputSlot0/1` 还是 null，没有位图可换；
+- `BitmapColorPaletteManager.processColorPalette(IPluginArgumentsAccessor, ColorPaletteParameter)`：返回 boolean，位图在 accessor 里；
+- accessor 的方法：`getArg/2`、`setImmediateArg/2`、`setStoreAbleArg/2`、`setTemporaryArg/2`、`toBitmap/1`、`toTexture/2`；而 `toBitmap(String)` 直接 NoSuchMethodError —— 参数不是 String（是插件自己的 key 类型），没有文档，继续试下去就是盲猜，风险是把相册弄崩（此前已崩过一次 SIGSEGV）。
+
+结论：**接受现状**——成片本身的颜色是对的，相册那一页首屏显示中性、切一次滤镜后恢复。要彻底解决得逆向 `filter.info`（加密）或插件 accessor 的 key 类型，属于独立的一块工作。
+
 ### 属性开关
 
 - `persist.omnicam.aura.hires` — 哈苏超清模式入口（`setprop … 0` 后重启相机即隐藏）。

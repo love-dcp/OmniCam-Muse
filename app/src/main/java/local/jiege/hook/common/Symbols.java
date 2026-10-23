@@ -301,12 +301,29 @@ public final class Symbols {
     private static String readSpec() throws Exception {
         InputStream in = Symbols.class.getClassLoader().getResourceAsStream(SPEC);
         if (in != null) return new String(readAll(in), "UTF-8");
-        String path = modulePath;
+        // The path recorded at zygote init goes stale when the module is reinstalled while the app
+        // process is alive (the old /data/app directory is deleted, and the gallery then resolved
+        // nothing at all). Our own code source always names the apk that is actually loaded.
+        String path = ownApk();
+        if (path == null) path = modulePath;
         if (path == null) throw new IllegalStateException(SPEC + " not readable (no module path)");
         try (java.util.zip.ZipFile apk = new java.util.zip.ZipFile(path)) {
             java.util.zip.ZipEntry entry = apk.getEntry(SPEC);
             if (entry == null) throw new IllegalStateException(SPEC + " missing from " + path);
             return new String(readAll(apk.getInputStream(entry)), "UTF-8");
+        }
+    }
+
+    /** The module apk this class was loaded from, or null when the runtime does not say. */
+    private static String ownApk() {
+        try {
+            java.security.CodeSource source = Symbols.class.getProtectionDomain().getCodeSource();
+            if (source == null || source.getLocation() == null) return null;
+            String path = source.getLocation().getPath();
+            if (path == null || !path.endsWith(".apk")) return null;
+            return new java.io.File(path).isFile() ? path : null;
+        } catch (Throwable error) {
+            return null;
         }
     }
 

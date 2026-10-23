@@ -49,7 +49,6 @@ public final class GalleryColorPalette {
                 }
             });
             GalleryPaletteScope.install(classLoader);
-            hookEditorEntry(classLoader);
             Log.i(TAG, "gallery palette editor enabled");
         } catch (Throwable error) {
             Log.e(TAG, "gallery palette switch hook failed", error);
@@ -76,77 +75,6 @@ public final class GalleryColorPalette {
      * the caller's GL context, which this gallery does not pass for texture requests; the
      * context current on the calling thread is given to the SDK.
      */
-
-    /**
-     * Option C, kept behind a switch: the editor re-renders these shots from the src.image the camera
-     * embedded, and on this mode that render comes out turned a quarter turn. The tiles the SDK
-     * hands back are plain Bitmaps (mBitmapOutputSlot0/1), so they are logged and, with
-     * persist.omnicam.aura.gpalrot=1, rotated upright.
-     */
-    private static void fixOrientation(Object unit) {
-        try {
-            boolean rotate = "1".equals(prop("persist.omnicam.aura.gpalrot"));
-            for (String slot : new String[] {"mBitmapOutputSlot0", "mBitmapOutputSlot1"}) {
-                Object value = XposedHelpers.getObjectField(unit, slot);
-                if (!(value instanceof android.graphics.Bitmap)) continue;
-                android.graphics.Bitmap bitmap = (android.graphics.Bitmap) value;
-                if (SEEN.compareAndSet(false, true)) {
-                    Log.i(TAG, slot + " " + bitmap.getWidth() + "x" + bitmap.getHeight()
-                        + " rotate=" + rotate);
-                }
-                if (!rotate) continue;
-                android.graphics.Matrix matrix = new android.graphics.Matrix();
-                matrix.postRotate(90);
-                android.graphics.Bitmap turned = android.graphics.Bitmap.createBitmap(
-                    bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-                XposedHelpers.setObjectField(unit, slot, turned);
-            }
-        } catch (Throwable error) {
-            Log.i(TAG, "orientation fix skipped: " + error);
-        }
-    }
-
-    private static final java.util.concurrent.atomic.AtomicBoolean SEEN =
-        new java.util.concurrent.atomic.AtomicBoolean();
-
-    private static String prop(String name) {
-        try {
-            Class<?> type = Class.forName("android.os.SystemProperties");
-            return String.valueOf(type.getMethod("get", String.class, String.class)
-                .invoke(null, name, ""));
-        } catch (Throwable error) {
-            return "";
-        }
-    }
-
-
-    /**
-     * The editor's own entry: {@code BitmapColorPaletteManager.processColorPalette} is what the
-     * crashed stack named, and unlike the SDK's no-argument processImage it takes and returns a
-     * Bitmap - the place where the displayed image can be replaced.
-     */
-    private static void hookEditorEntry(ClassLoader loader) {
-        try {
-            Class<?> manager = XposedHelpers.findClass(
-                "com.oplus.tbluniformeditor.plugins.colorpalette.BitmapColorPaletteManager", loader);
-            for (java.lang.reflect.Method method : manager.getDeclaredMethods()) {
-                if (!method.getName().equals("processColorPalette")) continue;
-                final String label = method.getName() + "(" + java.util.Arrays.toString(
-                    method.getParameterTypes()) + ")->" + method.getReturnType().getSimpleName();
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        if (ENTRY.compareAndSet(false, true)) Log.i(TAG, "editor entry " + label);
-                    }
-                });
-            }
-        } catch (Throwable error) {
-            Log.i(TAG, "editor entry hook skipped: " + error);
-        }
-    }
-
-    private static final java.util.concurrent.atomic.AtomicBoolean ENTRY =
-        new java.util.concurrent.atomic.AtomicBoolean();
-
     private static void p010PathOnly(ClassLoader sdkLoader) {
         String sdk = "com.oplus.ocs.camera.ipusdk.processunit.palette.PaletteProcessUnitSDK";
         XposedHelpers.findAndHookMethod(sdk, sdkLoader, "isTextureRequest", XC_MethodReplacement.returnConstant(Boolean.FALSE));
@@ -182,7 +110,6 @@ public final class GalleryColorPalette {
             }
 
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                fixOrientation(param.thisObject);
                 // The SDK's GL bridge makes its own context current and does not always restore
                 // the caller's; the editor then renders into the wrong context (glUseProgram
                 // GL_INVALID_VALUE) and the preview goes black. Put back what was current.
