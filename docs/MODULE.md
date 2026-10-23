@@ -227,6 +227,13 @@ MuseSoftLight: palette applied to the capture 4096x3072
 
 开关：`persist.omnicam.aura.hppalcapture=1` 会重新打开"往请求盖调色盘键"的实验路径（默认关，因为会掉分辨率）。
 
+### 调色盘成片的两个后续发现（2026-10-23 上午）
+
+1. **`mbPaletteEnable` 这个盖章不能关**。它决定成片走哪条渲染入口：有它才进 `MsRenderHDRHostBuffer`（原生调色盘就在那儿应用），没它就落到 HDRTransform 的 quick 路径，调色盘直接失效（实测 07:52 那次没有 `pass host` 行）。副作用是照片会带 `src.image` + `filter.info`，相册的「色彩风格」于是拿源图重渲。
+2. **相册重渲的后果**：我们拍的照片在「色彩风格」里首屏是中性的、且方向转 90°；大师 JPG MAX 的照片不带这两个块，打开正常。相册那边的实现是 `PaletteProcessUnitSDK.processImage()`（无参、返回 void），位图走实例字段 `mBitmapOutputSlot0/1`，输入是 P010 池 —— 要"跳过重渲、直接显示成片"需要改这些内部字段，风险高，暂未做。
+
+另外修掉一个真 bug：模块热更新后，还活着的进程会读到已删除的旧 APK 路径，符号表解析成 0（相册「色彩风格」入口因此整片消失）。`Symbols.readSpec()` 现在优先用自身 code source 指向的 APK。
+
 ### 属性开关
 
 - `persist.omnicam.aura.hires` — 哈苏超清模式入口（`setprop … 0` 后重启相机即隐藏）。
