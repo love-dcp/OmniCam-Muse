@@ -1915,10 +1915,12 @@ public final class MasterPalette {
             // with them. Only a click on something the user can actually see closes it.
             if (!view.isShown()) return;
             // On the 哈苏超清 page the camera's right-hand button is the palette's own entry, and the
-            // click that opens the dial arrives here right after it, which closed it again.
+            // click that opens the dial arrives here right after it, which closed it again. The
+            // chrome (back arrow and 重置) is ours as well: 重置 used to close the palette instead of
+            // resetting the dial, because its click reached this handler as a foreign one.
             for (View node = view; node != null; ) {
                 if (entryId != 0 && node.getId() == entryId) return;
-                if (node == shelf || node == button) return;
+                if (node == shelf || node == button || node == chrome) return;
                 ViewParent parent = node.getParent();
                 node = parent instanceof View ? (View) parent : null;
             }
