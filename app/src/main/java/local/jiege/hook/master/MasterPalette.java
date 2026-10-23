@@ -828,14 +828,12 @@ public final class MasterPalette {
             return true;
         }
         current.open();
-        // Neutral only when this page is entered from another mode. Neutralising on every open put
-        // the dial back to 0 right after a shutter tap closed the palette (the camera synthesises a
-        // click on the entry), so the capture was taken with 0/0 while the user had just set 100.
-        String mode = currentMode();
-        if (!mode.equals(neutralizedMode)) {
-            neutralizedMode = mode;
-            current.neutralize();
-        }
+        // The dial starts from zero every time the page is opened by the user: a look left over from
+        // the last session is not what they asked for. The one exception is the reopen the camera
+        // synthesises right after a shutter tap closed the palette - neutralising there put the dial
+        // back to 0 before the shot was processed (2026-10-22).
+        boolean afterShutter = System.currentTimeMillis() - lastHideAt < 1500 && lastHideByShutter;
+        if (!afterShutter) current.neutralize();
         return true;
     }
 
@@ -1109,6 +1107,11 @@ public final class MasterPalette {
      */
     private static volatile boolean directPaletteOpen;
 
+    /** When the palette last closed, and whether the shutter did it: a reopen right after a
+     * shutter tap is the camera's synthesized click, and must not wipe the dial. */
+    private static volatile long lastHideAt;
+    private static volatile boolean lastHideByShutter;
+
     /** The camera's files dir, where the capture hook reads the palette (see PaletteCaptureExport). */
     private static volatile java.io.File paletteFilesDir;
 
@@ -1262,6 +1265,8 @@ public final class MasterPalette {
         boolean retroOpen;
         /** The filter presenter this page writes through (POP: the retro one; null elsewhere). */
         Object filterPresenter;
+        /** 大师's own 重置, added next to the shutter. */
+        View resetButton;
         boolean grActive;
         boolean grSuppressed;
         /** The palette was opened from our own button rather than by the camera's GR menu. */
@@ -1769,6 +1774,63 @@ public final class MasterPalette {
          * 重置 on the left of the dial. 哈苏超清 has neither of its own, and without them the page
          * does not read like the camera's.
          */
+        /** The 重置 button: a round icon over its label, the clearance photo mode gives it. */
+        View buildResetButton() {
+            LinearLayout reset = new LinearLayout(activity);
+            reset.setOrientation(LinearLayout.VERTICAL);
+            reset.setGravity(Gravity.CENTER_HORIZONTAL);
+            TextView icon = new TextView(activity);
+            icon.setText("\u27F2");
+            icon.setTextColor(0xFFFFFFFF);
+            icon.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+            icon.setGravity(Gravity.CENTER);
+            GradientDrawable background = new GradientDrawable();
+            background.setShape(GradientDrawable.OVAL);
+            background.setColor(0x66000000);
+            icon.setBackground(background);
+            reset.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            TextView label = new TextView(activity);
+            label.setText("重置");
+            label.setTextColor(0xFFFFFFFF);
+            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
+            label.setGravity(Gravity.CENTER);
+            reset.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            reset.setOnClickListener(v -> {
+                Log.i(TAG, "reset clicked");
+                if (pending != null) pending.change(0, 0);
+                if (readout != null) readout.show(0, 0);
+            });
+            return reset;
+        }
+
+        /**
+         * 大师 gets the same 重置, mirrored to the thumbnail: it sits to the right of the shutter at
+         * the same height, so the two frame the shutter the way photo mode's do.
+         */
+        void attachMasterReset() {
+            if (resetButton != null) return;
+            View shutter = find("shutter_button");
+            if (shutter == null) return;
+            View reset = buildResetButton();
+            decor.addView(reset, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            resetButton = reset;
+            Runnable place = () -> {
+                int[] at = new int[2];
+                shutter.getLocationOnScreen(at);
+                int width = reset.getWidth() > 0 ? reset.getWidth() : dp(40);
+                int height = reset.getHeight() > 0 ? reset.getHeight() : dp(56);
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) reset.getLayoutParams();
+                params.leftMargin = Math.min(at[0] + shutter.getWidth() + dp(24),
+                    activity.getResources().getDisplayMetrics().widthPixels - width - dp(8));
+                params.topMargin = at[1] + (shutter.getHeight() - height) / 2;
+                reset.setLayoutParams(params);
+            };
+            reset.post(place);
+            shutter.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> place.run());
+        }
+
         View buildHighPixelChrome(int dialTop, int dialPx) {
             FrameLayout frame = new FrameLayout(activity);
 
@@ -1791,31 +1853,7 @@ public final class MasterPalette {
             backParams.topMargin = dp(34);
             frame.addView(back, backParams);
 
-            LinearLayout reset = new LinearLayout(activity);
-            reset.setOrientation(LinearLayout.VERTICAL);
-            reset.setGravity(Gravity.CENTER_HORIZONTAL);
-            TextView icon = new TextView(activity);
-            icon.setText("\u27F2");
-            icon.setTextColor(0xFFFFFFFF);
-            icon.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
-            icon.setGravity(Gravity.CENTER);
-            GradientDrawable iconBackground = new GradientDrawable();
-            iconBackground.setShape(GradientDrawable.OVAL);
-            iconBackground.setColor(0x66000000);
-            icon.setBackground(iconBackground);
-            reset.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
-            TextView label = new TextView(activity);
-            label.setText("重置");
-            label.setTextColor(0xFFFFFFFF);
-            label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10);
-            label.setGravity(Gravity.CENTER);
-            reset.addView(label, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            reset.setOnClickListener(v -> {
-                Log.i(TAG, "chrome reset clicked");
-                if (pending != null) pending.change(0, 0);
-                if (readout != null) readout.show(0, 0);
-            });
+            View reset = buildResetButton();
             FrameLayout.LayoutParams resetParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
@@ -1925,6 +1963,8 @@ public final class MasterPalette {
                 node = parent instanceof View ? (View) parent : null;
             }
             Log.i(TAG, "closed: camera UI tapped (" + idOf(view) + ")");
+            lastHideAt = System.currentTimeMillis();
+            lastHideByShutter = idOf(view).contains("shutter_button");
             hide();
         }
 
@@ -2644,6 +2684,7 @@ public final class MasterPalette {
                 // Photo mode's chrome around the dial: the back arrow and 重置. Added after the
                 // scrim so they sit on top of it.
                 if (highPixel) chrome = buildHighPixelChrome(dialTop, dialPx);
+                else if (!retro) attachMasterReset();
                 postDump("master-palette");
                 // Two later snapshots: if the user goes on to open the filter page, the state that
                 // broke the drag is captured even when the auto-close above does not fire.
