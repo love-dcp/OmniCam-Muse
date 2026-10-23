@@ -49,6 +49,7 @@ public final class GalleryColorPalette {
                 }
             });
             GalleryPaletteScope.install(classLoader);
+            hookEditorEntry(classLoader);
             Log.i(TAG, "gallery palette editor enabled");
         } catch (Throwable error) {
             Log.e(TAG, "gallery palette switch hook failed", error);
@@ -117,6 +118,34 @@ public final class GalleryColorPalette {
             return "";
         }
     }
+
+
+    /**
+     * The editor's own entry: {@code BitmapColorPaletteManager.processColorPalette} is what the
+     * crashed stack named, and unlike the SDK's no-argument processImage it takes and returns a
+     * Bitmap - the place where the displayed image can be replaced.
+     */
+    private static void hookEditorEntry(ClassLoader loader) {
+        try {
+            Class<?> manager = XposedHelpers.findClass(
+                "com.oplus.tbluniformeditor.plugins.colorpalette.BitmapColorPaletteManager", loader);
+            for (java.lang.reflect.Method method : manager.getDeclaredMethods()) {
+                if (!method.getName().equals("processColorPalette")) continue;
+                final String label = method.getName() + "(" + java.util.Arrays.toString(
+                    method.getParameterTypes()) + ")->" + method.getReturnType().getSimpleName();
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        if (ENTRY.compareAndSet(false, true)) Log.i(TAG, "editor entry " + label);
+                    }
+                });
+            }
+        } catch (Throwable error) {
+            Log.i(TAG, "editor entry hook skipped: " + error);
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean ENTRY =
+        new java.util.concurrent.atomic.AtomicBoolean();
 
     private static void p010PathOnly(ClassLoader sdkLoader) {
         String sdk = "com.oplus.ocs.camera.ipusdk.processunit.palette.PaletteProcessUnitSDK";
