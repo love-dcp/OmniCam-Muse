@@ -17,13 +17,20 @@ __pycache__/
 # local working state (kept on disk, never committed)
 /.workbuddy/
 /.muse_tmp/
+/.tools/
+/.build-*/
 /build_*.txt
 /gradle_*.txt
 /javac_*.txt
 /pkg_err.txt
+/.tmp-build/
+/.release-build*
+# pulled off the device for one investigation, never shipped
+/work/
 
 # user-made module archives and local screenshots
 /*.zip.bak-*
 /zz_*
+/*.jpg
 
 /shots/
