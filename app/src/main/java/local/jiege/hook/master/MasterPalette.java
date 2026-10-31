@@ -332,6 +332,24 @@ public final class MasterPalette {
             } catch (Throwable error) {
                 Log.i(TAG, "tone env hook skipped " + error);
             }
+            // The camera re-runs this initialiser about a second after the dial opens and logs
+            // "mPaletteFlag: false"; re-arm and hand the table over again after it returns.
+            try {
+                Class<?> lutClass = XposedHelpers.findClass(
+                    "com.oplus.camera.common.utils.Lut3dDataManager", loader);
+                XC_MethodHook rearm = new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (!directPaletteOpen || !paletteEngaged()) return;
+                        forcePaletteFlag();
+                        applyPreviewLut();
+                        if (rendererSeen.add("rearm")) Log.i(TAG, "palette re-armed after tone init");
+                    }
+                };
+                XposedBridge.hookAllMethods(lutClass, "initializeBasicToneEnv", rearm);
+                XposedBridge.hookAllMethods(lutClass, "initialize", rearm);
+            } catch (Throwable error) {
+                Log.i(TAG, "tone re-arm hook skipped " + error);
+            }
             // The preview renderer only initialises the basic-tone environment when the camera tells
             // it to (nn.l.y0's first argument, taken from nn.l.l, which is derived from the mode).
             // The video page is told to skip it, and Lut3dDataManager.p() bails out on its very first
@@ -828,12 +846,10 @@ public final class MasterPalette {
             return true;
         }
         current.open();
-        // The dial starts from zero every time the page is opened by the user: a look left over from
-        // the last session is not what they asked for. The one exception is the reopen the camera
-        // synthesises right after a shutter tap closed the palette - neutralising there put the dial
-        // back to 0 before the shot was processed (2026-10-22).
-        boolean afterShutter = System.currentTimeMillis() - lastHideAt < 1500 && lastHideByShutter;
-        if (!afterShutter) current.neutralize();
+        // The dial keeps whatever the user set. Neutralising it on every open is what produced
+        // the "colour flashes, then snaps back to neutral after a second" behaviour: the camera
+        // synthesises a reopen after the shutter, and at >1.5 s it wiped the dial before the shot
+        // was processed. The reset button still gives an explicit 0/0.
         return true;
     }
 
@@ -845,6 +861,11 @@ public final class MasterPalette {
 
     /** The right-hand menu button of the master UI, used both as anchor and as position source. */
     private static View anchor(Activity activity) {
+        // 哈苏超清 hides the camera's own effect button but keeps it laid out as the palette's
+        // slot (see HighPixelEffects.forceShow); accept that one INVISIBLE anchor on this page.
+        boolean highPixelPage = isHighPixelMode(currentMode());
+        int entryId = activity.getResources().getIdentifier(
+            "camera_menu_right_enter_button", "id", activity.getPackageName());
         for (int i = containers.size() - 1; i >= 0; i--) {
             Object container = containers.get(i).get();
             if (container == null) {
@@ -854,7 +875,9 @@ public final class MasterPalette {
             try {
                 if (byType(container, "android.app.Activity") != activity) continue;
                 View direct = (View) field(container, "o");
-                if (direct != null && direct.isShown() && direct.getAlpha() > 0.1f) return direct;
+                if (direct != null && ((direct.isShown() && direct.getAlpha() > 0.1f)
+                    || (highPixelPage && entryId != 0 && direct.getId() == entryId
+                        && direct.getVisibility() == View.INVISIBLE))) return direct;
                 View fallback = null;
                 for (Field f : container.getClass().getDeclaredFields()) {
                     if (!f.getType().getName().equals("com.oplus.camera.ui.effectcontainer.MenuRightButton")) {
@@ -862,7 +885,10 @@ public final class MasterPalette {
                     }
                     f.setAccessible(true);
                     View candidate = (View) f.get(container);
-                    if (candidate == null || !candidate.isShown() || candidate.getAlpha() <= 0.1f) continue;
+                    if (candidate == null || candidate.getAlpha() <= 0.1f) continue;
+                    boolean ours = highPixelPage && entryId != 0 && candidate.getId() == entryId
+                        && candidate.getVisibility() == View.INVISIBLE;
+                    if (!candidate.isShown() && !ours) continue;
                     int[] location = new int[2];
                     candidate.getLocationOnScreen(location);
                     if ((float) location[1] > activity.getResources().getDisplayMetrics().heightPixels * 0.40625f) {
@@ -1136,6 +1162,13 @@ public final class MasterPalette {
                 XposedHelpers.setBooleanField(manager, "W", true);
                 Log.i(TAG, "raised palette flag (" + lutState() + ")");
             }
+            // initializeBasicToneEnv logs mPaletteFlag:false after our apply; keep the Java-side
+            // flag armed so the next p() rebuild keeps the combined table.
+            try {
+                XposedHelpers.setBooleanField(manager, "mPaletteFlag", true);
+            } catch (Throwable noField) {
+                // build without the Java field
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -1384,8 +1417,9 @@ public final class MasterPalette {
                         }
                         // The GR palette stands on the GR rows rather than on a presenter, so the
                         // take-over itself is the write path there.
+                        boolean highPixelPage = isHighPixelMode(currentMode());
                         boolean canWrite = presenter != null || retro || grActive
-                            || (isHighPixelMode(currentMode()) && lut() != null)
+                            || (highPixelPage && lut() != null)
                             || (video && lut() != null);
                         if (anchor != null && canWrite && decor.hasWindowFocus() && !paletteUp) {
                             int[] anchorLoc = new int[2];
@@ -1401,7 +1435,16 @@ public final class MasterPalette {
                             }
                             button.setX(Math.max(dp(8), Math.min((float) (decor.getWidth() - size - dp(8)),
                                 (anchorLoc[0] - decorLoc[0]) + (anchor.getWidth() - size) / 2f)));
-                            button.setY(Math.max(dp(80), (anchorLoc[1] - decorLoc[1]) - size - dp(10)));
+                            float anchorTop = anchorLoc[1] - decorLoc[1];
+                            // 哈苏超清: the camera's own lower filter button is hidden and its slot is
+                            // the palette's entry; every other page keeps the palette above the anchor.
+                            if (highPixelPage) {
+                                int anchorHeight = anchor.getHeight();
+                                anchorTop += anchorHeight > 0 ? (anchorHeight - size) / 2f : 0;
+                            } else {
+                                anchorTop -= size + dp(10);
+                            }
+                            button.setY(Math.max(dp(80), anchorTop));
                             button.setVisibility(View.VISIBLE);
                             button.setEnabled(anchor.isEnabled());
                             button.bringToFront();
@@ -1430,6 +1473,11 @@ public final class MasterPalette {
                         // The camera resets the palette flag whenever it rebuilds the tone
                         // environment, so hold it up for as long as the dial is docked.
                         if (directPaletteOpen) forcePaletteFlag();
+                        // The camera re-runs initializeBasicToneEnv about a second after the
+                        // palette opens and drops mPaletteFlag to false; without re-posting the
+                        // combined table the preview fades back to neutral. Keep handing it over
+                        // while the dial is up and actually off-centre.
+                        if (directPaletteOpen && shelf != null && paletteEngaged()) applyPreviewLut();
                         // Leaving a supported page (switching mode, say) takes the palette down with
                         // it, and restores whatever the page had moved or hidden.
                         if (!canWrite && shelf != null) hide();
