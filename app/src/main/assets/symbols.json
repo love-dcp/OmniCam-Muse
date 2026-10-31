@@ -2119,6 +2119,31 @@
   }
  },
  "gallery": {
+  "ColorPaletteMode": {
+   "kind": "method",
+   "static": true,
+   "params": [],
+   "ret": "boolean",
+   "calledBy": [
+    "@FilterRecoverGate"
+   ]
+  },
+  "ColorPaletteMode.lazy": {
+   "kind": "field",
+   "static": true,
+   "type": "kotlin.Lazy",
+   "readBy": [
+    "@ColorPaletteMode"
+   ]
+  },
+  "FilterRecoverGate": {
+   "kind": "method",
+   "static": true,
+   "ret": "boolean",
+   "strings": [
+    "FilterInfoRecoverGate"
+   ]
+  },
   "Config.getBoolean": {
    "kind": "method",
    "params": [
