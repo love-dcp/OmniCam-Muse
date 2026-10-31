@@ -168,9 +168,17 @@ internal object LogCapture {
     }
 }
 
-/** Runs a command as root; the output, or null when root is unavailable or the command failed. */
-internal fun rootCommand(command: String, timeoutSeconds: Long = 8): String? = try {
-    val process = ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
+/**
+ * Runs a command as root; the output, or null when root is unavailable or the command failed.
+ *
+ * With [mountMaster] the shell runs in the global mount namespace (su -M, supported by KernelSU
+ * and Magisk alike): bind mounts then reach the whole system. Without it the shell inherits this
+ * app's private zygote-snapshot namespace, where a bind mount is invisible to every other
+ * process and dies with this app.
+ */
+internal fun rootCommand(command: String, timeoutSeconds: Long = 8, mountMaster: Boolean = false): String? = try {
+    val su = if (mountMaster) listOf("su", "-M", "-c", command) else listOf("su", "-c", command)
+    val process = ProcessBuilder(su).redirectErrorStream(true).start()
     val output = StringBuilder()
     val reader = Thread { output.append(process.inputStream.bufferedReader().readText()) }.apply { start() }
     if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {

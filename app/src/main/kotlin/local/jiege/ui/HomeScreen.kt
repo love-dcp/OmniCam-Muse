@@ -1,6 +1,7 @@
 package local.jiege.ui
 
 import android.os.Build
+import android.system.Os
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -72,6 +73,9 @@ internal fun LazyListScope.homeItems(cardModifier: Modifier, onOpenLog: () -> Un
     }
     item(key = "injection") {
         InjectionCard(rememberInjectionState(), cardModifier)
+    }
+    item(key = "native") {
+        NativePatchCard(cardModifier)
     }
     item(key = "log") {
         Card(modifier = cardModifier) {
@@ -217,6 +221,82 @@ private fun InjectionCard(state: InjectionHolder, cardModifier: Modifier) {
             }
         }
     }
+}
+
+/**
+ * The 原生补丁 card: the pro-video in-sensor-zoom switch. The real state is the /odm bind
+ * (apply-now.sh), not a preference; toggling re-runs the script as root and restarts the
+ * camera provider so the patched library loads.
+ */
+@Composable
+private fun NativePatchCard(cardModifier: Modifier) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var iszOn by remember { mutableStateOf<Boolean?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    val resumed = lifecycle.isAtLeast(Lifecycle.State.RESUMED)
+    LaunchedEffect(resumed) {
+        if (resumed) iszOn = withContext(Dispatchers.IO) { iszMounted() }
+    }
+    SmallTitle(text = "原生补丁")
+    Card(modifier = cardModifier) {
+        SwitchPreference(
+            title = "专业视频 ISZ",
+            summary = "变焦 2x-3x 时切换传感器裁剪模式，提升清晰度（挂载补丁库+增强配置）。请在专业视频中关闭防抖使用：开防抖时 2X 画面会退回 1X 大小，超级防抖还可能闪退。切换后自动重启相机",
+            checked = iszOn == true,
+            enabled = iszOn != null && !busy,
+            onCheckedChange = { on ->
+                busy = true
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) { applyIsz(on) }
+                    iszOn = withContext(Dispatchers.IO) { iszMounted() }
+                    busy = false
+                    Toast.makeText(context, when {
+                        !ok -> "操作失败：需要 Root 授权（KernelSU），或模块文件缺失"
+                        on -> "专业视频 ISZ 已开启"
+                        else -> "ISZ 已关闭"
+                    }, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    }
+}
+
+/**
+ * True when BOTH the patched libextensionlayer.so and the ISZ camera config are bind-mounted
+ * over /odm (st_dev differs from the directory). The config bind is what actually lets the
+ * sensor switch to a cropped mode; the library alone is not enough.
+ *
+ * The check runs in the global mount namespace through su: this app's own namespace is a
+ * zygote snapshot taken at its start, so a bind mounted later stays invisible to it, and a
+ * bind made inside it never reaches the camera. Without root it falls back to the local view,
+ * which only reflects mounts that predate this app process.
+ */
+private fun iszMounted(): Boolean {
+    rootCommand(
+        "stat -c %d /odm/lib64/libextensionlayer.so /odm/lib64 /odm/etc/camera/CameraHWConfiguration.config /odm/etc/camera",
+        8, mountMaster = true,
+    )
+        ?.trim()?.lines()?.takeIf { it.size == 4 && it.all { line -> line.matches(Regex("\\d+")) } }
+        ?.let { return it[0] != it[1] && it[2] != it[3] }
+    return try {
+        Os.stat("/odm/lib64/libextensionlayer.so").st_dev != Os.stat("/odm/lib64").st_dev &&
+            Os.stat("/odm/etc/camera/CameraHWConfiguration.config").st_dev != Os.stat("/odm/etc/camera").st_dev
+    } catch (_: Exception) {
+        false
+    }
+}
+
+/** Runs the module's apply-now.sh with/without --with-isz as root and restarts the camera provider. */
+private fun applyIsz(on: Boolean): Boolean {
+    val mod = "/data/adb/modules/ricoh_pop_x9u"
+    val flag = if (on) "touch $mod/enable_native_isz" else "rm -f $mod/enable_native_isz"
+    val apply = if (on) "sh $mod/apply-now.sh --with-isz" else "sh $mod/apply-now.sh"
+    val restart = "am force-stop com.oplus.camera; kill \$(pidof vendor.qti.camera.provider-service_64) 2>/dev/null"
+    // mount master: the bind must land in the global namespace so the restarted camera sees it
+    rootCommand("$flag; $apply >/dev/null; $restart", 40, mountMaster = true)
+    return iszMounted() == on
 }
 
 /** The log page: a root logcat recording (the system buffers hold about two minutes) and the export. */
