@@ -11,7 +11,7 @@ Muse 由 KernelSU 模块和 LSPosed 设置应用组成：模块通过绑定挂�
 ### 画质
 
 - **拍照模式自然化**：关闭 AI 细节增强（文字和纹理不再被网络重绘，头发锐化一并关闭）、关闭局部对比度增强（LCE）、进一步柔化，三项分别开关。柔化不作用于大师模式和理光模式。
-- **25MP 直出**：放宽 25MP 自动切换的照度、ISO、温度和运动条件，配合相机设置中的"超清优先"，明显提高 25MP 直出的触发率。
+- **25MP 直出**：放宽 25MP 自动切换的照度、ISO、温度和运动条件，配合相机设置中的"超清优先"，明显提高 25MP 直出的触发率。X9 Ultra 放宽 lighthouse 照度/ISO 触发、APS 热表与决策树；Find X8 Ultra（PKJ110）放宽决策树中两个 full-QBC 计划的 ISO、温度、运动、连拍计数与场景否决（镜头选择、模式与闪光灯门保持原厂）。
 - **哈苏超清 200MP**：解除人脸识别门禁。没有大人脸的画面也走真 200M 全像素读出，1.0×、光线充足、非 HDR 等其余条件保持原厂。
 
 ### 大师色彩
@@ -99,6 +99,10 @@ Muse 由 KernelSU 模块和 LSPosed 设置应用组成：模块通过绑定挂�
 
 设置入口在桌面的 OmniCam Muse 应用，或 LSPosed 中的模块页。需要还原时，在 KernelSU 管理器中停用模块并重启，所有挂载随之撤销。
 
+### 卸载
+
+只停用模块会留下设置应用、相机/相册里的模块资源和偏好。要彻底清除，刷入 `OmniCam-Muse-Uninstall-<版本>-KSU.zip`：它优先走 KernelSU 热安装，刷完立即清理并自删，**通常不需要重启**；管理器不支持热安装时，执行模块 Action 或 `ksud soft-reboot` 即可。X8U 的临时 root 只能用软重启，不要硬重启。清理只写 `/data` 与 `/sdcard`，`/odm` 上仅做 `umount`，不写任何系统分区。它会卸载设置应用，清掉 KSU 模块、`/data/adb` 残留、相机与相册内的模块文件/偏好、LSPosed 偏好、`persist.omnicam.*` 属性和调试转储。照片、视频以及相机/相册应用本身不受影响。细节见 `uninstaller/README.md`。
+
 ## 构建
 
 环境：Windows、JDK 17、Android SDK 37、NDK 29.0.14206865、CMake 3.22.1、Python（含 numpy、pycryptodome）、Git for Windows。在 `local.properties` 中写入 `sdk.dir=…`（已忽略）。
@@ -113,6 +117,14 @@ $env:OMNICAM_PYTHON = 'python'
 - **签名**：根目录放有 `port.keystore`（已忽略），或设置了 `OMNICAM_KEYSTORE` 时，读取 `OMNICAM_STORE_PASSWORD`、`OMNICAM_KEY_ALIAS`、`OMNICAM_KEY_PASSWORD` 签名，并打包出 `OmniCam-Muse-<版本>-KSU.zip`；否则只产出未签名 APK。
 - 证书与密码不入库。不同证书签名的 APK 不能直接覆盖安装。
 
+卸载器是纯 shell 模块，单独打包即可（不需要 Gradle、SDK 或签名）：
+
+```powershell
+.\build-uninstaller.ps1
+```
+
+输出 `OmniCam-Muse-Uninstall-<版本>-KSU.zip`。
+
 ## 适配其他机型
 
 欢迎参考本项目为其他机型适配。但很多功能改动的是底层配置：`/odm` 下的相机配置、调色与 LUT 资源、HAL 决策节点和原生库，它们与机型和相机版本绑定，不能照搬。适配前请先阅读 `docs/MODULE.md` 中各功能的原理与涉及文件，再对照目标机型自己的配置逐项核对。
@@ -124,6 +136,7 @@ $env:OMNICAM_PYTHON = 'python'
 | `app/` | 设置应用与钩子：Java（`hook/*`）、Kotlin（`ui/*`）、C++（`cpp/*`，大师色彩引擎 `master_*`、柔光 `soft_light*`） |
 | `module/` | KSU 模块：脚本、`payload/` 配置与资源、`system/odm/lib64/` 库 |
 | `tools/` | 资源生成与离线测试：`mastercolor/`（大师色彩）、`softlight/`（柔光权重）、`symbols/`（混淆符号特征）、`offline_tests/` |
+| `uninstaller/` | 独立卸载模块：刷入后清除模块、设置应用与运行时文件 |
 | `tools/refs.py` | 仓库外参考资料的位置（可用 `MUSE_REFS` 修改根目录） |
 | `docs/` | `MODULE.md`：各功能的原理与涉及文件；`DEV_NOTES.md`：设备操作与排查 |
 

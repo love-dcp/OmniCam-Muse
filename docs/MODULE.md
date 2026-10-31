@@ -232,86 +232,51 @@ MuseSoftLight: palette applied to the capture 4096x3072
 1. **`mbPaletteEnable` 这个盖章不能关**。它决定成片走哪条渲染入口：有它才进 `MsRenderHDRHostBuffer`（原生调色盘就在那儿应用），没它就落到 HDRTransform 的 quick 路径，调色盘直接失效（实测 07:52 那次没有 `pass host` 行）。副作用是照片会带 `src.image` + `filter.info`，相册的「色彩风格」于是拿源图重渲。
 2. **相册重渲的后果**：我们拍的照片在「色彩风格」里首屏是中性的、且方向转 90°；大师 JPG MAX 的照片不带这两个块，打开正常。相册那边的实现是 `PaletteProcessUnitSDK.processImage()`（无参、返回 void），位图走实例字段 `mBitmapOutputSlot0/1`，输入是 P010 池 —— 要"跳过重渲、直接显示成片"需要改这些内部字段，风险高，暂未做。
 
+### 裸调色盘丢色的最后一环：身份滤镜路由（2026-10-23 晚）
+
+上午的方案依赖滤镜在场：`mbPaletteEnable` 只决定"有 meicam 时走哪条入口"，而 **meicam 引擎（`libmsnativefilter.so`）只在有滤镜/柔光活跃时才加载**。裸用调色盘（滤镜停在「标准」）时整晚该库都不在进程 maps 里、`pass host` 零次 —— 盖了章也没有入口可走，50 MP 全量管线照样丢调色（实测 19:35/19:38：`palette=true`、算法对在链、6144×8192，色度 51.8~52.2 与默认无异）。同会话选上滤镜（20:04）立刻全通：`render entries probed` → `pass host 1280x960` → Y2Y 补跑 `pass host 8192x6144` → 50 MP 文件带滤镜+调色。
+
+修法（`HighPixelPaletteRoute`）：调色盘不在中位、且滤镜为「标准」时，给拍照请求盖一个**身份 LUT** 当滤镜——`aps_algo_filter` 进链 ⇒ 滤镜阶段跑 ⇒ meicam 按需加载 ⇒ 已盖章的请求走进 `MsRenderHDRHostBuffer` ⇒ 原生调色盘照常应用。身份 LUT 是 176 B 头（与模块 50 个 LUT 同一 `.MS-LUT` 头）+ 32³ 恒等载荷（每格映射到自身坐标，编码域恒等，与容器轴序无关），写到相机自己的 `files/jiege/lut/jiege_palette_route.cube.rgb.bin`，由 native 路径重定向（`pop_path_remap.cpp`，导入滤镜同一机制）顶替 `/odm/etc/camera/meishe_lut/` 的读取；capture ID 借「大师童话」（`Radiance.cube.rgb.bin`，模块 LUT 的标准捐赠者）进 `sFilterPathConvertMap`。全程复用 `stampTag`/`createMetaItemInfo` 原有打标路（`hasCaptureId`、`masterizeForCapture` 对它天然无操作）。
+
+开关：`persist.omnicam.aura.hppalroute=0` 关闭该路由（回到裸调色盘丢色的原状）。已知小副作用：quick 图（12 MP 缩略图）的缓冲若本就带预览调色，身份路由的 host 应用会让缩略图调色略过一次——但 50 MP 终版覆盖文件后无影响。
+
 另外修掉一个真 bug：模块热更新后，还活着的进程会读到已删除的旧 APK 路径，符号表解析成 0（相册「色彩风格」入口因此整片消失）。`Symbols.readSpec()` 现在优先用自身 code source 指向的 APK。
 
-### 相册「色彩风格」的显示偏差：试过、决定不做（2026-10-23 上午）
+### 相册「色彩风格」的显示偏差：已修（2026-10-23 晚，resolveProcessInputBitmap 输入交换）
 
-现象：哈苏超清的照片点进「色彩风格」，首屏显示的是中性效果、而且转了 90°；切换一次滤镜再切回来就正常。大师 JPG MAX 的照片没有这个问题。
+现象：哈苏超清的照片点进「色彩风格」，首屏显示的是中性效果、而且转了 90°。大师 JPG MAX 的照片没有这个问题。
 
-原因是拍照时盖了 `mbPaletteEnable`（这一步不能去掉，它决定成片走 `MsRenderHDRHostBuffer`，原生调色盘就在那儿应用），照片于是带上 `src.image` + `filter.info`，相册按源图重渲。
+原因是拍照时盖了 `mbPaletteEnable`/滤镜章（这一步不能去掉，它决定成片走 `MsRenderHDRHostBuffer`，原生调色盘就在那儿应用），照片于是带上 `src.image` + `filter.info`，相册把 **`src.image` 解码结果**（未调色、传感器横向存储）塞进 `PALETTE_INPUT_BITMAP` 作为管线输入；X8U 上负责补影调+转正的 `runBasicToneStage` native 路径正是坏的那环（`metaIndex=0`），恒等旁路保住的是这份源图输入 ⇒ 首屏=中性+旋转。
 
-方案 2（跳过重渲、直接显示成片）查到的地方：
+上午试过的方案 2（插件 accessor）是死路：`processImage()` 无参返回 void、`toBitmap(String)` 直接 NoSuchMethodError。**正解在 SDK 自己的输入解析**：`PaletteProcessUnitSDK.resolveProcessInputBitmap(int, boolean)`（私有）先读请求实体 `PALETTE_INPUT_BITMAP`（相册给的 src 解码），空了才回落 origin 位图。钩子在它返回后：请求实体里有 `PALETTE_INPUT_BITMAP` 且照片带 `src.image` 时，把返回值换成**成片主图**的解码（EXIF 转正、按模板尺寸/配置/色彩空间，`GalleryPaletteScope.capturedMainDecode`，按 (uri,尺寸) 缓存一次）——恒等旁路原样通过，滤镜阶段叠在上面。无 `src.image` 的照片输入本来就是成片，不动（也避免丢 Ultra HDR gainmap）。
 
-- `PaletteProcessUnitSDK.processImage()`：**无参、返回 void**，返回时 `mBitmapOutputSlot0/1` 还是 null，没有位图可换；
-- `BitmapColorPaletteManager.processColorPalette(IPluginArgumentsAccessor, ColorPaletteParameter)`：返回 boolean，位图在 accessor 里；
-- accessor 的方法：`getArg/2`、`setImmediateArg/2`、`setStoreAbleArg/2`、`setTemporaryArg/2`、`toBitmap/1`、`toTexture/2`；而 `toBitmap(String)` 直接 NoSuchMethodError —— 参数不是 String（是插件自己的 key 类型），没有文档，继续试下去就是盲猜，风险是把相册弄崩（此前已崩过一次 SIGSEGV）。
+日志判据：`GalleryColorPalette: palette src-image input swap enabled`（装上）与 `palette input swapped: src 4096x3072 -> rendered 3072x4096 ...`（生效）。SDK 侧 `[palette] resolveProcessInputBitmap: palette_input_bitmap 4096x3072` 是相册原始输入（横向）。
 
-结论：**接受现状**——成片本身的颜色是对的，相册那一页首屏显示中性、切一次滤镜后恢复。要彻底解决得逆向 `filter.info`（加密）或插件 accessor 的 key 类型，属于独立的一块工作。
+#### 后续：交换后显示被横向拉伸（writeResultToOutput 守卫；map 替换方案已被实测推翻）
 
-### 属性开关
+输入交换让首屏方向/调色都对了，但图片**变形**。相册编辑器侧（`com.oplus.tbluniformeditor.plugins.colorpalette.BitmapColorPaletteManager`，相册自己的 dex）的完整流程：`readInputTexture/readOutputTexture` 从 accessor 的 `global_key_input_source_map`/`global_key_output_source_map`（`Object[]`，firstOrNull 为纹理）取纹理——两份纹理都源自 src 解码，**4:3 传感器方向**；`prepareProcessBitmap` 按输入纹理尺寸造 `PALETTE_INPUT_BITMAP`；处理完 `writeResultToOutput(accessor, resultBitmap, outputTexture)` 写回，**尺寸不匹配时 `ColorPaletteUtil.scaleCopyTexture`（glBlitFramebuffer）或 `scaleBitmapExact`（createScaledBitmap）直接拉伸到纹理尺寸**，不保宽高比。交换后的转正竖图（3072x4096）被拉回 4096x3072 ⇒ 变胖。修复前不变形恰是因为 4:3 进 4:3 出走直拷——这也反证输出纹理就是 4:3。
 
-- `persist.omnicam.aura.hires` — 哈苏超清模式入口（`setprop … 0` 后重启相机即隐藏）。
-- `persist.omnicam.aura.hpentry` — 右侧滤镜/调色盘入口按钮。
-- `persist.omnicam.aura.hpfiltercapture` — 成片侧滤镜（`0` 关闭）。
-- `persist.omnicam.aura.masterpalette` — 调色盘本体。
+反汇编补全写回语义（`writeResultToOutput` 全量反汇编，dd_gal14_d.txt@244737）：先 `toTexture(result, false)` 把结果上传为临时纹理，**等尺寸走 `OpenGlUtil.copyTexture(srcId, dstId, w, h)` 1:1 拷贝进输出纹理对象**，尺寸不匹配走 `scaleCopyTexture`/`scaleBitmapExact` 直接拉伸到纹理尺寸——**map 全程只读不写，编辑器渲染的就是输出纹理对象本身**。
 
-### 未做
+第一版修法（新纹理 `setTemporaryArg` 换进 output map、跳过原写回）**实测失败**：编辑器继续渲染原纹理对象（从未被写入）⇒ 面板空白、只剩相框（日志 `outputFrame is suspected of being transparent`；两张照片都复现）。
 
-调色盘（影调、饱和度）在这个模式的预览已通，成片仍是 `palette=false`：请求上的 `mbPaletteEnable` 没有被置真。走的是与滤镜同一条打标路，跟上文 `stampTag` 一样处理即可。
+现行修法（第五版，r17，三层旋转）：r16 实测 `decodeByteArray` 未命中（会话纹理仍 4096x3072 横幅），
+但 extdump 新增字段拿到硬数据：**src.image 自带 EXIF orientation=6**（自述需转 90°），相册 MediaCache
+解码时无视之。r17 三层火力：
+1. **源头层** `rotateSrcImageBlock`：钩 `FileExtendedContainer.getExtensionData("src.image")`（相册自己的
+   扩展块 API），返回解码→转正→重编码（JPEG 95）后的字节——下游无论用什么解码器都拿到竖图。
+   自家 extdump 经栈走查跳过（仍报原始 shape/exif）；按内容哈希（长度+首尾64B）缓存避免重复重编码。
+   生效时置 `containerRotated`（供第 3 层判别）。
+2. **字节层**：`decodeByteArray` 两重载按 src 长度匹配（r16 已有）。
+3. **流层**：`decodeStream` 按结果尺寸==extdump 的原始 shape 匹配；ByteArrayInputStream 时按 buf 与
+   extdump 记下的 srcBytes 内容匹配；非 BAIS 且 containerRotated=false 时限 MediaCacheThread 兜底。
+判据行：`src block re-encoded upright: 4096x3072 rotated 90 degrees, N bytes` / `src decode rotated ...`。
+已知取舍：重编码丢 src 的 gainmap（SDR 编辑路径无碍）；保存时若回写 src.image 块会写入竖版（一致性更好）。
 
-## 拍照模式自然化
-
-`hook/natural/NaturalMode.java` 把开关镜像成两份文件（`files/jiege/natural/` 下）：`conf_tuning_params.json` 是按开关清零后的原厂 tuning json（关 AI 细节 = `EnhanceNetParamsSet`/`EnhanceNetJDDGANParamsSet` 下所有 `*BlendWeight`/`*MaskWeight` 加 `TMCParamsSet` 的 `usmStrength1X/3X`；关 LCE = `lceStrength(Face)`），`soften` 是普通照片色调迁移的引导滤波 eps（对数插值 1e-7 → 1e-3，0 % = 原厂）。相机算法每张照片打开 `/odm/etc/camera/conf_tuning_params.json` 时被 native 侧（`natural_mode.cpp` 的路径重定向）换成编辑副本；eps 由 native 在 `libOPAlgoCamHDRTransformCamera.so` 里按符号名 `_ZN18TmcDownTransModule29mergedGdfUpsampleAndCalOutput` 找到函数、再搜函数体内 `mov/movk` 构造 0x33d6bf95 的指令对改写（找到才动，找不到整库不动，`status` 文件记 `eps site not located`）。柔化不作用于大师与理光模式（`ModeSwitch.switch` 时 `setSoftenMode` 关掉）。
-
-开关与柔化百分比也镜像在系统属性里（同柔光的原因：相机进程读不到模块的 SharedPreferences）：`persist.omnicam.aura.natural` 位掩码（1 主开关、2 关 AI 细节、4 关 LCE）、`persist.omnicam.aura.naturalsoften` 百分比；属性优先、设置文件兜底，设置页每次开关变化与进页时 `setprop` 同步。生效时机两机不同：X9U 每张照片读一次 json、下一张即生效；X8U 实测算法在相机进程启动时读一次并锁存，`status` 翻成 `edited copy` 后同进程内不再重读，改开关后要 force-stop 重启相机才生效（首张 stock 配置 3.46 MB vs 编辑副本 2.94 MB，细节重绘停了、压缩率升 15%）。
-
-X8U 锁存带来两个时序缺陷，均已修：文件原本只在相机活着时随 capture request 同步，而设置页改开关时相机在后台、随后被 force-stop，旧编辑副本留在磁盘上——① 关掉开关后相机重启仍会吃到旧副本（关不掉）；② 打开开关后首次启动读到的是上一轮的旧内容（开得慢）。修复 = `installCamera` 时先 `sync()` 一次（赶在算法打开 json 之前把文件写/删到位），native 侧 `naturalRemapPath`/`wantedEps` 再加一道主开关门控（读 `persist.omnicam.aura.natural` 的 bit1，属性为空时退回文件判定，X9U 行为不变）——即使有残留文件，主开关关闭也只供应原厂。
-
-X8U（PKJ110）上的现实边界：tuning json 存在且 `EnhanceNetParamsSet` 七组 42 个混合权重键全齐（关 AI 细节完整生效），但 `TMCParamsSet` 没有 lceStrength/usmStrength 键（关 LCE 空转，UI 在该机型隐藏这两行），库里也没有 `TmcDownTransModule` 符号与 1e-7 指令对（柔化空转）——X8U 的引导滤波是 `imgproc::FastGuidedFilterNeonO1Reflect101<float>::filter` 等 6 个导出符号、eps 由调用方作为参数传入，将来做柔化要走导出函数参数 hook，而不是改立即数。
-
-## POP 鱼眼（取景有、成片无）
-
-相机自带整套 retro 鱼眼：功能键 `FUNC_KEY_ID_RETRO_FISH_EYE_LENS`、预览纹理效果 `FishEyeTexturePreview`、Meishe 的 `CNvFishEyeEdgeBlur`，以及 APS 侧的 `APSFisheyeNode`。X8U 只是缺平台能力键，`hook/pop/PopFisheyeSupport.java` 在 `CameraConfig` 上把 `com.oplus.feature.fish.eye.support`、`com.oplus.fisheye.new.style.support`、`com.oplus.camera.retro.fisheye.enable` 等答成真，POP 的鱼眼镜头入口就出现了，取景画面也是标准圆形鱼眼（预览侧由模块的 soft-light 钩子把 `"Fish Eye Enable"` 设进 Meishe 渲染器）。开关 `persist.omnicam.aura.fisheye`。
-
-成片目前仍是普通透视，已知边界（都实测过）：
-
-- 预览参数与成片是两条路。预览走 Meishe/IPU 纹理链（`retro_ccd_fisheye_open`、`MsSetEffectBooleanValue("Fish Eye Enable")`），成片走 APS 流水线；把这些 Java 可见的开关（元数据键 `KEY_RETRO_FILTER_FISH_EYE_ENALE`、请求 tag 的 `mRetroFilterFishEyeEnable`/`mbFishEyeEnable`、Meishe 渲染器 API、IPU 滤镜参数）全部置真，成片都不变。
-- 能真正扭曲成片的是 `APSFisheyeNode`，它的 `getEnable` 只读参数 `fisheye_enable`（`AlgoPreviewProcessData+0x370`），而这个节点不在 retroCamera 的拍照管线里；把它加进 `oplus_camera_algo_switch_config`（capture 段的 retroCamera entity）会让预览直接黑屏——节点在共享 APS 引擎里初始化，`doInit` 需要只有相机自己的 `FISH_EYE` capMode 才会提供的参数（`input pParams is NULL`）。
-- X9U 的 `libAlgoInterface.so` 里是同一份代码（同样 5 处 `"Fish Eye Enable"` 调用点、同一个 `APSFisheyeNode`、同一个 `fisheye_enable` 参数），配置里同样没开，所以没有可照搬的机型差异。
-- 后处理路线试过：模块在 `onJpegReceived` 后轮询 `/sdcard/DCIM/Camera`，解码后把画面压进圆、圆外填黑再回写，效果正确，但相机会把同一张 JPEG 分多次写完，早写的副本会被最后一次覆盖——表现为「刚拍完缩略图是鱼眼、点开变回普通照片」。文件尾是补零而不是 EOI 标记，也据此排除了「写完」判定。`PopFisheyeSave` 因此从安装链移除，入口保留。
-
-下一步可选：命中相机真正写盘完成的位置（MediaStore 插入之后）再做重写，或在 APS 管线构建处只给拍照插入该节点并补齐它的初始化参数。
-
-## 移植自检报告（升级后先看这个）
-
-`hook/common/PortReport.java` 在相机与相册进程启动、符号解析完成后各写一份清单，系统升级（OTA）后先读它就知道哪些钩子失配，不用凭感觉试：
-
-```
-/data/user/0/com.oplus.camera/files/jiege/port_status_camera.txt
-/data/user/0/com.coloros.gallery3d/files/jiege/port_status_gallery.txt
-```
-
-文件结构：
-
-```
-# port status, camera
-time=…  pid=… process=…
-app_apk=/product/app/OplusCamera/OplusCamera.apk
-app_size=… app_time=…               ← 这三个值唯一标识一次 APK 构建
-app_version=7.006.123 (60000)
-switches=npop=1 …                   ← persist.omnicam.aura.* 里被显式关掉的半边
-module_apk=…
-
-resolved 256
-  OK   <符号 id> -> class/method/field 实际落点
-missing 0
-  MISS <符号 id> : <解析器给出的原因>
-```
-
-用法：
-
-- 升级后把新报告与旧报告 diff，`MISS` 行就是这次要修的符号；`OK` 行同时给出该符号**这次落在哪个混淆类**，需要改锚点时直接参照；
-- `app_size/app_time/app_version` 变了说明相机或相册换了构建，`cache/jiege_symbols_*.json` 会自动失效重搜（缓存键含 APK 路径、大小与时间）；
-- `switches` 里出现 `=0` 说明该项被系统属性关掉了（例如 `nfish=0` 关掉鱼眼的原生半边），不是符号问题。
-
-报告只包含符号解析结果，不含行为级钩子；APS 管线、鱼眼这类语义相关的改动仍需按 `docs/MODULE.md` 的清单逐项冒烟。
+#### r17 实测通过 + r18 修「标准」倒像
+r17 实测：全尺寸竖屏达成（`palette input swapped: src 3072x4096`；样式浏览走 1536x2048 半分辨率预览）。
+遗留：「标准」走 `passThroughToOutput`（输入纹理 1:1 直拷输出；其 LogUtil.d 被过滤所以日志不可见），
+该链相对正常渲染路径存在一次 GL 纵向翻转——src 横存时藏在「旋转」现象里，src 转正后暴露为倒像。
+r18 `replacePassThrough`：钩 passThroughToOutput（before），用 `GalleryPaletteScope.cachedMain()`
+（swap 缓存的转正成片）反射调用 `writeResultToOutput`（走正常写回路径，含 letterbox 守卫）后跳过原方法；
+缓存为空（面板首渲前就点标准，理论不可达）则退回原直通。判据：`original entry rendered from the finished photo`。
