@@ -44,6 +44,41 @@ final class GalleryPaletteScope {
      */
     public static volatile String capturedFilter;
 
+    /**
+     * True when the photo being edited carries a src.image block. The gallery then feeds the
+     * palette pipeline the decoded source (un-toned, sensor-oriented) instead of the finished
+     * JPEG; GalleryColorPalette swaps that input for the rendered photo (see capturedMainDecode).
+     */
+    public static volatile boolean srcImagePresent;
+
+    /** The src.image block's byte length, so the decode hook can pick exactly that decode. */
+    public static volatile int srcImageLength;
+
+    /** The raw src.image bytes as read at editor open — the decode hooks match against these. */
+    public static volatile byte[] srcBytes;
+
+    /** The src decode's stored shape, before any rotation. */
+    public static volatile int srcShapeW, srcShapeH;
+
+    /** True once the container hook has re-encoded this session's block upright. */
+    public static volatile boolean containerRotated;
+
+    /** Whether the finished photo displays portrait — the src decode must be rotated to match. */
+    public static volatile boolean mainPortrait;
+
+    /** The edited photo's media URI, from the same editor-open read as capturedFilter. */
+    private static volatile String editedUri;
+    /** One decoded main image at a time: (uri, size) -> upright bitmap in the pipeline's shape. */
+    private static android.graphics.Bitmap mainCache;
+    private static String mainCacheKey;
+
+    /** The cached upright main decode, for render paths that bypass the pipeline input. */
+    public static android.graphics.Bitmap cachedMain() {
+        synchronized (GalleryPaletteScope.class) {
+            return mainCache != null && !mainCache.isRecycled() ? mainCache : null;
+        }
+    }
+
     private GalleryPaletteScope() {}
 
     static void install(ClassLoader classLoader) {
@@ -85,6 +120,15 @@ final class GalleryPaletteScope {
     }
 
     private static void readCapturedFilter(Activity activity, Uri uri, ClassLoader classLoader) {
+        editedUri = uri == null ? null : uri.toString();
+        srcImagePresent = false;
+        srcImageLength = 0;
+        srcBytes = null;
+        srcShapeW = 0;
+        srcShapeH = 0;
+        containerRotated = false;
+        mainPortrait = false;
+        dropMainCache();
         if (uri == null) { capturedFilter = null; return; }
         Object container = null;
         try {
@@ -103,6 +147,7 @@ final class GalleryPaletteScope {
             capturedFilter = info != null && info.length >= 44 ? filterId(info) : null;
             Log.i(TAG, "editing " + uri + (capturedFilter == null ? "" : ", captured " + capturedFilter));
             dumpExtensions(container, uri, info);
+            readMainShape(uri);
         } catch (Throwable error) {
             capturedFilter = null;
             Log.e(TAG, "filter.info read failed for " + uri, error);
@@ -145,6 +190,30 @@ final class GalleryPaletteScope {
                     "master.mode.preset.info", "basictone.vig.table", "basictone.lmtlut.table", "fb.param"}) {
                 try {
                     byte[] data = (byte[]) XposedHelpers.callMethod(container, "getExtensionData", name);
+                    if ("src.image".equals(name)) {
+                        srcImagePresent = data != null;
+                        srcImageLength = data == null ? 0 : data.length;
+                        srcBytes = data;
+                        if (data != null && data.length > 0) {
+                            // what the gallery decoder will see, before any rotation decision
+                            android.graphics.BitmapFactory.Options shape =
+                                new android.graphics.BitmapFactory.Options();
+                            shape.inJustDecodeBounds = true;
+                            android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, shape);
+                            srcShapeW = shape.outWidth;
+                            srcShapeH = shape.outHeight;
+                            int orientation = 1;
+                            try {
+                                orientation = new android.media.ExifInterface(
+                                    new java.io.ByteArrayInputStream(data))
+                                    .getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+                            } catch (Throwable ignored) {
+                                // not a container ExifInterface can parse
+                            }
+                            sb.append(" shape=").append(shape.outWidth).append('x').append(shape.outHeight)
+                              .append(" exif=").append(orientation);
+                        }
+                    }
                     sb.append(' ').append(name).append('=').append(data == null ? "null" : data.length);
                     if ("src.image".equals(name) && data != null && data.length >= 16) {
                         StringBuilder head = new StringBuilder();
@@ -164,6 +233,176 @@ final class GalleryPaletteScope {
             }
         } catch (Throwable ignored) {
             // diagnostics only
+        }
+    }
+
+    /** Drops the cached main-image decode; called on every editor open, before the photo is known. */
+    private static void dropMainCache() {
+        synchronized (GalleryPaletteScope.class) {
+            mainCache = null;  // not recycled: a render in flight may still hold it
+            mainCacheKey = null;
+        }
+    }
+
+    /**
+     * The finished photo's displayed orientation, from its bounds plus EXIF: the src.image decode
+     * must stand the same way for the editor's palette session to build upright textures (X8U
+     * captures store the source in sensor orientation; the meta that would rotate it is the part
+     * this device cannot read). Header reads only, a few kilobytes.
+     */
+    private static void readMainShape(Uri uri) {
+        try {
+            android.app.Application app = android.app.AndroidAppHelper.currentApplication();
+            if (app == null) return;
+            android.content.ContentResolver resolver = app.getContentResolver();
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (java.io.InputStream in = resolver.openInputStream(uri)) {
+                if (in != null) android.graphics.BitmapFactory.decodeStream(in, null, bounds);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return;
+            int orientation = 1;
+            try (java.io.InputStream in = resolver.openInputStream(uri)) {
+                if (in != null) orientation = new android.media.ExifInterface(in)
+                    .getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+            } catch (Throwable ignored) {
+                // no readable EXIF: treat as upright
+            }
+            boolean storedPortrait = bounds.outHeight > bounds.outWidth;
+            boolean swaped = orientation >= 5;  // 5..8 rotate a quarter turn
+            mainPortrait = swaped ? !storedPortrait : storedPortrait;
+        } catch (Throwable ignored) {
+            // the decode hook then falls back to the source's own EXIF only
+        }
+    }
+
+    /**
+     * The edited photo's own rendered JPEG, decoded upright (EXIF orientation applied) at the
+     * template's working size and in its config/color space. This is the replacement the palette
+     * pipeline renders from instead of the decoded src.image (that one is the un-toned sensor
+     * image, stored sideways, and the native stage that would tone and rotate it is exactly the
+     * broken one on this device). Also populated for photos without a src.image (editor-saved
+     * photos: the gallery's save re-encodes and drops the block) — the pass-through guard in
+     * GalleryColorPalette.replacePassThrough renders from it so those sessions do not fall back
+     * to the stock flipped copy. Null when the decode fails.
+     */
+    public static android.graphics.Bitmap capturedMainDecode(android.graphics.Bitmap template) {
+        String uri = editedUri;
+        if (uri == null) return null;
+        // cap at the pipeline's own working scale: an editor-saved photo can be 6144x8192 and a
+        // full-size RGBA decode of that (~200 MB) would risk killing the gallery process
+        int target = Math.min(Math.max(template.getWidth(), template.getHeight()), 4096);
+        String key = uri + "@" + target;
+        synchronized (GalleryPaletteScope.class) {
+            if (mainCache != null && key.equals(mainCacheKey) && !mainCache.isRecycled()) {
+                return mainCache;
+            }
+            mainCache = null;
+            mainCacheKey = null;
+            android.graphics.Bitmap decoded = decodeMain(uri, target);
+            if (decoded == null) return null;
+            android.graphics.Bitmap shaped = intoTemplate(decoded, template);
+            android.graphics.Bitmap out = shaped == null ? decoded : shaped;
+            mainCache = out;
+            mainCacheKey = key;
+            return out;
+        }
+    }
+
+    /**
+     * Same decode without a pipeline template (plain ARGB_8888, upright), for render paths that
+     * bypass the pipeline input — the pass-through guard when the input swap never ran (photos
+     * without a src.image, whose session may not resolve a pipeline input at all).
+     */
+    public static android.graphics.Bitmap capturedMainDecode(int target) {
+        String uri = editedUri;
+        if (uri == null || target <= 0) return null;
+        String key = uri + "@" + target;
+        synchronized (GalleryPaletteScope.class) {
+            if (mainCache != null && key.equals(mainCacheKey) && !mainCache.isRecycled()) {
+                return mainCache;
+            }
+            mainCache = null;
+            mainCacheKey = null;
+            android.graphics.Bitmap decoded = decodeMain(uri, target);
+            if (decoded == null) return null;
+            mainCache = decoded;
+            mainCacheKey = key;
+            return decoded;
+        }
+    }
+
+    /** Media-store decode at a power-of-two sample, rotated per EXIF, scaled so the long side is target. */
+    private static android.graphics.Bitmap decodeMain(String uri, int target) {
+        try {
+            android.net.Uri parsed = Uri.parse(uri);
+            android.app.Application app = android.app.AndroidAppHelper.currentApplication();
+            if (app == null) return null;
+            android.content.ContentResolver resolver = app.getContentResolver();
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (java.io.InputStream in = resolver.openInputStream(parsed)) {
+                if (in != null) android.graphics.BitmapFactory.decodeStream(in, null, bounds);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            int orientation = 1;
+            try (java.io.InputStream in = resolver.openInputStream(parsed)) {
+                if (in != null) orientation = new android.media.ExifInterface(in)
+                    .getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+            } catch (Throwable ignored) {
+                // no readable EXIF: treat as upright
+            }
+            int longSide = Math.max(bounds.outWidth, bounds.outHeight);
+            int sample = 1;
+            while (longSide / (sample * 2) >= target) sample *= 2;
+            android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+            options.inSampleSize = sample;
+            android.graphics.Bitmap raw = null;
+            try (java.io.InputStream in = resolver.openInputStream(parsed)) {
+                if (in != null) raw = android.graphics.BitmapFactory.decodeStream(in, null, options);
+            }
+            if (raw == null) return null;
+            android.graphics.Matrix matrix = new android.graphics.Matrix();
+            switch (orientation) {
+                case 6: matrix.postRotate(90); break;
+                case 3: matrix.postRotate(180); break;
+                case 8: matrix.postRotate(270); break;
+                default: break;
+            }
+            float scale = target / (float) Math.max(raw.getWidth(), raw.getHeight());
+            if (Math.abs(scale - 1f) > 0.01f) matrix.postScale(scale, scale);
+            android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(
+                raw, 0, 0, raw.getWidth(), raw.getHeight(), matrix, true);
+            if (out != raw) raw.recycle();
+            return out;
+        } catch (Throwable error) {
+            Log.i(TAG, "main image decode failed: " + error);
+            return null;
+        }
+    }
+
+    /** The decode drawn into the template's config and color space (the pipeline's own shape). */
+    private static android.graphics.Bitmap intoTemplate(android.graphics.Bitmap decoded, android.graphics.Bitmap template) {
+        try {
+            android.graphics.Bitmap.Config config = template.getConfig();
+            if (config != android.graphics.Bitmap.Config.ARGB_8888
+                    && config != android.graphics.Bitmap.Config.RGBA_F16
+                    && config != android.graphics.Bitmap.Config.RGBA_1010102) {
+                return decoded;  // HARDWARE or exotic: a software bitmap is fine for the editor path
+            }
+            if (config == android.graphics.Bitmap.Config.ARGB_8888
+                    && decoded.getConfig() == android.graphics.Bitmap.Config.ARGB_8888
+                    && template.getColorSpace().equals(decoded.getColorSpace())) {
+                return decoded;
+            }
+            android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(
+                decoded.getWidth(), decoded.getHeight(), config, true, template.getColorSpace());
+            new android.graphics.Canvas(out).drawBitmap(decoded, 0f, 0f,
+                new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG));
+            return out;
+        } catch (Throwable error) {
+            Log.i(TAG, "main image re-shape failed: " + error);
+            return null;
         }
     }
 }
