@@ -43,7 +43,9 @@ public final class HighPixelFilters {
     /** The capture stage that applies the filter LUT. */
     private static final String FILTER_ALGORITHM = "aps_algo_filter";
 
-    /** The stage that applies the palette (tone / saturation) to a capture. */
+    /** The node master mode's 50 MP capture applies the palette with. */
+    private static final String COLOR_PALETTE_ALGORITHM = "aps_algo_color_palette";
+    /** The stage that applies the palette's tone / saturation. */
     private static final String PALETTE_ALGORITHM = "aps_algo_basic_tone";
     /**
      * Whether the capture request also gets the filter stage. The 50 MP pipeline is built without it
@@ -85,6 +87,11 @@ public final class HighPixelFilters {
 
     /** The camera app loader: the LUT manager is an app class, the request tag comes from the SDK's. */
     private static volatile ClassLoader appLoader;
+
+    /** The camera app loader for the palette route's capture-ID mapping. */
+    static ClassLoader appLoader() {
+        return appLoader;
+    }
 
     public static void install(ClassLoader classLoader) {
         appLoader = classLoader;
@@ -366,11 +373,12 @@ public final class HighPixelFilters {
                             ensureStage(param.getResult(), algorithmKey, "aps_algo_upscale",
                                 PALETTE_ALGORITHM);
                         }
-                        // No palette stage is inserted any more: with aps_algo_basic_tone in
-                        // the list (or the color_palette pair) this mode's 50 MP request came
-                        // back as a 3244x5132 image (2026-10-23 07:03 / 07:06), so the chain
-                        // stays exactly as the camera built it and only the capture params
-                        // carry the dial (HighPixelPaletteCapture).
+                        // Last night's master-JPG-MAX route: tone/saturation live in the LUT
+                        // manager, so the 50 MP chain gets the same color_palette + basic_tone pair
+                        // master mode carries. The params stay out (they cost the 50 MP upscale).
+                        // Native capture table: soft_light.cpp applies the exported
+                        // files/jiege/palette_lut.bin on the 4096 render before the 50 MP upscale.
+                        // Do not add aps_algo_color_palette/basic_tone here; that drops the upscale.
                         if (!open) return;
                         addFilterNode(param.getResult(), algorithmKey);
                     } catch (Throwable error) {
@@ -384,7 +392,12 @@ public final class HighPixelFilters {
                     try {
                         if (!"high_pixel_mode".equals(XposedHelpers.getObjectField(tag, "mCaptureMode"))) return;
                         String type = currentType();
-                        if (type == null || "default".equals(type)) return;
+                        if (type == null || "default".equals(type)) {
+                            // Same route as stampTag: the palette-only shot rides the filter stage
+                            // with an identity LUT so meicam loads and the native palette hook runs.
+                            if (!HighPixelPaletteRoute.arm()) return;
+                            type = HighPixelPaletteRoute.IDENTITY;
+                        }
                         // Same gate as stampTag: without it this hook re-opens the filter on a tag that
                         // stampTag deliberately left alone, and a filter with no capture ID destroys the
                         // picture. Kept out of the request entirely so the shot stays a plain 50 MP.
@@ -443,7 +456,17 @@ public final class HighPixelFilters {
         try {
             if (!"high_pixel_mode".equals(XposedHelpers.getObjectField(tag, "mCaptureMode"))) return;
             String type = currentType();
-            if (type == null || "default".equals(type)) return;
+            if (type == null || "default".equals(type)) {
+                // Palette dial alone: nothing routes the capture through meicam without a filter,
+                // so the native palette hook has no entry and the 50 MP shot drops the dial. Ride
+                // the filter stage with an identity LUT - the stage runs (and loads meicam), but
+                // applies nothing; the palette is applied natively as with a real filter.
+                if (!HighPixelPaletteRoute.arm()) return;
+                type = HighPixelPaletteRoute.IDENTITY;
+                if (seen.add("paletteRoute")) {
+                    Log.i(TAG, "palette-only capture rides the filter stage (" + type + ")");
+                }
+            }
             // A filter the capture side has no ID for cannot be applied there: the filter stage would
             // run with nothing to look up and hand back a broken picture (和光/meicam 那类就是这样，
             // 成片是 92 MB 的满屏噪点). Those filters stay preview-only.
@@ -466,40 +489,99 @@ public final class HighPixelFilters {
      * capture; 哈苏超清's list does not have it at all, which is why the dial only moved the preview.
      * Inserted after the raw stage, the place the retro page puts it.
      */
-    private static void addPaletteNode(Object meta, Object algorithmKey) {
-        if (meta == null) { Log.i(TAG, "palette stage: no meta"); return; }
+    private static String[] addPaletteNode(Object meta, Object algorithmKey) {
+        if (meta == null) { Log.i(TAG, "palette stage: no meta"); return null; }
         Object value = XposedHelpers.callMethod(meta, "get", algorithmKey);
         if (!(value instanceof String[])) {
             if (seen.add("paletteType")) {
                 Log.i(TAG, "palette stage: algorithm list is "
                     + (value == null ? "null" : value.getClass().getName()));
             }
-            return;
+            return null;
         }
         String[] current = (String[]) value;
-        // Only the tone stage: adding aps_algo_color_palette next to it made the 50 MP request
-        // come back as a 12 MP image (measured 2026-10-23 07:03), so it stays out.
-        for (String name : current) if (PALETTE_ALGORITHM.equals(name)) return;
-        // The tone stage only: the capture params now carry KEY_MASTER_MODE_CONTRAST /
-        // SATURATION and KEY_PALETTE_CAPTURE_ENABLE (see HighPixelPaletteCapture) and that is
-        // what the node reads.
+        // Master's 50 MP capture carries aps_algo_color_palette followed by
+        // aps_algo_basic_tone; the same pair goes in after the raw stage here. Rebuild the pair
+        // rather than trusting a partial list added by the X10 stamp.
         java.util.List<String> next = new java.util.ArrayList<>();
-        int at = 0;
+        boolean inserted = false;
         for (int i = 0; i < current.length; i++) {
+            if (COLOR_PALETTE_ALGORITHM.equals(current[i])
+                || PALETTE_ALGORITHM.equals(current[i])) continue;
             next.add(current[i]);
             if ("aps_algo_hybridraw".equals(current[i])) {
+                next.add(COLOR_PALETTE_ALGORITHM);
                 next.add(PALETTE_ALGORITHM);
-                at = next.size();
+                inserted = true;
             }
         }
-        if (at == 0) {
+        if (!inserted) {
             next.add(0, PALETTE_ALGORITHM);
+            next.add(0, COLOR_PALETTE_ALGORITHM);
         }
         String[] result = next.toArray(new String[0]);
         boolean set = setAlgorithmList(meta, algorithmKey, result);
         if (seen.add("paletteNode:" + set)) {
             Log.i(TAG, "palette stage " + (set ? "added" : "rejected") + ": "
                 + java.util.Arrays.toString(result));
+        }
+        return set ? result : null;
+    }
+
+    /** Copies the palette chain into the tag field APS reads for its actual stage list. */
+    private static void stampApsAlgorithms(Object tag, String[] chain) {
+        try {
+            Object raw = XposedHelpers.getObjectField(tag, "mApsAlgoFlags");
+            if (!(raw instanceof String[])) return;
+            java.util.List<String> next = new java.util.ArrayList<>();
+            for (String stage : (String[]) raw) {
+                if (!COLOR_PALETTE_ALGORITHM.equals(stage) && !PALETTE_ALGORITHM.equals(stage)) {
+                    next.add(stage);
+                }
+            }
+            int at = next.indexOf("aps_algo_hybridraw");
+            at = at >= 0 ? at + 1 : 0;
+            next.add(at, PALETTE_ALGORITHM);
+            next.add(at, COLOR_PALETTE_ALGORITHM);
+            XposedHelpers.setObjectField(tag, "mApsAlgoFlags", next.toArray(new String[0]));
+            if (seen.add("apsFlags")) Log.i(TAG, "APS stage list: " + next);
+        } catch (Throwable error) {
+            if (seen.add("apsFlagsFail")) Log.i(TAG, "APS stage list failed: " + error);
+        }
+    }
+
+    /**
+     * PhotoMode.updateCaptureRequestTag writes mApsAlgoFlags after createMetaItemInfo, so the
+     * pair has to be stamped again after it runs; otherwise APS's found-algo list stays at the
+     * original five stages even though the meta item shows the palette pair.
+     */
+    private static void hookPhotoModeFlags(ClassLoader classLoader) {
+        try {
+            Class<?> photo = Symbols.get().cls("PhotoMode");
+            XposedBridge.hookAllMethods(photo, "updateCaptureRequestTag", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!Settings.get(ModuleSettings.HIGH_PIXEL_EFFECTS) || !paletteActive()) return;
+                    try {
+                        for (Object arg : param.args) {
+                            if (arg == null) continue;
+                            Object mode;
+                            try {
+                                mode = XposedHelpers.getObjectField(arg, "mCaptureMode");
+                            } catch (Throwable notTag) {
+                                continue;
+                            }
+                            if (!"high_pixel_mode".equals(String.valueOf(mode))) continue;
+                            stampApsAlgorithms(arg, null);
+                            return;
+                        }
+                    } catch (Throwable error) {
+                        if (seen.add("photoFlagsFail")) Log.i(TAG, "PhotoMode flags failed: " + error);
+                    }
+                }
+            });
+            Log.i(TAG, "PhotoMode stage list installed");
+        } catch (Throwable error) {
+            Log.i(TAG, "PhotoMode stage list unavailable: " + error);
         }
     }
 
@@ -518,7 +600,8 @@ public final class HighPixelFilters {
         }
     }
 
-    private static boolean paletteActive() {
+    /** True while the palette dial is off its neutral position (also read by the palette route). */
+    static boolean paletteActive() {
         try {
             Class<?> holder = XposedHelpers.findClass(
                 "com.oplus.camera.common.utils.Lut3dDataManager$b", appLoader);
@@ -531,7 +614,6 @@ public final class HighPixelFilters {
             return false;
         }
     }
-
     /**
      * Puts one value into the meta item's own map - the same map the algorithm list lives in. The
      * capture metadata (the file's palette record) is built from it, so the dial can be recorded

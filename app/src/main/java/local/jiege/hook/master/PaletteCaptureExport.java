@@ -23,6 +23,8 @@ import local.jiege.hook.common.Log;
 public final class PaletteCaptureExport {
     private static final String TAG = "PaletteCapture";
     private static final String DIR = "jiege";
+    /** Off now that the 50 MP APS route carries color_palette + basic_tone; opt-in for A/B. */
+    private static final String PROP_NATIVE = "persist.omnicam.aura.hppalnative";
     private static long lastWrite;
     private static boolean lastEnabled;
     private static long lastHash;
@@ -53,6 +55,10 @@ public final class PaletteCaptureExport {
     /** Writes the current state, throttled: the dial flushes several times per gesture. */
     static void publish(File filesDir, boolean enabled, float[] lut) {
         if (filesDir == null) return;
+        // The capture table lives under files/jiege; it survives app updates but not a data
+        // clear/reinstall, which is why the dial went dead after the clean flash. Regenerate it
+        // whenever the palette changes (hppalnative=0 turns it off for A/B).
+        if ("0".equals(prop(PROP_NATIVE))) return;
         long now = System.currentTimeMillis();
         if (now - lastWrite < 200) return;
         lastWrite = now;
@@ -87,6 +93,16 @@ public final class PaletteCaptureExport {
     private static void write(File file, byte[] bytes) throws Exception {
         try (FileOutputStream stream = new FileOutputStream(file, false)) {
             stream.write(bytes);
+        }
+    }
+
+    private static String prop(String name) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            return String.valueOf(type.getMethod("get", String.class, String.class)
+                .invoke(null, name, ""));
+        } catch (Throwable error) {
+            return "";
         }
     }
 

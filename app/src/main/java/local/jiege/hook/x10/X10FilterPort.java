@@ -497,11 +497,10 @@ public final class X10FilterPort {
      */
     private static boolean stampsPalette(String mode) {
         if (!"high_pixel_mode".equals(mode)) return false;
-        // Stays on: with the flag off the capture takes the HDRTransform *quick* path and never
-        // reaches MsRenderHDRHostBuffer, which is where the native palette is applied - the shot came
-        // out untoned (2026-10-23 07:52). The flag is also what gives the photo its src.image; the
-        // gallery's 90-degree first draw comes from that re-render and is a separate problem.
-        return !"0".equals(prop("persist.omnicam.aura.hppalstamp"));
+        // Native capture-table route: keep aps_algo_color_palette out of the 50 MP chain so the
+        // upscale survives; soft_light.cpp applies files/jiege/palette_lut.bin on the 4096 render.
+        // hppalstamp=1 puts the APS pair back for experiments only.
+        return "1".equals(prop("persist.omnicam.aura.hppalstamp"));
     }
 
     private static String prop(String name) {
