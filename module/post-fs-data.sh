@@ -367,4 +367,115 @@ elif [ -f "$HWCFG" ]; then
     fi
 fi
 
+# --- [PKJ110] Native patches (2026-10-27, revised 2026-10-28) ----------------
+# Three fixes, all validated live on the device:
+#
+# 1. libextensionlayer.so -- video ISZ, pure a632c build (md5 a860a65c).
+#    *** DISABLED BY DEFAULT since 2026-10-28 (see WHY IT IS OFF below). ***
+#    ExtensionPluginBase::IsIZoomEnableVideo has two gates, both bypassed:
+#      a) 0xa632c `ccmp w16,#1,#0,ne` -> `ccmp wzr,#0,#0,ne`: the AEC runtime
+#         gate (aecIzoomState, always 0) no longer blocks in-sensor zoom.
+#         SensorMode:13 centered crop then fires (102x after patch vs 0x before).
+#      b) 0xa61d4 `ccmp w7,#0x1e,#0,ne` Rn w7 -> wzr: removes desc=30 from the
+#         whitelist, leaving {4,6,8,10}.
+#    WHY IT IS OFF: whitelist {4,6,8,10} is NOT pro-video-only. Runtime logs
+#    (pluginbase.cpp:5360) show ordinary video WITH SUPER STABILIZATION also
+#    reports `m_modeDescriptor:4`, so gate b) never excluded it. Once ISZ is
+#    active the sensor switches to a cropped mode (Physical Sensor Mode 13 main
+#    / 23 tele / 9 ultratele) which no longer matches the full-frame frameSize
+#    the EIS config is calibrated against; MCTFE then fails and the chi
+#    watchdog raises SIGABRT after ~16 retries. Symptom: with stabilization on,
+#    2x->3x/6x appears to do nothing, then the provider dies ~50s later.
+#    Unbinding this single library restores normal zoom (verified 17:40).
+#    To re-enable anyway, accepting that risk: touch $MODDIR/enable_native_isz.
+# 2. com.qti.stats.caflogicaldriver.so -- CAF UBSAN aborts (md5 69c781d3).
+#    Upstream firmware bug
+#    (historical tombstones predate every experiment): during SAT master
+#    renegotiation the (count+1)<<shift style arithmetic in caflogicaldriver
+#    overflows and the toolchain's UBSAN minimal runtime calls abort(). All 28
+#    `bl __ubsan_handle_*_minimal_abort` call sites are redirected to their
+#    containing function's clean epilogue (b <epilogue>), so an overflow skips
+#    the stats update instead of killing the provider. IMPORTANT: never no-op
+#    the abort handler itself -- paciasp doubles as a BTI landing pad and the
+#    b.cond->bl chain leaks stack frames (SIGILL/SEGV, all three variants
+#    reproduced). Rebinding the target is required because the provider caches
+#    the library at load time.
+#
+# 3. oplus_eis_camera.vcfg -- telephoto EIS config gap (md5 48ab334b).
+#    Stock ships cameraID 0/1/2 only in `SuperEIS` / `Super_EIS_30FPS`, but the
+#    SAT_* sections do have 3/4. At 6x only the tele camera can serve, so SAT
+#    fusion collapses to single-camera super-EIS, that section has no cam3/cam4
+#    node, LibHIS reports `no camera config of ID: 3` and publishes a default
+#    stabilization matrix -> the preview warp samples out of bounds -> the lower
+#    half of the frame turns into vertical stripes. Fix copies the complete
+#    cam3/cam4 nodes from SAT_Super_EIS_30FPS into both sections (pure text
+#    insertion, 1948788 -> 1969051 bytes). Verified: `no camera config of ID: *`
+#    and `No corresponding OIS camera found` drop to zero, 6x renders correctly.
+#    Context must be vendor_configs_file (NOT vendor_file) or the camera app
+#    (uid 10158) cannot read it and APSJsonParser asserts.
+#
+# Known residual (upstream, NOT fixed here): with video + super stabilization
+# and zoom already past 1x, returning from the gallery stalls the session.
+# Traced end to end on 2026-10-28 (17:51 run is the decisive one): the app
+# reopens the session at its remembered ratio and pushes that ratio out with the
+# very first requests, so MCTFE's first frame has to configure multi-camera at
+# ~2.3x and fails with ErrorCode:1047 CamxResultExtIFEEPRFail about 50ms after
+# CONFIG End. The session goes to bad state, every StreamOn then waits out the
+# 2900ms timeout, and after ~16 retries the chi watchdog raises SIGABRT.
+# NOTE: it is NOT a missing peer pipeline. In that run cam0/2/3/4 all
+# initialized and the 1047 still fired; the earlier "CHI created cam0 only"
+# observation was a consequence, not the cause. Also ruled out: is_izoom_at2x,
+# [NoDeferCameraId] (governs sensor init, deferSlaveInitMask=0x18 covers tele/
+# ultratele only), pipeline_defer_count (0 is worse), the StreamOn timeout
+# value (runtime-overwritten, and 1047 precedes it), and any app-side persisted
+# zoom key (none exists -- the ratio lives in process memory only).
+# WORKAROUND (100% effective, verified repeatedly): dial the zoom back to 1x
+# before opening the gallery, then zoom again after returning. A real fix would
+# need a Camera2 request hook in the camera app to force the first frames to
+# full-frame crop and release the real ratio afterwards.
+# touch $MODDIR/disable_caf_ubsan_fix or $MODDIR/disable_eis_config to skip the
+# corresponding bind. The video ISZ library is OFF by default; touch
+# $MODDIR/enable_native_isz to opt back in (accepting the stabilization-zoom
+# failure described above).
+if [ "$PROFILE" = PKJ110 ]; then
+    bind_native_file() {
+        local SOURCE="$1" TARGET="$2" CTX="$3"
+        if [ ! -f "$SOURCE" ]; then log "skip $TARGET: no payload"; return 0; fi
+        if [ ! -f "$TARGET" ]; then log "skip $TARGET: target absent"; return 0; fi
+        while grep -q " $TARGET " /proc/self/mounts 2>/dev/null; do
+            umount "$TARGET" 2>>"$LOG" || break
+        done
+        chown root:root "$SOURCE"
+        chmod 0644 "$SOURCE"
+        chcon "u:object_r:$CTX:s0" "$SOURCE" 2>/dev/null || true
+        if mount --bind "$SOURCE" "$TARGET" >> "$LOG" 2>&1; then
+            log "native bind ok $TARGET"
+        else
+            log "native bind FAIL $TARGET"
+        fi
+    }
+    if [ -f "$MODDIR/enable_native_isz" ]; then
+        # 双 bind（r29）：lib + 增强 config（0x830B 行 + isSupport60FpsIzoom），
+        # 只挂 lib 时 ISZ 无法真正切 sensor 裁剪。config 上下文=vendor_configs_file。
+        bind_native_file "$MODDIR/payload_pkj110/lib64/libextensionlayer.so" \
+            /odm/lib64/libextensionlayer.so vendor_file
+        bind_native_file "$MODDIR/payload_pkj110/etc/camera/CameraHWConfiguration.config" \
+            /odm/etc/camera/CameraHWConfiguration.config vendor_configs_file
+    else
+        log "video isz skipped (off by default)"
+    fi
+    if [ -f "$MODDIR/disable_caf_ubsan_fix" ]; then
+        log "caf ubsan fix disabled"
+    else
+        bind_native_file "$MODDIR/payload_pkj110/lib64/com.qti.stats.caflogicaldriver.so" \
+            /vendor/lib64/camera/components/com.qti.stats.caflogicaldriver.so vendor_file
+    fi
+    if [ -f "$MODDIR/disable_eis_config" ]; then
+        log "eis config fix disabled"
+    else
+        bind_native_file "$MODDIR/payload_pkj110/etc/oplus_eis_camera.vcfg" \
+            /odm/etc/camera/oplus_eis_camera.vcfg vendor_configs_file
+    fi
+fi
+
 log "end profile=$PROFILE"

@@ -19,3 +19,14 @@ else
 fi
 printf 'installed %s -> %s: %s\n' "${HAVE:-none}" "$WANT" "$RESULT" > "$MODPATH/install.log"
 ui_print "- Settings app: $RESULT"
+
+# Update marker for uninstall.sh: this flash replaces an existing
+# /data/adb/modules/ricoh_pop_x9u, i.e. it is an in-place UPDATE, not a removal.
+# The old module's uninstall.sh runs during the manager's swap and must stay
+# conservative (keep the settings app and its user settings); this module's
+# service.sh clears the marker once it has run, so a later uninstall.sh run is
+# recognised as a genuine removal and does the full cleanup.
+if [ -d /data/adb/modules/ricoh_pop_x9u ]; then
+    : > /data/adb/.omnicam_muse_update 2>/dev/null
+    ui_print "- In-place update detected: uninstall.sh will keep the settings app"
+fi

@@ -165,11 +165,25 @@ else
     # Detaching a stale bind is still required: metamount.sh overlays /odm/lib64 from its workspace
     # unconditionally on every boot, and a soft reboot re-runs this phase while the old bind is
     # still in place.
-    if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then
-        umount /odm/lib64/libBasicTonePhoto.so 2>>"$LOG" \
-            && log "PKJ110: detached stale libBasicTonePhoto.so bind"
+    # Runtime palette-backend switch (the file that is lost on a clean reflash):
+    #   /odm/lib64/libBasicTonePhoto.so is stock on PKJ110 and has no palette code. X10's
+    #   libBasicTonePhotoX10.so does, and binding it there is what made the capture palette work.
+    #   The stock branch below detaches that bind because X10 also breaks master-colour captures.
+    # Set persist.omnicam.aura.palettebt=1 to choose the palette backend; unset/0 keeps master colour.
+    if [ "$(getprop_safe persist.omnicam.aura.palettebt)" = "1" ] \
+        && [ -f "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" ]; then
+        if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then
+            umount /odm/lib64/libBasicTonePhoto.so 2>>"$LOG" || true
+        fi
+        bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhoto.so
+        log "PKJ110: palette backend X10 bound (palette capture ON, master-colour capture trade-off)"
+    else
+        if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then
+            umount /odm/lib64/libBasicTonePhoto.so 2>>"$LOG" \
+                && log "PKJ110: detached stale libBasicTonePhoto.so bind"
+        fi
+        log "PKJ110: basic-tone is stock $(md5sum /odm/lib64/libBasicTonePhoto.so 2>/dev/null | cut -d' ' -f1) (expect 8651fa24 = sha256 a93f40de)"
     fi
-    log "PKJ110: basic-tone is stock $(md5sum /odm/lib64/libBasicTonePhoto.so 2>/dev/null | cut -d' ' -f1) (expect 8651fa24 = sha256 a93f40de)"
 
     # POP capture RAW fix (door #4, docs/MODULE.md §32/34): this used to bind the patched
     # libAlgoInterface.so on every boot. A/B on PKJ110 (2026-10-21) says the patch itself is what

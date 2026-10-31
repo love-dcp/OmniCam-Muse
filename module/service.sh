@@ -1,6 +1,13 @@
 #!/system/bin/sh
 
 MODDIR=${0%/*}
+# Clear the in-place update marker (written by customize.sh when this zip flashed over an
+# existing module): once this module's service phase has run, a later uninstall.sh run is a
+# genuine removal, not the update swap, and may do the full cleanup. Keep the marker while a
+# staged update is still pending (the boot-time swap has not consumed it yet).
+if [ ! -d /data/adb/modules_update/ricoh_pop_x9u ]; then
+    rm -f /data/adb/.omnicam_muse_update 2>/dev/null
+fi
 PREF_DIR=/data/user/0/com.oplus.camera/shared_prefs
 PREF_FILE="$PREF_DIR/override_config_data.xml"
 APP=/data/user/0/com.oplus.camera
@@ -65,6 +72,17 @@ for ORIGINAL in /odm/etc/camera/basictone/lmt/*; do
             fi
             ;;
     esac
+done
+# The X10 palette backend (persist.omnicam.aura.palettebt=1) makes BasicTone read
+# LMTPhotoLut0..3 in every profile, including GR's staged tree. Without them
+# BasicTone::readLMTLut dereferences null and the camera crashes on GR capture, and the
+# frames that do get saved come out channel-scrambled. GR's own LMTLut tables are the
+# photo LUTs (byte-identical to the X10 photo tables), so publish them under the Photo
+# names in the staged tree.
+for GR_LMT_INDEX in 0 1 2 3; do
+    if [ -f "$OUT/LMTLut$GR_LMT_INDEX" ] && [ ! -f "$OUT/LMTPhotoLut$GR_LMT_INDEX" ]; then
+        cp "$OUT/LMTLut$GR_LMT_INDEX" "$OUT/LMTPhotoLut$GR_LMT_INDEX"
+    fi
 done
 chown -R "$APP_UID:$APP_UID" "$APP/files/ricoh_gr"
 restorecon -R "$APP/files/ricoh_gr"
@@ -140,13 +158,15 @@ if [ "$(getprop ro.product.model 2>/dev/null)" = PKJ110 ]; then
     restorecon "$ASSET_DIR/oplus_camera_preview_decision_config.json" 2>/dev/null || true
 fi
 
-# Normal-mode 25MP unlock (tools/patch_25mp.py): the relaxed config copies; the settings hook adds the
-# "enabled" marker while the switch is on and unlock25mp.cpp redirects reads to these copies.
+# Normal-mode 25MP unlock (tools/patch_25mp.py, tools/patch_x8u_unlock25mp.py): the relaxed config
+# copies; the settings hook adds the "enabled" marker while the switch is on and unlock25mp.cpp
+# redirects reads to these copies.
 #
-# The copies are generated from the X9 Ultra stock /odm, so they only describe sensor modes PMA110 has.
-# On PKJ110 the redirected decision tree hands the capture gate a null sensor-mode array and every
-# mode's shutter silently does nothing - unlock25mp.cpp therefore also requires the profile file below
-# to say PMA110. Written here because this is the only place that runs with the app's uid available.
+# Per-profile staging: the payload/unlock25mp copies are generated from the X9 Ultra stock /odm and
+# only describe sensor modes PMA110 has, so on PKJ110 they must never be served (the capture gate
+# would get a null sensor-mode array and every mode's shutter silently does nothing) — PKJ110 gets
+# its own decision-only copy in unlock25mp_pkj below. The profile file is written here because this
+# is the only place that runs with the app's uid available.
 PROFILE_FILE="$APP/files/jiege/profile"
 mkdir -p "$APP/files/jiege"
 if [ "$(getprop ro.product.model 2>/dev/null)" = PMA110 ]; then
@@ -166,6 +186,17 @@ chown -R "$APP_UID:$APP_UID" "$UNLOCK_DIR"
 chmod 0771 "$UNLOCK_DIR"
 find "$UNLOCK_DIR" -type f -exec chmod 0644 {} \;
 restorecon -R "$UNLOCK_DIR" 2>/dev/null || true
+
+# X8U (PKJ110) 25MP unlock (tools/patch_x8u_unlock25mp.py): the relaxed decision config is a
+# PKJ-specific file staged separately; unlock25mp.cpp serves it (decision only — the X9U
+# lighthouse/APS copies above are never read on this profile).
+UNLOCK_PKJ="$APP/files/jiege/unlock25mp_pkj"
+mkdir -p "$UNLOCK_PKJ"
+cp -f "$MODDIR/payload_pkj110/unlock25mp/oplus_camera_preview_decision_config.json" "$UNLOCK_PKJ/"
+chown -R "$APP_UID:$APP_UID" "$UNLOCK_PKJ"
+chmod 0771 "$UNLOCK_PKJ"
+find "$UNLOCK_PKJ" -type f -exec chmod 0644 {} \;
+restorecon -R "$UNLOCK_PKJ" 2>/dev/null || true
 
 # 哈苏超清 200MP without the big-face gate (tools/patch_200m_face.py): the decision copies; the settings
 # hook adds the "enabled" marker while the switch is on and face200m.cpp redirects the decision read.
