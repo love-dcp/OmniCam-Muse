@@ -1,0 +1,6 @@
+id=omnicam-muse-uninstaller
+name=OmniCam Muse 卸载器
+version=1.4
+versionCode=5
+author=love-dcp
+description=刷入后优先热卸载：清除 OmniCam Muse 的 KSU 模块、LSPosed 设置应用、相机与相册内的模块文件/偏好、/data/adb 残留和 persist.omnicam.* 属性；只动 /data 与 /sdcard，不写任何系统分区，/odm 仅 umount。支持热安装时无需重启，否则执行 Action 或 ksud soft-reboot。不删除照片和视频。
