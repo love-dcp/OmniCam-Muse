@@ -1,6 +1,12 @@
 #!/system/bin/sh
 
 MODDIR=${0%/*}
+# Set by customize.sh when the module is flashed: rebuild the staged data right away instead of
+# waiting for a boot. That wait never ends on this phone (temporary root, no reboots), and the
+# uninstaller deletes exactly these files, so a reinstall used to leave the module half dead until
+# someone ran the staging by hand. Nothing below needs the camera stopped except the tilt-shift db
+# rebuild, which is left for a boot when staging.
+STAGE_ONLY=${OMNICAM_STAGE_ONLY:-0}
 # Clear the in-place update marker (written by customize.sh when this zip flashed over an
 # existing module): once this module's service phase has run, a later uninstall.sh run is a
 # genuine removal, not the update swap, and may do the full cleanup. Keep the marker while a
@@ -15,9 +21,15 @@ OUT=$APP/files/ricoh_gr/lmt
 GR_AVAILABLE='0.6(14),1(23),2(47),3(70),6(139),10(230)'
 GR_MARKED='1.2173913(28),1.7391304(40)'
 
-until [ -d "$APP" ]; do
-    sleep 1
-done
+if [ ! -d "$APP" ]; then
+    if [ "$STAGE_ONLY" = "1" ]; then
+        printf 'staging: %s is not there yet, skipped\n' "$APP"
+        exit 0
+    fi
+    until [ -d "$APP" ]; do
+        sleep 1
+    done
+fi
 
 APP_UID=$(stat -c %u "$APP")
 mkdir -p "$PREF_DIR"
@@ -127,8 +139,12 @@ set_config com.oplus.feature.tilt.shift.photo.support 1
 TILT_MARK="$MODDIR/tilt_db_reset"
 TILT_DB="$APP/databases/mode_data.db"
 if [ ! -f "$TILT_MARK" ] && [ -f "$TILT_DB" ] && ! grep -aq tiltShift "$TILT_DB"; then
-    am force-stop com.oplus.camera
-    rm -f "$TILT_DB" "$TILT_DB-journal" "$TILT_DB-wal" "$TILT_DB-shm"
+    if [ "$STAGE_ONLY" = "1" ]; then
+        printf 'staging: tilt-shift db needs a rebuild, left for the next boot\n'
+    else
+        am force-stop com.oplus.camera
+        rm -f "$TILT_DB" "$TILT_DB-journal" "$TILT_DB-wal" "$TILT_DB-shm"
+    fi
 fi
 touch "$TILT_MARK"
 chown "$APP_UID:$APP_UID" "$PREF_FILE"
@@ -214,8 +230,10 @@ until [ -d "$GALLERY" ]; do
 done
 GALLERY_UID=$(stat -c %u "$GALLERY")
 GALLERY_PREF="$GALLERY/shared_prefs/business_featureSwitch_config.xml"
+WAIT_LIMIT=120
+[ "$STAGE_ONLY" = "1" ] && WAIT_LIMIT=10
 WAIT=0
-while [ ! -f "$GALLERY_PREF" ] && [ "$WAIT" -lt 120 ]; do
+while [ ! -f "$GALLERY_PREF" ] && [ "$WAIT" -lt "$WAIT_LIMIT" ]; do
     sleep 1
     WAIT=$((WAIT + 1))
 done

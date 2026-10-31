@@ -35,3 +35,62 @@ if [ -d /data/adb/modules/ricoh_pop_x9u ]; then
     : > /data/adb/.omnicam_muse_update 2>/dev/null
     ui_print "- In-place update detected: uninstall.sh will keep the settings app"
 fi
+
+# ---------------------------------------------------------------------------
+# Make the flash self-sufficient.
+#
+# Uninstalling this module deletes the data it stages into the camera and the gallery
+# (files/jiege, ricoh_gr, pop_port, mode_limit_watermark, jiege_ipu, ricoh_gr_styles, plus
+# nine feature keys in override_config_data.xml) and only service.sh rebuilds it — at boot,
+# which never happens on this phone. That is why a reinstall used to come back half dead
+# until the staging was run by hand. Run it here instead, with service.sh told to skip the
+# boot-only waits.
+#
+# The /odm config binds are rebuilt for the same reason: their source lives inside the module
+# directory, which the manager replaces on every flash, so an old mount keeps pointing at the
+# previous (now deleted) file and a changed payload would never reach the camera.
+if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && [ -d "$MODPATH/payload" ]; then
+    ui_print "- Staging camera and gallery data"
+    ( cd "$MODPATH" && OMNICAM_STAGE_ONLY=1 sh ./service.sh ) > "$MODPATH/stage.log" 2>&1
+    if [ $? -eq 0 ]; then
+        ui_print "  done"
+    else
+        ui_print "  staging reported an error; see stage.log in the module directory"
+    fi
+
+    PROFILE=PKJ110
+    CONFIG_SRC="$MODPATH/payload_pkj110"
+    CONFIG_FILES="oplus_camera_algo_switch_config camera_unit_config camera_unit_feature_config.protobuf"
+    if [ "$(getprop ro.product.model 2>/dev/null)" = PMA110 ]; then
+        PROFILE=PMA110
+        CONFIG_SRC="$MODPATH/payload"
+        CONFIG_FILES="oplus_camera_config oplus_camera_aps_config oplus_camera_preview_decision_config.json $CONFIG_FILES"
+    fi
+    NSENTER=/system/bin/nsenter
+    config_bound() {
+        $NSENTER -t 1 -m -- cat /proc/self/mountinfo 2>/dev/null | grep -q " $1 "
+    }
+    bind_config() {
+        SRC="$1"; TGT="$2"
+        [ -f "$SRC" ] && [ -f "$TGT" ] || return 1
+        chown root:root "$SRC" 2>/dev/null
+        chmod 0644 "$SRC" 2>/dev/null
+        chcon u:object_r:vendor_configs_file:s0 "$SRC" 2>/dev/null
+        N=0
+        while config_bound "$TGT" && [ "$N" -lt 6 ]; do
+            $NSENTER -t 1 -m -- umount -l "$TGT" 2>/dev/null || break
+            N=$((N + 1))
+        done
+        $NSENTER -t 1 -m -- mount --bind "$SRC" "$TGT" 2>/dev/null
+    }
+    ui_print "- Re-binding the camera config for $PROFILE"
+    for NAME in $CONFIG_FILES; do
+        if bind_config "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"; then
+            ui_print "  bound $NAME"
+        else
+            ui_print "  could not bind $NAME (run apply-now.sh with root)"
+        fi
+    done
+fi
+
+true
