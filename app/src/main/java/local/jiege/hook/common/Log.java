@@ -24,10 +24,16 @@ public final class Log {
     /**
      * Runs one hook installer. A failure, typically a symbol that did not resolve on this app
      * build, turns off only that part; it is logged once with the reason.
+     *
+     * A {@link Symbols.MissingSymbol} is an app-build difference, not an installation error: the
+     * spec-level misses are counted separately ("Symbols: N missing") already, so it is logged at
+     * info level and does not raise the status page's error count.
      */
     public static void guard(String tag, String part, Installer installer) {
         try {
             installer.install();
+        } catch (Symbols.MissingSymbol error) {
+            i(tag, part + " unavailable (" + error.getMessage() + ")");
         } catch (Throwable error) {
             e(tag, part + " unavailable", error);
         }
