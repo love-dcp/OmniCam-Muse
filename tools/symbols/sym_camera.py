@@ -91,6 +91,10 @@ add(
  FocalLength__millimetres=M(**{"in": "@FocalLength"}, params=["float"], ret="float", strings=["ZoomStreetFocalLengthUnit"]),
  ZoomUi=K(strings=[", isNoneSatTeleDVOpen: ", "changeZoom, value: "]),
  ZoomUi__setUnit=M(**{"in": "@ZoomUi"}, params=[S, "boolean"], ret="void", strings=["ZoomSeekBar"]),
+ # Zoom presenter (il.h0, "compiled from ZoomPresenter.java"): updateZoomValue is the one choke point
+ # every zoom change runs through (zoom state holder update + CamCmdUtil.UI_EVENT.ZOOM_RATIO submit),
+ # and the video izoom guard's way of setting the zoom back to 1x on pause.
+ Zoom__updateZoom=M(params=["float", "boolean"], ret="void", strings=["com.oplus.ultra.tele.zoom.value", "com.oplus.feature.video.4k60fps.ultrawide.support"]),
  Zoom__relabel=M(**{"in": ZSB}, params=[], ret="void", strings=["mm"], invokes=["Landroid/graphics/Paint;->measureText(Ljava/lang/String;)F"]),
  Zoom__setZoom=M(**{"in": ZSB}, params=["float", "boolean"], ret="void", invokes=["Lcom/oplus/camera/feature/zoom/view/ZoomSeekBar;->setZoomRate(F)V"]),
  Zoom__formatZoom=M(**{"in": ZSB}, params=["float"], ret=S, strings=["mm"]),
@@ -205,4 +209,11 @@ add(
  Lut3d__load=M(**{"in": "com.oplus.camera.common.utils.Lut3dDataManager"}, params=["int", "int", S], ret="boolean", strings=["initializeBasicToneEnv, init result "]),
  Lut3d__mode=F(**{"in": "com.oplus.camera.common.utils.Lut3dDataManager"}, name="P", type=S),
  Lut3d__index=F(**{"in": "com.oplus.camera.common.utils.Lut3dDataManager"}, name="M", type="int"),
+ # Session-teardown owner (log tag OCAM_DeviceProcessor, real class lm.f on 7.006.123): closeCamera
+ # (obfuscated k(ZZ)V) runs on every camera close - gallery hand-over, recording stop (session
+ # re-create) and activity teardown. The video izoom guard hooks it as the most reliable "session
+ # is about to be torn down" moment, because the camera activity's onPause proved unreliable on
+ # this build (2026-10-29: fired for some gallery transitions but not others, same process).
+ DeviceProcessor=K(strings=["DeviceProcessor-"]),
+ DeviceProcessor__closeCamera=M(**{"in": "@DeviceProcessor"}, params=["boolean", "boolean"], ret="void", strings=["closeCamera, need close camera."]),
 )

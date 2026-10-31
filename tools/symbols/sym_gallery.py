@@ -10,10 +10,14 @@ def g(**kw):
 g(
  Config__getBoolean=M(params=[S, "boolean", "boolean"], ret="boolean", strings=["getBoolean configAbility is null, configId:"]),
  CameraInfo__doubleSelect=M(params=[], ret="boolean", strings=["ai.master.support.double.select", "getCameraIsSupportDoubleSelect metadata failed"]),
- AssetStyleSource=K(strings=["AssetStyleFileSource(assetName='"]),
+ # PKJ110 (X8U) gallery has no AssetStyleSource (GR style assets are X9U-only) - optional so
+ # the status page does not count a device difference as a failure.
+ AssetStyleSource=K(strings=["AssetStyleFileSource(assetName='"], optional=True),
  FileStyleSource=K(strings=["FileStyleSource(filePath='"]),
  StyleSource=K(interfaceOf="@AssetStyleSource"),
- AssetStyleSource__name=F(**{"in": "@AssetStyleSource"}, type=S),
+ AssetStyleSource__name=F(**{"in": "@AssetStyleSource"}, type=S, optional=True),
+ # open(): returns the style asset stream; GrGalleryWatermark replaces it with the staged file.
+ AssetStyleSource__open=M(**{"in": "@AssetStyleSource"}, ret="java.io.InputStream", optional=True),
  StyleLoader__resolve=M(**{"in": "com.oplus.gallery.framework.abilities.watermarkmaster.b"}, params=["@StyleSource"], ret="@StyleSource"),
  Section__refreshStyles=M(**{"in": WCS}, params=[], ret="void", fields=["Lcom/oplus/gallery/photoeditor/R$string;->picture_edtior_text_watermark_ricoh_GR_title:I"]),
  Section__backButtonSetup=M(**{"in": WCS}, fields=["Lcom/oplus/gallery/photoeditor/R$id;->watermark_camera_back_btn:I"]),

@@ -11,7 +11,9 @@ add(
 
 MSB = "com.oplus.camera.control.MainShutterButton"
 add(
- Zoom__labelBitmap=F(**{"in": ZSB}, name="I6", type="android.graphics.Bitmap"),
+ # PKJ110 (X8U) camera v7.006.123 has no I6:Bitmap field in ZoomSeekBar - optional so the
+ # status page does not count a device difference as a failure.
+ Zoom__labelBitmap=F(**{"in": ZSB}, name="I6", type="android.graphics.Bitmap", optional=True),
  Zoom__fadeLabels=M(**{"in": ZSB}, name="b", params=[], ret="void"),
  ZoomBase__fadeLabels=M(**{"in": "@ZoomBase"}, overrideOf="@Zoom.fadeLabels"),
  ZoomUi__bar=F(**{"in": "@ZoomUi"}, readBy=["@ZoomUi.setUnit"]),
@@ -73,15 +75,16 @@ add(
  # less twice sideMargin. updateBounds recomputes the reset capsule and the item backdrop from the row's position
  EffectContainer__sideMargin=F(**{"in": "@EffectContainer"}, name="q", type="int"),
  EffectContainer__updateBounds=M(**{"in": "@EffectContainer"}, params=[], ret="void", strings=["updateBlurBgBounds, calLeftAndRight is null, return"]),
- EffectItemView=K(strings=["MasterEffectContainer", "expand"]),
- EffectItemView__onClick=M(**{"in": "@EffectItemView"}, name="onClick"),
- EffectItemView__item=F(**{"in": "@EffectItemView"}, type="@EffectItem"),
- EffectItemView__bind=M(**{"in": "@EffectItemView"}, params=["boolean", "boolean"], ret="void"),
- EffectItemView__name=F(**{"in": "@EffectItemView"}, type="android.widget.TextView"),
- EffectItemView__icon=F(**{"in": "@EffectItemView"}, type="android.widget.ImageView"),
- EffectValueView=K(super="@EffectItemView", fieldTypes=["android.widget.TextView"]),
- EffectValueView__bind=M(**{"in": "@EffectValueView"}, overrideOf="@EffectItemView.bind"),
- EffectValueView__value=F(**{"in": "@EffectValueView"}, type="android.widget.TextView"),
+ # MasterEffectContainer/expand strings are absent on PKJ110 v7.006.123 (X9U only).
+ EffectItemView=K(strings=["MasterEffectContainer", "expand"], optional=True),
+ EffectItemView__onClick=M(**{"in": "@EffectItemView"}, name="onClick", optional=True),
+ EffectItemView__item=F(**{"in": "@EffectItemView"}, type="@EffectItem", optional=True),
+ EffectItemView__bind=M(**{"in": "@EffectItemView"}, params=["boolean", "boolean"], ret="void", optional=True),
+ EffectItemView__name=F(**{"in": "@EffectItemView"}, type="android.widget.TextView", optional=True),
+ EffectItemView__icon=F(**{"in": "@EffectItemView"}, type="android.widget.ImageView", optional=True),
+ EffectValueView=K(super="@EffectItemView", fieldTypes=["android.widget.TextView"], optional=True),
+ EffectValueView__bind=M(**{"in": "@EffectValueView"}, overrideOf="@EffectItemView.bind", optional=True),
+ EffectValueView__value=F(**{"in": "@EffectValueView"}, type="android.widget.TextView", optional=True),
  ScaleBar__setListener=M(**{"in": SB}, name="setScaleBarValueChangeListener"),
  ScaleBarListener=K(paramOf=["@ScaleBar.setListener", 0]),
  # position the bar on an index: select (index + notify flag), then scroll the scale to it

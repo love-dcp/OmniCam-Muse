@@ -76,6 +76,42 @@ PKJ110_PAYLOAD = {
         60867488,
         "55e78c21a7554b8e7ec7abe452044436",
     ),
+    # Normal-mode 25MP unlock (r23, tools/patch_x8u_unlock25mp.py): X8U's decrypted decision
+    # config with the turboRawNightLimiter / isSupportHR2Dol routing gates removed so the
+    # FULL_QBC plan is reachable. The r22 zip shipped the pre-fix build (362472 B) and a
+    # reflash silently reverted the fix -- pinned here so that can never happen again.
+    "unlock25mp/oplus_camera_preview_decision_config.json": (
+        362079,
+        "8971611e2b24dc02635d7fee4e6b0feb",
+    ),
+    # Native patches (2026-10-27/28, bound by post-fs-data.sh / apply-now.sh on PKJ110):
+    # CAF UBSAN abort fix and the telephoto EIS config gap fix (on by default), plus the
+    # video-ISZ library that is deliberately shipped but bound only via enable_native_isz.
+    "lib64/com.qti.stats.caflogicaldriver.so": (
+        231544,
+        "69c781d3c49492c0fecc39e58e996902",
+    ),
+    # Video-ISZ library, bound only via enable_native_isz. r26 switched it from the narrow
+    # variant (e338f8ac, 0xa61d5 clobbers the desc==30 branch -> onCameraError suicide on
+    # PKJ110, 2026-10-30) to the plain a632c build, which 30/60fps testing proved safe.
+    "lib64/libextensionlayer.so": (
+        1723576,
+        "a860a65cd5d358d94fbdfc947802c354",
+    ),
+    # Video-ISZ camera config, bound together with the library (r29). X8U's stock
+    # CameraHWConfiguration plus the video-ISZ keys: isSupport60FpsIzoom, the 0x830B
+    # (pro-video) rows in VideoIzoomOperationMode and iZoomSettins, and verbose izoom
+    # logging. Library alone never switches the sensor to a cropped mode -- the config
+    # whitelist is what admits opmode 0x830B. Rebuilt by tools/patch_x8u_video_isz.py
+    # (--opmodes 0x830B --fps60 --log-izoom --ascii-log) from the stock config.
+    "etc/camera/CameraHWConfiguration.config": (
+        274342,
+        "7ca3d5f0f1529c6803ab45f9ef24879e",
+    ),
+    "etc/oplus_eis_camera.vcfg": (
+        1969051,
+        "48ab334b5a84d3149e3a956f575c6e49",
+    ),
 }
 # X9U payload must stay untouched by PKJ110 work.
 PMA110_PAYLOAD = {
@@ -89,9 +125,22 @@ PMA110_PAYLOAD = {
     ),
 }
 MODULE_SCRIPTS = {
-    "post-fs-data.sh": (19975, "f5415ec4be66cc699b1d7880f319d2ea"),
-    "service.sh": (11630, "221461f2f505c3ac13b3c31f438dfe55"),
-    "post-mount.sh": (10975, "87f84b5ccf2005fd908a4c943bf874bc"),
+    # post-fs-data.sh / post-mount.sh: current bytes are the ones validated live on the
+    # device (native patch section 2026-10-27/28; post-mount matches the r22 build).
+    # The pre-r23 pins had drifted: post-fs-data.sh was reworked after r22 was packaged,
+    # and even the r22 zip no longer matched the post-mount.sh pin.
+    "post-fs-data.sh": (27129, "4121039e9b5ec1e7f7c3122475b3aba0"),
+    "post-mount.sh": (13203, "ef016e422316466a97dd7e4581ef8a56"),
+    # r23: service.sh now clears the in-place update marker; uninstall.sh distinguishes
+    # update (conservative) from removal (full cleanup via uninstall_full.sh); action.sh
+    # is the explicit full-uninstall button; customize.sh writes the update marker and
+    # installs the APK; apply-now.sh binds the native patches without a reboot.
+    "service.sh": (13416, "abf0ce081b14706cd0f7ceee167b2486"),
+    "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
+    "uninstall_full.sh": (25600, "6a05587a77cb5184603021c39e4cea08"),
+    "action.sh": (1633, "de4aa3da4aaf0d33140da503a63eaa66"),
+    "customize.sh": (1839, "5933a27aadd44da0295f6e22b925bf3d"),
+    "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
     "x8u-fix-pop.sh": (9181, "2964db9cccf9d7197ece95eab99af699"),
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),
     "x8u-fix-vibrant.sh": (8919, "c1592457cb521e1016a13c68c51bf513"),
