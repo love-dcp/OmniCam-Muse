@@ -26,6 +26,47 @@ getprop_safe() {
     getprop "$1" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Stale CamX override properties (root cause found 2026-11-01).
+#
+# These are `persist.*` debug overrides left behind by earlier in-sensor-zoom experiments.
+# They are invisible to every normal cleanup: clearing the camera app's data does not touch
+# them, uninstalling this module does not touch them, and they survive reboots. They broke
+# the stock HAL on their own:
+#
+#   preview.insensorzoom / aps.insensorzoom = 1
+#       Puts an extra sensor crop under the preview pipe. In XPAN (65:24, vertical crop is
+#       only ~1/2.7 of the frame) 2X halves that again, so the AF-ROI clamp in
+#       com.qti.stats.caflogicaldriver.so (0xc5a0) hits `subs` with maxH < minimum stats
+#       block -> unsigned underflow -> __ubsan_handle_sub_overflow_minimal_abort -> SIGABRT.
+#       Portrait 2X failed the same way. 3X survived because it switches to the tele sensor.
+#
+#   disableSatFusion = 1
+#       Turns SAT fusion off, which is not the shipped behaviour and perturbs the same path.
+#
+# Every one of the three is a CamX *override*: an empty value restores the shipped default,
+# so clearing them is safe and reversible. Do it on every boot, before the camera starts.
+clean_stale_camera_props() {
+    for P in persist.vendor.camera.disableSatFusion \
+             persist.vendor.camera.preview.insensorzoom \
+             persist.vendor.camera.aps.insensorzoom ; do
+        V=$(getprop_safe "$P")
+        if [ -n "$V" ]; then
+            setprop "$P" "" 2>/dev/null && log "cleared stale $P (was $V)"
+        fi
+    done
+    # Debug log masks from the same experiments: full-mask logging on every camera process.
+    # Only clear the all-ones default-buster, never a deliberate value.
+    for P in persist.camera.logInfoMask persist.camera.logCoreCfgMask \
+             persist.camera.logVerboseMask persist.camera.logWarningMask ; do
+        if [ "$(getprop_safe "$P")" = "0xFFFFFFFF" ]; then
+            setprop "$P" "" 2>/dev/null && log "cleared debug log mask $P"
+        fi
+    done
+}
+
+clean_stale_camera_props
+
 detect_profile() {
     # Keep this identical to post-mount.sh.  The model name is NOT in
     # ro.product.device on this platform: PKJ110 reports OP5DD3L1 there, and

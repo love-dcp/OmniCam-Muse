@@ -101,4 +101,32 @@ if [ "$READY" = "1" ] && [ -d "$MODPATH/payload" ]; then
     done
 fi
 
+# ---------------------------------------------------------------------------
+# Clear the stale CamX override properties at flash time so the fix is already in effect when
+# the camera is first opened after the flash, not only after the next boot. Same list and same
+# reasoning as clean_stale_camera_props() in post-fs-data.sh: these are `persist.*` leftovers
+# from earlier in-sensor-zoom experiments that survive both "clear camera data" and a module
+# uninstall, and they crash the stock HAL with an AF-ROI underflow (XPAN 2X, portrait 2X).
+CLEARED=""
+for P in persist.vendor.camera.disableSatFusion \
+         persist.vendor.camera.preview.insensorzoom \
+         persist.vendor.camera.aps.insensorzoom ; do
+    V=$(getprop "$P" 2>/dev/null)
+    if [ -n "$V" ]; then
+        setprop "$P" "" 2>/dev/null && CLEARED="$CLEARED $P"
+    fi
+done
+for P in persist.camera.logInfoMask persist.camera.logCoreCfgMask \
+         persist.camera.logVerboseMask persist.camera.logWarningMask ; do
+    if [ "$(getprop "$P" 2>/dev/null)" = "0xFFFFFFFF" ]; then
+        setprop "$P" "" 2>/dev/null && CLEARED="$CLEARED $P"
+    fi
+done
+if [ -n "$CLEARED" ]; then
+    ui_print "- Cleared stale camera properties:$CLEARED"
+    printf 'cleared stale camera properties:%s\n' "$CLEARED" >> "$MODPATH/install.log"
+else
+    ui_print "- No stale camera properties to clear"
+fi
+
 true
