@@ -19,6 +19,11 @@ else
 fi
 printf 'installed %s -> %s: %s\n' "${HAVE:-none}" "$WANT" "$RESULT" > "$MODPATH/install.log"
 ui_print "- Settings app: $RESULT"
+# The install replaces the APK but this phone keeps the running camera process alive
+# (verified: pm install -r leaves the pid unchanged), and LSPosed only loads the new
+# hooks when that process starts. Nothing is forced here - just say what to do.
+ui_print "- If the camera was running in the background, swipe it out of recents (or"
+ui_print "  toggle anything in the settings app) so the new build is loaded"
 
 # Update marker for uninstall.sh: this flash replaces an existing
 # /data/adb/modules/ricoh_pop_x9u, i.e. it is an in-place UPDATE, not a removal.
