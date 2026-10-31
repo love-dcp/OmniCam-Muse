@@ -39,6 +39,10 @@ public final class HighPixelEffects {
     private static final String PALETTE = "key_support_palette";
     /** BaseMode.H4/.x6 only write the capture keys (bb.s.e0 tone / bb.s.d0 saturation) when this is on. */
     private static final String BASIC_TONE = "func_support_video_basic_tone";
+    /**
+     * Force-show the right-hand entry on 哈苏超清. Default on: the camera leaves it GONE on this
+     * build until the page is rebuilt. Set to "0" to turn the workaround off.
+     */
     private static final String PROP_ENTRY = "persist.omnicam.aura.hpentry";
     /** Opt-in for soft light in 哈苏超清; see {@link #softLightAllowed()} for why it is off. */
     private static final String PROP_SOFT_LIGHT = "persist.omnicam.aura.hpsl";
@@ -262,8 +266,8 @@ public final class HighPixelEffects {
      * screen. Behind its own switch ({@code persist.omnicam.aura.hpentry}) while it is being measured.
      */
     private static void hookEntryVisibility(ClassLoader classLoader, final Class<?> mode) {
-        if (!"1".equals(prop(PROP_ENTRY))) {
-            Log.i(TAG, "entry force-show off (" + PROP_ENTRY + ")");
+        if (!entryForceEnabled()) {
+            Log.i(TAG, "entry force-show disabled (" + PROP_ENTRY + "=0)");
             return;
         }
         Class<?> host;
@@ -501,22 +505,28 @@ public final class HighPixelEffects {
     /** Put the entry button back on screen; the container may still be laying out, so retry briefly. */
     private static void showEntry() {
         final View button = entryButton;
-        if (button == null || !"1".equals(prop(PROP_ENTRY))) return;
+        if (button == null || !entryForceEnabled()) return;
         for (int delay : new int[] {0, 200, 500, 900}) {
             button.postDelayed(() -> forceShow(button), delay);
         }
     }
 
     private static void forceShow(View button) {
-        if (button.getVisibility() == View.VISIBLE && button.getWidth() > 0) return;
-        button.setVisibility(View.VISIBLE);
-        button.setAlpha(1f);
-        button.setClickable(true);
-        button.requestLayout();
-        adoptListener(button);
-        dressEntry(button);
-        Log.i(TAG, "entry button forced visible: " + button.getWidth() + "x" + button.getHeight()
-            + " listeners=" + button.hasOnClickListeners());
+        // The palette icon is drawn by MasterPalette in this slot; the camera's own effect button
+        // is only kept as an invisible layout anchor (哈苏超清's icon is blank on first entry).
+        if (button.getVisibility() != View.INVISIBLE) {
+            button.setVisibility(View.INVISIBLE);
+            button.setAlpha(1f);
+            button.setClickable(false);
+            button.requestLayout();
+            Log.i(TAG, "entry slot reserved: " + button.getWidth() + "x" + button.getHeight());
+        }
+        button.setClickable(false);
+    }
+
+    /** The force-show workaround is on unless explicitly disabled with hpentry=0. */
+    private static boolean entryForceEnabled() {
+        return !"0".equals(prop(PROP_ENTRY));
     }
 
     private static String prop(String name) {
