@@ -124,6 +124,12 @@ public final class GrGalleryWatermark {
 
     /** Built-in GR style assets are replaced by the staged files. */
     private static void hookStyleSource(final Symbols symbols) {
+        // PKJ110 (X8U) gallery ships no AssetStyleSource at all; quietly off there instead of
+        // counting an error on the status page.
+        if (!symbols.has("AssetStyleSource.open", "AssetStyleSource.name")) {
+            Log.i(TAG, "gallery GR style routing absent on this gallery build");
+            return;
+        }
         try {
             XposedBridge.hookMethod(symbols.method("AssetStyleSource.open"),
                 new XC_MethodHook() {

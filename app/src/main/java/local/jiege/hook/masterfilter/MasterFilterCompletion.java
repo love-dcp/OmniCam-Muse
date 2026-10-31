@@ -12,31 +12,13 @@ public final class MasterFilterCompletion {
     private MasterFilterCompletion() {}
 
     public static void installCamera(ClassLoader classLoader) {
-        try {
-            MasterFilmLuts.install(classLoader);
-        } catch (Throwable error) {
-            Log.e(TAG, "master LUT hooks failed", error);
-        }
-        try {
-            MasterNeonGlow.install(classLoader);
-        } catch (Throwable error) {
-            Log.e(TAG, "neon glow hooks failed", error);
-        }
-        try {
-            MasterPortraHalation.install(classLoader);
-        } catch (Throwable error) {
-            Log.e(TAG, "Portra halation hook failed", error);
-        }
-        try {
-            MasterGrain.install(classLoader);
-        } catch (Throwable error) {
-            Log.e(TAG, "grain hooks failed", error);
-        }
-        try {
-            MasterPresetListSync.install(classLoader);
-        } catch (Throwable error) {
-            Log.e(TAG, "preset list sync hook failed", error);
-        }
+        // Log.guard: a MissingSymbol (app-build difference) is logged at info level, so it does
+        // not raise the status page's error count; every other failure still does.
+        Log.guard(TAG, "master LUT hooks", () -> MasterFilmLuts.install(classLoader));
+        Log.guard(TAG, "neon glow hooks", () -> MasterNeonGlow.install(classLoader));
+        Log.guard(TAG, "Portra halation hook", () -> MasterPortraHalation.install(classLoader));
+        Log.guard(TAG, "grain hooks", () -> MasterGrain.install(classLoader));
+        Log.guard(TAG, "preset list sync hook", () -> MasterPresetListSync.install(classLoader));
         // MasterProPresets (Pro gear parameters kept with master presets) is not installed:
         // shelved until its behaviour is worked out on the device.
     }
