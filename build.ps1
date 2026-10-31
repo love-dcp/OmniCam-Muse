@@ -15,7 +15,7 @@ if (-not (Test-Path -LiteralPath $sdkProperties)) {
 if ($LASTEXITCODE -ne 0) { throw 'Master colour catalog validation failed.' }
 & (Join-Path $project 'tools/offline_tests/run.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Offline tests failed.' }
-& 'C:/Program Files/Git/bin/bash.exe' -n (Join-Path $project 'module/post-fs-data.sh') (Join-Path $project 'module/post-mount.sh') (Join-Path $project 'module/service.sh')
+& 'C:/Program Files/Git/bin/bash.exe' -n (Join-Path $project 'module/post-fs-data.sh') (Join-Path $project 'module/post-mount.sh') (Join-Path $project 'module/service.sh') (Join-Path $project 'module/uninstall.sh')
 if ($LASTEXITCODE -ne 0) { throw 'Module shell syntax validation failed.' }
 $drive = (70..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -Last 1)
 if (-not $drive) { throw 'No free drive letter for the Android build.' }
@@ -63,7 +63,11 @@ if ((Get-Item -LiteralPath $built).LastWriteTime -lt $buildStart) {
     throw "Stale output: $built was not rebuilt by this run (Gradle failed silently)."
 }
 if ($signed) {
-    Get-ChildItem -Path (Join-Path $project 'module') -Filter 'omnicam-muse-*.apk' | Remove-Item
+    # Remove-Item by pipeline input fails silently under a profile that wraps it with a
+    # parameter-binding guard (seen 2026-10-29: the stale r22 apk shipped inside r23);
+    # bind each path explicitly instead.
+    Get-ChildItem -Path (Join-Path $project 'module') -Filter 'omnicam-muse-*.apk' |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
     Copy-Item -LiteralPath $built -Destination (Join-Path $project "module/omnicam-muse-$version.apk")
     & $python (Join-Path $project 'tools/zip_module.py') (Join-Path $project 'module') (Join-Path $project "OmniCam-Muse-$version-KSU.zip")
     if ($LASTEXITCODE -ne 0) { throw 'Module packaging failed.' }
