@@ -76,6 +76,13 @@ public final class ModuleSettings {
     public static final String VIDEO_IZOOM_GUARD = "video_izoom_guard";
 
     /**
+     * Photo: set the camera's in-sensor-zoom request tag on still captures, so a 2x-3x still is
+     * read from the cropped sensor instead of the whole sensor upscaled. The stock config row for
+     * the photo opmode is already there; only the request tag is missing (the app never sets it).
+     */
+    public static final String PHOTO_IZOOM = "photo_izoom";
+
+    /**
      * Camera: ask the device processor for the camera again when an embedded task view (the OPPO
      * gallery opened inside the camera activity) is torn down with the session still closed. The
      * embedded path never pauses the activity, so the app's own resume-driven reopen never runs and
@@ -232,6 +239,14 @@ public final class ModuleSettings {
                 // added for is now handled in place by GalleryReturnRecovery, which holds the ratio
                 // at 1x only for an embedded gallery round trip and restores it afterwards; that
                 // path drives the presenter channel this class exposes (currentZoom / applyZoom).
+                return false;
+            case PHOTO_IZOOM:
+                // Off by default. The app side of this turned out to be deliverable but inert:
+                // the request tags and the HAL's own session parameters both reach the camera
+                // (measured 2026-10-31), and a 2.5x still is still read from the full sensor, so
+                // the gate that remains is inside the HAL. Leave it off rather than injecting
+                // parameters nobody has shown to be wanted; persist.omnicam.photoisz.force=1
+                // installs it for the next round of experiments without a rebuild.
                 return false;
             case POP_HIGH_PIXEL:
                 // POP's 25M upscale rides ApsProcessor.updateUpscaleSize by rewriting the capture mode to

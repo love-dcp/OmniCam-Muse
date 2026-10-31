@@ -34,6 +34,7 @@ import local.jiege.hook.masterlut.MasterLutSlots;
 import local.jiege.hook.modestate.ModeStateSplit;
 import local.jiege.hook.natural.NaturalMode;
 import local.jiege.hook.palette.GalleryColorPalette;
+import local.jiege.hook.photozoom.PhotoIzoom;
 import local.jiege.hook.pop.PopPort;
 import local.jiege.hook.seamless.SeamlessBlurGuard;
 import local.jiege.hook.shutter.CameraSoundForced;
@@ -164,6 +165,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("modestate")) ModeStateSplit.installCamera(classLoader);
             if (!Skip.off("video")) VideoFilterHighSpec.installCamera(classLoader);
             if (!Skip.off("video")) VideoIzoomGuard.installCamera(classLoader);
+            // Photo ISZ: the request tag the app never sets, on the still capture only.
+            if (!Skip.off("photoisz")) {
+                Log.guard("PhotoIzoom", "install", () -> PhotoIzoom.installCamera(classLoader));
+            }
             if (!Skip.off("gallery")) GalleryReturnRecovery.installCamera(classLoader);
             if (!Skip.off("natural")) NaturalMode.installCamera(classLoader);
             if (!Skip.off("unlock")) Unlock25mp.installCamera(classLoader);
