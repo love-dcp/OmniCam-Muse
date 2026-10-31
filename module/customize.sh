@@ -19,11 +19,11 @@ else
 fi
 printf 'installed %s -> %s: %s\n' "${HAVE:-none}" "$WANT" "$RESULT" > "$MODPATH/install.log"
 ui_print "- Settings app: $RESULT"
-# The install replaces the APK but this phone keeps the running camera process alive
-# (verified: pm install -r leaves the pid unchanged), and LSPosed only loads the new
-# hooks when that process starts. Nothing is forced here - just say what to do.
-ui_print "- If the camera was running in the background, swipe it out of recents (or"
-ui_print "  toggle anything in the settings app) so the new build is loaded"
+# The staged data and the binds above are what a reinstall used to need help with; they are now
+# done in the flash, so there is nothing to run afterwards. The one thing this cannot do for
+# itself is make a still-running camera process load the new hooks - say that, don't order it.
+ui_print "- The settings app is now this build; it loads the next time the camera process"
+ui_print "  starts (nothing to do, unless the camera was left open in the background)"
 
 # Update marker for uninstall.sh: this flash replaces an existing
 # /data/adb/modules/ricoh_pop_x9u, i.e. it is an in-place UPDATE, not a removal.
@@ -49,7 +49,15 @@ fi
 # The /odm config binds are rebuilt for the same reason: their source lives inside the module
 # directory, which the manager replaces on every flash, so an old mount keeps pointing at the
 # previous (now deleted) file and a changed payload would never reach the camera.
-if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && [ -d "$MODPATH/payload" ]; then
+#
+# Gate on "the phone's storage is up", not on sys.boot_completed: a flash that lands while that
+# property is still unset used to skip this whole block silently, which put the reinstall back to
+# half dead - the exact failure this is here to prevent. The camera's own data directory is the
+# honest signal that /data/user is decrypted and the app has run at least once.
+READY=0
+[ -d /data/user/0/com.oplus.camera ] && READY=1
+[ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && READY=1
+if [ "$READY" = "1" ] && [ -d "$MODPATH/payload" ]; then
     ui_print "- Staging camera and gallery data"
     ( cd "$MODPATH" && OMNICAM_STAGE_ONLY=1 sh ./service.sh ) > "$MODPATH/stage.log" 2>&1
     if [ $? -eq 0 ]; then
