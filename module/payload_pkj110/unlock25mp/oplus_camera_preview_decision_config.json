@@ -3889,6 +3889,28 @@
               },
               {
                 "planCondition": {
+                  "and": {
+                    "eq": [
+                      "captureMode",
+                      "APS_CAPMODE_MASTER"
+                    ],
+                    "eq1": [
+                      "paramsHolder->raw_value",
+                      "jpg_max"
+                    ],
+                    "lt": [
+                      "paramsHolder->exposure_time_from_app->-1->int64",
+                      150000000
+                    ]
+                  }
+                },
+                "planResult": {
+                  "featureType": "APS_FEATURE_HYBRIDRAW_QUADBAYER",
+                  "bracketMode": "APS_BRACKET_HR_PSL_QBC"
+                }
+              },
+              {
+                "planCondition": {
                   "gt": [
                     "paramsHolder->exposure_time_from_app->-1->int64",
                     66666666
@@ -3897,34 +3919,6 @@
                 "planResult": {
                   "bracketMode": "APS_BRACKET_HR_PSL",
                   "featureType": "APS_FEATURE_HYBRIDRAW"
-                }
-              },
-              {
-                "planCondition": {
-                  "and": {
-                    "eq": [
-                      "hqRawIsoLimiter",
-                      true
-                    ],
-                    "eq1": [
-                      "hqRawLuxLimiter",
-                      true
-                    ],
-                    "or": {
-                      "eq": [
-                        "hqRawNightLuxLimiter",
-                        true
-                      ],
-                      "eq1": [
-                        "hqRawDrcGainLimiter",
-                        true
-                      ]
-                    }
-                  }
-                },
-                "planResult": {
-                  "featureType": "APS_FEATURE_HYBRIDRAW_QUADBAYER",
-                  "bracketMode": "APS_BRACKET_HR_PSL_QBC"
                 }
               },
               {
