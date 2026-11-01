@@ -162,11 +162,12 @@ public final class FilterGroupInjector {
         // The configuration may add imported filters: they need capture IDs before they can be picked.
         CaptureIds.apply(cameraLoader);
         for (FilterScope scope : FilterScope.values()) {
+            if (scope == FilterScope.VIDEO && !FilterCatalog.showsInVideo()) continue;
             FilterCatalog catalog = FilterCatalog.get(scope);
             List<FilterEntry> entries = scope == FilterScope.MASTER ? catalog.entries() : catalog.enabled();
             for (String groupName : scope.groups) {
                 try {
-                    Object group = XposedHelpers.getStaticObjectField(manager, groupName);
+                    Object group = groupField(manager, groupName);
                     if (group == null) continue;
                     int added = inject(group, NIGHT_GROUP.equals(groupName), forGroup(scope, groupName, entries), context);
                     String layout = scope == FilterScope.MASTER ? layOut(group, catalog) : "";
@@ -184,6 +185,15 @@ public final class FilterGroupInjector {
                 Log.e(TAG, "normal groups in master order failed", error);
             }
         }
+        // Video mode reads bare tables (filters_lut), so the entries it was just given need their
+        // tables converted once per process: see VideoFilterLuts.
+        if (context != null && FilterCatalog.showsInVideo()) {
+            try {
+                VideoFilterLuts.prepare(context);
+            } catch (Throwable error) {
+                Log.e(TAG, "video LUT tables failed", error);
+            }
+        }
     }
 
     /** The scope's entries that go into one of its groups (mirrored master filters only into some). */
@@ -192,6 +202,15 @@ public final class FilterGroupInjector {
         List<FilterEntry> out = new java.util.ArrayList<>();
         for (FilterEntry entry : entries) if (NormalMasterMirror.takes(groupName, entry)) out.add(entry);
         return out;
+    }
+
+    /** One of the manager's filter group fields, or null when that manager does not declare it. */
+    private static Object groupField(Class<?> manager, String name) {
+        try {
+            return XposedHelpers.getStaticObjectField(manager, name);
+        } catch (Throwable missing) {
+            return null;
+        }
     }
 
     /** Orders the Pro group by the master layout; returns a log note. */

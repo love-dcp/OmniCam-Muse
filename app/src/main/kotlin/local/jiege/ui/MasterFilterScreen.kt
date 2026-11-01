@@ -175,6 +175,15 @@ fun MasterFilterScreen(padding: PaddingValues, scroll: NestedScrollConnection, s
                     summary = "拍照、人像和哈苏超清（开启调色盘时）使用下面的顺序和显示状态，并加入大师的扩展滤镜",
                 )
             }
+            SmallTitle(text = "视频模式")
+            Card(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)) {
+                SettingSwitch(
+                    store = settings,
+                    key = ModuleSettings.VIDEO_MASTER_FILTERS,
+                    title = "视频模式同步大师滤镜列表",
+                    summary = "普通视频的滤镜条加入大师的扩展滤镜（旧版经典、徕卡、富士、理光、胶片、导入）",
+                )
+            }
             SmallTitle(text = "特殊效果")
             Card(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)) {
                 SettingSwitch(

@@ -98,6 +98,9 @@ public final class ModuleSettings {
     /** Photo, portrait and 哈苏超清 (with its palette) list the master filters in the master order (applies after the camera restarts). */
     public static final String NORMAL_FOLLOWS_MASTER = "normal_follows_master";
 
+    /** Normal video lists the master filters too (applies after the camera restarts). */
+    public static final String VIDEO_MASTER_FILTERS = "video_master_filters";
+
     /** Experimental: replace a stock soft light level with a physically simulated filter (applies when the camera opens). */
     public static final String SOFT_LIGHT_WEAK_HDF = "soft_light_weak_hdf";
     public static final String SOFT_LIGHT_MEDIUM_BLACK_MIST = "soft_light_medium_black_mist";
@@ -210,6 +213,10 @@ public final class ModuleSettings {
             case LIVE_PHOTO_PER_MODE:
             case NATURAL_NO_AI_DETAIL:
             case NATURAL_NO_LCE:
+                return true;
+            case VIDEO_MASTER_FILTERS:
+                // On by default: the video scope only adds entries with a table the renderer can
+                // read (VideoFilterLuts), and picking none of them is the stock behaviour.
                 return true;
             case PHOTO_IZOOM:
                 // Off by default. The app side of this turned out to be deliverable but inert:

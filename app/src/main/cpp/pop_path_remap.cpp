@@ -34,6 +34,12 @@ static constexpr char kOdmDecision[] = "/odm/etc/camera/config/oplus_camera_prev
 static constexpr char kAppDecision[] = "/data/user/0/com.oplus.camera/files/pop_port/oplus_camera_preview_decision_config.json";
 // Master filters the user imported in the settings app (MasterFilterSync copies them here).
 static constexpr char kImportedLut[] = "/data/user/0/com.oplus.camera/files/jiege/lut/";
+// Video mode's filter tables: the same lattices as meishe_lut, but as a bare 32^3 RGBA u8 table
+// (no ".MS-LUT " container). VideoFilterLuts converts the module's LUTs into this directory once
+// per process; the reads of the ODM directory are served from it by name, so stock video LUTs are
+// untouched (their names are not here).
+static constexpr char kOdmVideoLut[] = "/odm/etc/camera/filters_lut/";
+static constexpr char kAppVideoLut[] = "/data/user/0/com.oplus.camera/files/jiege/lut_raw/";
 
 static thread_local int bypass;
 
@@ -89,6 +95,16 @@ static const char *remap(const char *path, char *buf, size_t n) {
         }
         std::snprintf(buf, n, "%s%s", kImportedLut, path + sizeof(kOdmLut) - 1);
         if (destExists(buf)) {
+            return buf;
+        }
+    }
+    if (std::strncmp(path, kOdmVideoLut, sizeof(kOdmVideoLut) - 1) == 0) {
+        std::snprintf(buf, n, "%s%s", kAppVideoLut, path + sizeof(kOdmVideoLut) - 1);
+        if (destExists(buf)) {
+            static int logged;
+            if (logged++ < 8) {
+                __android_log_print(ANDROID_LOG_INFO, "PopPort", "video lut remap: %s", buf);
+            }
             return buf;
         }
     }

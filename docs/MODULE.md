@@ -138,6 +138,35 @@ E Camera2StateMachineImpl: java.lang.RuntimeException:
 
 所以 r32 把这两个类连同 `VIDEO_IZOOM_GUARD` / `GALLERY_RETURN_RECOVERY` 两个设置项一起删了：返回相册不再有那 1.4 秒的 1X 停顿，倍率也不会自己弹回去。**遇到同类症状先查 `getprop | grep -iE 'persist.*camera'`，不要重建这套重开逻辑。** 刷入时若发现 `persist.omnicam.aura.skip` 只剩一个已经不存在了的 `gallery`，`customize.sh` 会顺手清掉。
 
+## 普通视频的滤镜加入大师 LUT（r34，2026-11-01）
+
+设置应用「大师滤镜」页的「视频模式同步大师滤镜列表」打开后（默认开），普通视频的滤镜条在原有的 19 个原厂视频滤镜之后，追加大师列表里可见的那些滤镜（旧版经典、徕卡、富士、理光、胶片、导入），顺序与显示状态跟随大师列表。
+
+### 为什么可以直接注入
+
+视频模式有一整套自己的滤镜组 `FilterGroupManager.sVideoFilterGroup`（由 IPU 的滤镜清单按 `commonVideo` 建出来，前后摄各 19 项），和照片的 `sFilterGroup` 完全独立——所以照片那边同步大师列表（`NormalMasterMirror`）时视频一直没被带上。清单本身就是滤镜条的数据源，注入进去就会显示、就可用。
+
+新作用域 `FilterScope.VIDEO` 只做三件事：把大师列表里“可见”的条目按同一批对象放进 `sVideoFilterGroup`（前后摄都加，追加在尾部，标准滤镜的下标不变）；`ofMode("commonVideo")` 归到这个作用域，于是卡片标题、白带标签按视频自己的目录查；`FilterGroupInjector` 注入后触发一次 `VideoFilterLuts.prepare()`。
+
+### 表格式是唯一的真问题
+
+同一个 LUT 在两个目录里是两种容器，实测（X8U，2026-11-01）逐字节对过：
+
+| 目录 | 容器 | 用途 |
+|---|---|---|
+| `/odm/etc/camera/meishe_lut/<id>` | `".MS-LUT "` + 176 字节头 + 32³ RGB u8 | 照片 / 大师（meicam） |
+| `/odm/etc/camera/filters_lut/<id>` | 裸表 32³ **RGBA** u8，alpha 字节为 0 | 视频滤镜 |
+
+`filters_lut/Radiance.cube.rgb.bin` 正好等于 `meishe_lut/Radiance.cube.rgb.bin` 去掉容器头、再把 RGB 展开成 RGBA（第四字节 0）。所以大师 LUT 不需要重新烘焙，也不需要做任何色彩运算：`VideoFilterLuts` 每次进程启动把视频作用域里的 32³ LUT 按这个规则转一份，写到相机的 `files/jiege/lut_raw/`；`pop_path_remap.cpp` 把对 `/odm/etc/camera/filters_lut/<名字>` 的读取按名字改到那里。ODM 目录一个字节都没动，原厂视频滤镜因为名字不在这个目录里照旧走原路径。
+
+只有固定 32³ 布局的 27 个模块 LUT 会被转换（旧版经典、徕卡M9、富士 11 个、理光 5 个、胶片 10 个，导入的看用户给的文件）。Polaroid 分层、`positive_hdr_*`、X10 的清透/琥珀是别的尺寸，跳过而不是塞一个渲染不出东西的条目——它们在视频里不出现。
+
+### 生效链路
+
+选中后走的是 IPU SDK 同一个滤镜处理单元，日志里能看到 `capture_mode: commonVideo` 与 `filter_type: <LUT 文件名>`，取景与成片共用这条链。1080p 下相机本来就会因为“有滤镜”而把录制压到应用编码管线（成片带滤镜）；4K / 60fps 则要靠设置项「4K / 60fps 视频滤镜」（`VideoFilterHighSpec`）抬掉原厂的三处限制并同样压到应用编码管线，否则 4K 的片子不带滤镜。
+
+改设置（打开或关闭、调整大师列表的显示状态）后相机会自己重启一次使其生效（`MasterFilterSync.changedSinceLoad`）。
+
 ## 注入状态与日志导出
 
 相机看不到设置应用（包可见性），所以由应用来问：`call(com.oplus.camera.entry, "jiege.diagnostics")` 落到相机导出的 `EntryProvider.call`，钩子（`hook/common/Diagnostics.java`）只对模块 uid 返回状态：符号解析数、缺失数、错误行数、进程启动时间、加载钩子的模块 APK、最近 600 行模块日志，以及相机的大师滤镜原厂列表（应用存进 `MasterFilterStore`）。调用会在相机未运行时拉起相机进程。`Log.e` 计入错误数。

@@ -70,7 +70,8 @@ public final class MasterFilterSync {
         } catch (Throwable error) {
             Log.e(TAG, "configuration unreadable, using defaults", error);
         }
-        FilterCatalog.configure(config, Settings.get(ModuleSettings.NORMAL_FOLLOWS_MASTER));
+        FilterCatalog.configure(config, Settings.get(ModuleSettings.NORMAL_FOLLOWS_MASTER),
+            Settings.get(ModuleSettings.VIDEO_MASTER_FILTERS));
         MasterLayoutStore.set(config.layout());
         trackImports(context, config);
         final MasterConfig synced = config;
@@ -86,7 +87,8 @@ public final class MasterFilterSync {
      */
     public static synchronized boolean changedSinceLoad() {
         return loaded && (!stamp(settingsDir()).equals(loadedStamp)
-            || Settings.get(ModuleSettings.NORMAL_FOLLOWS_MASTER) != FilterCatalog.mirrorsMaster());
+            || Settings.get(ModuleSettings.NORMAL_FOLLOWS_MASTER) != FilterCatalog.mirrorsMaster()
+            || Settings.get(ModuleSettings.VIDEO_MASTER_FILTERS) != FilterCatalog.showsInVideo());
     }
 
     private static String stamp(File settings) {

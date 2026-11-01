@@ -26,6 +26,7 @@ public final class FilterCatalog {
     private static final Map<FilterScope, FilterCatalog> catalogs = new EnumMap<>(FilterScope.class);
     private static MasterConfig config = MasterConfig.empty();
     private static boolean mirrorMaster;
+    private static boolean showInVideo;
 
     public final FilterScope scope;
     private final List<FilterEntry> entries;
@@ -41,11 +42,17 @@ public final class FilterCatalog {
 
     public static synchronized FilterCatalog get(FilterScope scope) {
         if (catalogs.isEmpty()) {
+            MasterLayout.Saved saved = config.layout();
             List<FilterEntry> master = MasterFilterDefaults.entries(config);
             List<FilterEntry> normal = NormalFilterDefaults.entries();
-            if (mirrorMaster) normal.addAll(NormalMasterMirror.mirrored(master, normal, config.layout()));
+            if (mirrorMaster) normal.addAll(NormalMasterMirror.mirrored(master, normal, saved));
+            List<FilterEntry> video = new ArrayList<>();
+            for (FilterEntry entry : master) {
+                if (MasterLayout.isVisible(entry.id, entry, saved)) video.add(entry);
+            }
             catalogs.put(FilterScope.NORMAL, new FilterCatalog(FilterScope.NORMAL, normal));
             catalogs.put(FilterScope.MASTER, new FilterCatalog(FilterScope.MASTER, master));
+            catalogs.put(FilterScope.VIDEO, new FilterCatalog(FilterScope.VIDEO, video));
             checkShared();
         }
         return catalogs.get(scope);
@@ -53,17 +60,28 @@ public final class FilterCatalog {
 
     /** Sets the user's configuration (imported filters) and rebuilds the catalogs on next use. */
     public static synchronized void configure(MasterConfig userConfig) {
-        configure(userConfig, false);
+        configure(userConfig, false, false);
     }
 
     /**
      * As configure(userConfig); with mirrorMaster the normal catalog also lists the filters the
-     * master list shows (NormalMasterMirror).
+     * master list shows (NormalMasterMirror), and with showInVideo the video scope lists the same
+     * filters (FilterScope.VIDEO).
      */
     public static synchronized void configure(MasterConfig userConfig, boolean mirrorMaster) {
+        configure(userConfig, mirrorMaster, false);
+    }
+
+    public static synchronized void configure(MasterConfig userConfig, boolean mirrorMaster, boolean showInVideo) {
         config = userConfig == null ? MasterConfig.empty() : userConfig;
         FilterCatalog.mirrorMaster = mirrorMaster;
+        FilterCatalog.showInVideo = showInVideo;
         catalogs.clear();
+    }
+
+    /** Whether the video scope lists the master filters (mode commonVideo). */
+    public static synchronized boolean showsInVideo() {
+        return showInVideo;
     }
 
     /** Whether the normal catalog follows the master list. */
