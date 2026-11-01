@@ -69,26 +69,11 @@ public final class ModuleSettings {
     public static final String VIDEO_FILTER_HIGH_SPEC = "video_filter_high_spec";
 
     /**
-     * Video: reset the zoom to 1x when a stabilised 30 fps video camera in the main sensor's
-     * in-sensor-zoom window (2x-3x) pauses, so the session re-created on return from the gallery
-     * starts outside the X8U firmware stream-on deadlock (provider SIGABRT otherwise).
-     */
-    public static final String VIDEO_IZOOM_GUARD = "video_izoom_guard";
-
-    /**
      * Photo: set the camera's in-sensor-zoom request tag on still captures, so a 2x-3x still is
      * read from the cropped sensor instead of the whole sensor upscaled. The stock config row for
      * the photo opmode is already there; only the request tag is missing (the app never sets it).
      */
     public static final String PHOTO_IZOOM = "photo_izoom";
-
-    /**
-     * Camera: ask the device processor for the camera again when an embedded task view (the OPPO
-     * gallery opened inside the camera activity) is torn down with the session still closed. The
-     * embedded path never pauses the activity, so the app's own resume-driven reopen never runs and
-     * the viewfinder stays grey.
-     */
-    public static final String GALLERY_RETURN_RECOVERY = "gallery_return_recovery";
 
     /** Natural photo mode: master switch, the two features it turns off, and the extra softening (0-100 %). */
     public static final String NATURAL_MODE = "natural_mode";
@@ -226,20 +211,6 @@ public final class ModuleSettings {
             case NATURAL_NO_AI_DETAIL:
             case NATURAL_NO_LCE:
                 return true;
-            case GALLERY_RETURN_RECOVERY:
-                // On by default: it only acts when an embedded task view is torn down while the
-                // session is still closed, a state the app never leaves on its own (grey viewfinder
-                // after the gallery, measured 2026-10-31). A camera that is already open or a plain
-                // activity hand-over never reaches the replay.
-                return true;
-            case VIDEO_IZOOM_GUARD:
-                // Off by default: as a blanket rule it resets the zoom to 1x on every session
-                // re-create inside the 2x-3x window (recording stop, recents, gallery hand-over),
-                // which the viewer sees as the zoom springing back on its own. The deadlock it was
-                // added for is now handled in place by GalleryReturnRecovery, which holds the ratio
-                // at 1x only for an embedded gallery round trip and restores it afterwards; that
-                // path drives the presenter channel this class exposes (currentZoom / applyZoom).
-                return false;
             case PHOTO_IZOOM:
                 // Off by default. The app side of this turned out to be deliverable but inert:
                 // the request tags and the HAL's own session parameters both reach the camera

@@ -129,17 +129,27 @@ MODULE_SCRIPTS = {
     # device (native patch section 2026-10-27/28; post-mount matches the r22 build).
     # The pre-r23 pins had drifted: post-fs-data.sh was reworked after r22 was packaged,
     # and even the r22 zip no longer matched the post-mount.sh pin.
-    "post-fs-data.sh": (27129, "4121039e9b5ec1e7f7c3122475b3aba0"),
+    #
+    # r32: three pins were still pointing at bytes older than what shipped, so the check
+    # reported them as failures on an archive that was in fact correct. Realigned to the
+    # bytes that went out:
+    #   post-fs-data.sh  29 228  - adds clean_stale_camera_props() (r31, commit f5e4841,
+    #                              validated on the device: XPAN / portrait 2x stopped crashing)
+    #   service.sh       14 263  - the r30 build, shipped unchanged through r31
+    #   customize.sh      7 785  - the r31 flash-time property cleanup, plus r32 dropping a
+    #                              `gallery` hook skip left over from the removed
+    #                              GalleryReturnRecovery
+    "post-fs-data.sh": (29228, "e6a140df3b12c565e5d755922c3bd9b5"),
     "post-mount.sh": (13203, "ef016e422316466a97dd7e4581ef8a56"),
     # r23: service.sh now clears the in-place update marker; uninstall.sh distinguishes
     # update (conservative) from removal (full cleanup via uninstall_full.sh); action.sh
     # is the explicit full-uninstall button; customize.sh writes the update marker and
     # installs the APK; apply-now.sh binds the native patches without a reboot.
-    "service.sh": (13416, "abf0ce081b14706cd0f7ceee167b2486"),
+    "service.sh": (14263, "83691c08a350e95dd1fc51798df8b3c5"),
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
     "uninstall_full.sh": (25600, "6a05587a77cb5184603021c39e4cea08"),
     "action.sh": (1633, "de4aa3da4aaf0d33140da503a63eaa66"),
-    "customize.sh": (1839, "5933a27aadd44da0295f6e22b925bf3d"),
+    "customize.sh": (7785, "e55f761c68a3c141133a877b86711b01"),
     "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
     "x8u-fix-pop.sh": (9181, "2964db9cccf9d7197ece95eab99af699"),
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),

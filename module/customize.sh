@@ -129,4 +129,23 @@ else
     ui_print "- No stale camera properties to clear"
 fi
 
+# The `gallery` hook group is gone as of r32: GalleryReturnRecovery existed only to paper over the
+# 2.5x gallery round trip, which turned out to be the stale persist.vendor.camera.* overrides cleared
+# above, not an app-side fault. A skip list left pointing at it is now inert, so take it out before
+# it confuses the next bisect. Only the exact cases below are touched - a list that also names live
+# groups is left alone and just reported, since rewriting it here could drop a setting the user meant.
+SKIP=$(getprop persist.omnicam.aura.skip 2>/dev/null)
+case "$SKIP" in
+    gallery|gallery,|,gallery)
+        if setprop persist.omnicam.aura.skip "" 2>/dev/null; then
+            ui_print "- Cleared obsolete hook skip: gallery"
+            printf 'cleared obsolete hook skip: gallery\n' >> "$MODPATH/install.log"
+        fi
+        ;;
+    *gallery*)
+        ui_print "- Note: persist.omnicam.aura.skip still names 'gallery' ($SKIP);"
+        ui_print "  that group no longer exists, the rest of the list is untouched"
+        ;;
+esac
+
 true

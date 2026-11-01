@@ -17,7 +17,6 @@ import local.jiege.hook.gr.GrEffectValues;
 import local.jiege.hook.gr.GrPort;
 import local.jiege.hook.gallery.AddressNavigation;
 import local.jiege.hook.gallery.BatchWatermark;
-import local.jiege.hook.gallery.GalleryReturnRecovery;
 import local.jiege.hook.gallery.WatermarkSeriesUnlock;
 import local.jiege.hook.guard.UnmountedGuard;
 import local.jiege.hook.highpixel.HighPixel200mFace;
@@ -48,7 +47,6 @@ import local.jiege.hook.watermark.XpanWatermarkIsolation;
 import local.jiege.hook.xpan.XpanLivePhoto;
 import local.jiege.hook.xpan.XpanViewfinderClean;
 import local.jiege.hook.video.VideoFilterHighSpec;
-import local.jiege.hook.video.VideoIzoomGuard;
 import local.jiege.hook.x10.PaletteFeatureSwitch;
 import local.jiege.hook.x10.X10FilterPort;
 
@@ -75,8 +73,7 @@ import local.jiege.hook.x10.X10FilterPort;
  *   masterfilter  master filter completion (extra LUTs, neon glow, Portra halation)
  *   shutter       shutter sound in silent / vibrate mode, own shutter volume (camera + system)
  *   modestate     flash and live photo state per mode
- *   video         normal filters at 4K / 60fps in normal video; izoom guard against the X8U
- *                 stabilised-30fps stream-on deadlock (zoom reset to 1x on pause)
+ *   video         normal filters at 4K / 60fps in normal video
  *   launch        quick launch key opens a chosen mode
  *   natural       natural photo mode: AI detail enhancement and LCE off, extra softening (tuning json, tone transfer)
  */
@@ -164,12 +161,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("sound")) ShutterSound.installCamera(classLoader);
             if (!Skip.off("modestate")) ModeStateSplit.installCamera(classLoader);
             if (!Skip.off("video")) VideoFilterHighSpec.installCamera(classLoader);
-            if (!Skip.off("video")) VideoIzoomGuard.installCamera(classLoader);
             // Photo ISZ: the request tag the app never sets, on the still capture only.
             if (!Skip.off("photoisz")) {
                 Log.guard("PhotoIzoom", "install", () -> PhotoIzoom.installCamera(classLoader));
             }
-            if (!Skip.off("gallery")) GalleryReturnRecovery.installCamera(classLoader);
             if (!Skip.off("natural")) NaturalMode.installCamera(classLoader);
             if (!Skip.off("unlock")) Unlock25mp.installCamera(classLoader);
             if (!Skip.off("hp200m")) HighPixel200mFace.installCamera(classLoader);

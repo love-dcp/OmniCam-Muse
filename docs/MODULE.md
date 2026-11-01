@@ -104,6 +104,14 @@ CCD 风格拍出来的成片比预览暗四档多（实测成片平均亮度 30�
 
 Ultra HDR 拍摄后走“无缝 UI”路径：`PreviewRenderer.setSeamlessGaussianBlurBitmap` 在预览缩放状态下调 `BitmapUtil.cropCenterBitmapByScale`；缩放值小于 1（前置广角）时裁剪框大于位图，方法返回 null，调用方不检查就包成纹理，下一帧 GL 线程空指针，相机关闭。另外三处调用都判断了“缩放值 ≥ 1”。`hook/seamless/SeamlessBlurGuard` 在返回 null 时改返回原位图；目标方法由 `symbols.json` 的 `BitmapUtil.cropCenterByScale` 按错误日志字符串 `cropCenterBitmapByScale, error, sw: ` 定位。这是竞态，不是每次都崩。
 
+## 相册往返不需要专门处理（r32 移除，2026-11-01）
+
+2026-10-31 曾加过 `hook/gallery/GalleryReturnRecovery`（配 `hook/video/VideoIzoomGuard` 当 presenter 通道）：普通视频开超防抖、2.5X 录像时点进相册再返回，预览会冻住、约 46 秒后 provider 被 chi 的 recovery 看门狗 SIGABRT。当时的读法是三个独立的 app 侧缺陷——内嵌 `FlexibleTaskView` 走相册时不触发 onPause 所以没人重开会话、重开时带着记忆的 2.5776X 让 MCTFE 在 CONFIG End 后 67 ms 报 1047、重建的 1X 会话把倍率标签画回 1X——于是加了一套按 500/900/600/1600 ms 节拍的重开与倍率回推，代价是返回时先在 1X 停约 1.4 秒。
+
+**这个诊断是错的**。真正的成因是早前 in-sensor-zoom 实验遗留的 `persist.vendor.camera.preview.insensorzoom` / `aps.insensorzoom` / `disableSatFusion`：它们能在“清除相机数据”和“卸载模块”之后继续存在，让原厂 HAL 在带裁切的会话重建里走 AF-ROI 钳制函数的下溢分支。r31 起 `post-fs-data.sh` 与 `customize.sh` 每次开机、每次刷入都清空这些属性（见上文 persist 清理一节）。清掉之后，同样的往返操作不再冻帧也不再崩，跟有没有 `GalleryReturnRecovery` 无关——把 `persist.omnicam.aura.skip` 设成 `gallery` 停掉它，实测依旧正常。
+
+所以 r32 把这两个类连同 `VIDEO_IZOOM_GUARD` / `GALLERY_RETURN_RECOVERY` 两个设置项一起删了：返回相册不再有那 1.4 秒的 1X 停顿，倍率也不会自己弹回去。**遇到同类症状先查 `getprop | grep -iE 'persist.*camera'`，不要重建这套重开逻辑。** 刷入时若发现 `persist.omnicam.aura.skip` 只剩一个已经不存在了的 `gallery`，`customize.sh` 会顺手清掉。
+
 ## 注入状态与日志导出
 
 相机看不到设置应用（包可见性），所以由应用来问：`call(com.oplus.camera.entry, "jiege.diagnostics")` 落到相机导出的 `EntryProvider.call`，钩子（`hook/common/Diagnostics.java`）只对模块 uid 返回状态：符号解析数、缺失数、错误行数、进程启动时间、加载钩子的模块 APK、最近 600 行模块日志，以及相机的大师滤镜原厂列表（应用存进 `MasterFilterStore`）。调用会在相机未运行时拉起相机进程。`Log.e` 计入错误数。
