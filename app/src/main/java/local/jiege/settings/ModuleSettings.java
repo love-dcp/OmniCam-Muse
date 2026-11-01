@@ -71,8 +71,10 @@ public final class ModuleSettings {
     /**
      * Pro video: add 片门全开 (open gate) to the resolution list, after 4K and 2K. The build ships
      * the whole feature but hides the entry behind MasterVideoDecision.p(); letting that answer
-     * true restores it, and stock then records the sensor's full 4:3 area (4096x3072, 30fps, OIS
-     * only, no EIS -- same as the X10). Picking any other resolution is unchanged.
+     * true restores it, and stock then records the sensor's full 4:3 area (4096x3072). Measured
+     * here: 24 / 30 / 60fps all hold that size, and SDR, HDR (BT.2020 + HLG) and Log can all be
+     * recorded on top of it, 60.4Mbps at 30fps and 97.5Mbps at 60fps. OIS only, no EIS, same as
+     * the X10. Picking any other resolution is unchanged.
      */
     public static final String OPEN_GATE = "open_gate";
 

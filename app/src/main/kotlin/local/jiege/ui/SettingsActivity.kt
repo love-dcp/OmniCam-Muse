@@ -270,7 +270,7 @@ private fun LazyListScope.shootItems(store: SettingsStore, cardModifier: Modifie
                 store = store,
                 key = ModuleSettings.OPEN_GATE,
                 title = "专业视频片门全开",
-                summary = "分辨率列表里多一项「片门全开」，4:3 全画幅 4096×3072 / 30fps；不选它仍是原来的 16:9",
+                summary = "分辨率列表里多一项「片门全开」，4:3 全画幅 4096×3072，24/30/60fps 均可，SDR / HDR / Log 也都能录；不选它仍是原来的 16:9",
             )
         }
     }
