@@ -104,6 +104,32 @@ CCD 风格拍出来的成片比预览暗四档多（实测成片平均亮度 30�
 
 Ultra HDR 拍摄后走“无缝 UI”路径：`PreviewRenderer.setSeamlessGaussianBlurBitmap` 在预览缩放状态下调 `BitmapUtil.cropCenterBitmapByScale`；缩放值小于 1（前置广角）时裁剪框大于位图，方法返回 null，调用方不检查就包成纹理，下一帧 GL 线程空指针，相机关闭。另外三处调用都判断了“缩放值 ≥ 1”。`hook/seamless/SeamlessBlurGuard` 在返回 null 时改返回原位图；目标方法由 `symbols.json` 的 `BitmapUtil.cropCenterByScale` 按错误日志字符串 `cropCenterBitmapByScale, error, sw: ` 定位。这是竞态，不是每次都崩。
 
+## 「更多」里的 150°（fishEye）默认隐藏（r33，2026-11-01）
+
+X8U 的「更多」面板里有个 `150°` 按钮，点了会卡住约 28 秒，之后停在原来的模式上（看起来像“切成哈苏超清”）。这个按钮**是原厂 UI 自带的**：`op.e` 在拼模式面板时只要 `CameraConfig.getConfigBooleanValue("com.oplus.feature.fish.eye.support")` 为 true 就追加一个 `fishEye` 条目（`mode_id 29`），而 X8U 背后什么都没有——
+
+- `camera_unit_config` / `camera_unit_feature_config.protobuf` / `oplus_camera_algo_switch_config` / `oplus_camera_aps_config` 四份配置里 `fish` 相关条目 **0 处**（原厂备份 `port-x8u/_pristine/` 同样 0 处）。只有模块自带的 X9 Ultra 那份 aps 配置有 12 处 `FISH_EYE`，而 PKJ110 分支不投放它。
+- `/odm/lib64/libmsnativefilter.so`（7,992,584 字节）里 **0 处 `CNvFishEyeEdgeBlur`**；模块的 X9U 版（10,957,976 字节）有 12 处。`post-mount.sh` 的 PKJ110 分支明确不覆盖这个库。
+
+所以点下去的现场是：
+
+```
+OCAM_CameraControlUI: next mode: fishEye
+OCAM_ModeManager: setCurrentMode, newMode: fishEye
+createNewSession ... mode.FishEyeMode
+E Camera2StateMachineImpl: java.lang.RuntimeException:
+    getUseCaseValues, fisheye_case's usecase_info are not configured!
+    at BaseMode.getUseCaseValues(BaseMode.java:2958)
+```
+
+会话建不起来，`ProducerImpl.close, cannot block`，10:01:07 报错到 10:01:35 才放弃，**卡 28 秒**。补配置能让它不卡，但渲染层没有鱼眼实现，画面依旧是普通预览——这个功能在 X8U 上是空壳，不值得修。
+
+**r33 的处理**：`hook/pop/PopFisheyeSupport` 由“回答 true”改成默认“回答 false”，`op.e` 于是不再追加条目，`dm.p3` 也不会构造模式对象；native 侧 `pop_fisheye.cpp` 的 `moduleOn()` 同步改成显式 opt-in。
+
+这里有个坑：**光把配置键改 false 不够**。模式面板一旦建过一次就被写进 `databases/mode_data.db` 的 `mode_info` 表（`mode_id 29 fishEye`），之后 `op.g` 直接从库里读，不再问配置。实测把键置 false 后面板仍然显示 150°，删掉那一行才消失。因此 `PopFisheyeSupport` 在隐藏模式下每次进程启动都会删一次这行（`dropStalePanelEntry`），日志 `dropped N stale fishEye row from mode_info`。这一行不会自己回来：`op.e` 的 insert 就在同一个配置判断里，键为 false 时重建的库不会再写入。
+
+要恢复成“回答 true”（只在真有鱼眼管线的机器上有意义）：`setprop persist.omnicam.aura.fisheye 1` 再 `setprop persist.omnicam.aura.nfish 1`，重启相机。仅设 `0`/空值/不设都是隐藏。
+
 ## 相册往返不需要专门处理（r32 移除，2026-11-01）
 
 2026-10-31 曾加过 `hook/gallery/GalleryReturnRecovery`（配 `hook/video/VideoIzoomGuard` 当 presenter 通道）：普通视频开超防抖、2.5X 录像时点进相册再返回，预览会冻住、约 46 秒后 provider 被 chi 的 recovery 看门狗 SIGABRT。当时的读法是三个独立的 app 侧缺陷——内嵌 `FlexibleTaskView` 走相册时不触发 onPause 所以没人重开会话、重开时带着记忆的 2.5776X 让 MCTFE 在 CONFIG End 后 67 ms 报 1047、重建的 1X 会话把倍率标签画回 1X——于是加了一套按 500/900/600/1600 ms 节拍的重开与倍率回推，代价是返回时先在 1X 停约 1.4 秒。

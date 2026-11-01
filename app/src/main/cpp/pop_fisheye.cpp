@@ -79,10 +79,12 @@ bool getEnableHook(void *self, void *data) {
     return true;
 }
 
+// Opt-in, like the Java half: the fish-eye entry is hidden by default because X8U has no use-case
+// config and no Meishe fish-eye renderer behind it, so the mode could only ever fail to start.
 bool moduleOn() {
     char value[PROP_VALUE_MAX] = {};
-    if (__system_property_get(kProp, value) <= 0) return true;
-    return value[0] != '0';
+    if (__system_property_get(kProp, value) <= 0) return false;
+    return value[0] == '1' || std::strcmp(value, "true") == 0 || std::strcmp(value, "on") == 0;
 }
 
 }  // namespace
@@ -90,7 +92,7 @@ bool moduleOn() {
 void onLibraryLoadedForPopFisheye(HookFunction hook, const char *name, void *handle) {
     if (gInstalled || !name || !std::strstr(name, kLib)) return;
     if (!moduleOn()) {
-        __android_log_print(ANDROID_LOG_INFO, kTag, "off (%s=0)", kProp);
+        __android_log_print(ANDROID_LOG_INFO, kTag, "off (%s not enabled)", kProp);
         return;
     }
     // The symbol is exported, so this goes through the module's ordinary symbol hook.

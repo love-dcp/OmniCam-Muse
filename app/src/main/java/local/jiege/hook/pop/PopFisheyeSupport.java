@@ -6,25 +6,33 @@ import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
 
 /**
- * Brings the POP fish-eye lens back on PKJ110, and carries the lens into the still.
+ * Keeps the POP fish-eye entry out of the "more" panel on PKJ110.
  *
- * <p>The camera ships the whole retro fish-eye path - {@code FUNC_KEY_ID_RETRO_FISH_EYE_LENS},
- * {@code FishEyeTexturePreview}, {@code RetroFishEyeZoomPolicy}, the {@code KEY_FISH_EYE_TYPE_*}
- * request keys and the Meishe {@code CNvFishEyeEdgeBlur} renderer - but the retro page only builds
- * the lens button when the platform answers its support keys true. X8U's config never defines them,
- * so {@code CameraConfig} falls back to false and the entry never appears.
+ * <p>The button itself is stock: {@code op.e} adds a {@code fishEye} tile to the mode panel whenever
+ * {@code CameraConfig.getConfigBooleanValue("com.oplus.feature.fish.eye.support")} answers true. X8U
+ * has none of the machinery behind it - no {@code fisheye_case} in {@code camera_unit_config}, and no
+ * {@code CNvFishEyeEdgeBlur} in {@code /odm/lib64/libmsnativefilter.so} - so tapping the tile asks
+ * {@code BaseMode.getUseCaseValues} for a use case that is not configured and then blocks for ~28 s
+ * before the session gives up. Measured 2026-11-01 10:01: after the wait the camera ended up in
+ * whatever mode it had been sitting in, which reads as "the fish-eye button switches to Hasselblad
+ * high resolution".
  *
- * <p>Same shape as {@code HighPixelSupport}: answer the keys at {@code CameraConfig} itself, because
- * its answers are cached per key and its vendor-tag fallback is dead on this platform.
+ * <p>So the default is now to answer those keys <em>false</em> rather than true: with the key false
+ * {@code op.e} never appends the tile, and {@code dm.p3} never builds the mode object. Nothing to tap,
+ * nothing to hang. This is the opposite of what the class used to do, which is why the history below
+ * is kept - if a device with a real fish-eye pipeline ever shows up, {@code
+ * setprop persist.omnicam.aura.fisheye 1} restores the old behaviour.
  *
- * <p>The still was the second half: the preview applies the effect through the texture request, while
- * the saved frame is produced by APS from the capture metadata, and nothing there carried the flag.
+ * <p>Opt in with {@code setprop persist.omnicam.aura.fisheye 1} (then force-stop the camera): the
+ * class then answers the support keys true and carries the lens into the still. That path also needs
+ * the full Meishe renderer (the one with {@code CNvFishEyeEdgeBlur}) bound over
+ * {@code /odm/lib64/libmsnativefilter.so}; the stock X8U build has no fish-eye code at all, so on this
+ * device the enabled path only ever produced a preview that never started.
+ *
+ * <p>The still half, kept for that future device: the preview applies the effect through the texture
+ * request, while the saved frame is produced by APS from the capture metadata, so
  * {@link #installCapture} writes {@code KEY_RETRO_FILTER_FISH_EYE_ENALE} into the metadata of a
- * retroCamera capture while the lens is on - the same value the presenter puts on the preview tag.
- *
- * <p>Disable with {@code setprop persist.omnicam.aura.fisheye 0} (then force-stop the camera). The
- * effect also needs the full Meishe renderer (the one with {@code CNvFishEyeEdgeBlur}) bound over
- * {@code /odm/lib64/libmsnativefilter.so}; the stock X8U build has no fish-eye code at all.
+ * retroCamera capture while the lens is on.
  */
 public final class PopFisheyeSupport {
     private static final String TAG = "PopFisheye";
@@ -33,6 +41,8 @@ public final class PopFisheyeSupport {
     private static final String SDK = "com.oplus.ocs.camera.";
     private static final String RETRO_MODE = "retroCamera";
     private static final String FISH_KEY = "KEY_RETRO_FILTER_FISH_EYE_ENALE";
+    /** The mode panel's persistence, owned by the camera process this class is running in. */
+    private static final String DB_PATH = "/data/user/0/com.oplus.camera/databases/mode_data.db";
 
     /**
      * Keys the retro page asks before it lays the lens button out. The first two are the platform
@@ -72,15 +82,18 @@ public final class PopFisheyeSupport {
     }
 
     private static void installHooks(ClassLoader classLoader) throws Throwable {
-        if ("0".equals(readProp())) {
-            Log.i(TAG, "off (" + PROP + "=0)");
+        Class<?> config = XposedHelpers.findClass(CAMERA_CONFIG, classLoader);
+        if (!optIn()) {
+            installHide(config);
             return;
         }
-        Class<?> config = XposedHelpers.findClass(CAMERA_CONFIG, classLoader);
         XC_MethodHook hook = new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 traceKey(param);
-                if (!isFishEyeKey(param)) return;
+                if (!isFishKey(param)) return;
+                if (answeredOnce.add(String.valueOf(param.args[0]))) {
+                    Log.i(TAG, "answering " + param.args[0] + " = true");
+                }
                 param.setResult(Boolean.TRUE);
             }
         };
@@ -90,6 +103,71 @@ public final class PopFisheyeSupport {
         installEffectBridge(classLoader);
         installCapture(classLoader);
         Log.i(TAG, "fish-eye lens: answering " + String.join(", ", KEYS) + " = true");
+    }
+
+    /**
+     * The default: answer the fish-eye keys false so the mode panel never lays the tile out.
+     *
+     * <p>Answering them is not the same as leaving them alone. X8U's config files were searched end
+     * to end (2026-11-01) and contain none of these keys, yet the tile showed up after the module
+     * stopped answering true - so {@code CameraConfig} resolves at least one of them from somewhere
+     * other than the plain-text config (vendor tags, cached table). Saying false explicitly is the
+     * only answer that does not depend on where the true came from.
+     *
+     * <p>Only boolean-returning methods are touched: {@code d} is an obfuscated overload name and
+     * other shapes of it exist on the same class.
+     */
+    private static void installHide(Class<?> config) {
+        XC_MethodHook hide = new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (!(param.method instanceof java.lang.reflect.Method)) return;
+                if (((java.lang.reflect.Method) param.method).getReturnType() != boolean.class) return;
+                if (!isFishKey(param)) return;
+                if (answeredOnce.add("hide:" + param.args[0])) {
+                    Log.i(TAG, "answering " + param.args[0] + " = false (entry stays out of the panel)");
+                }
+                param.setResult(Boolean.FALSE);
+            }
+        };
+        XposedBridge.hookAllMethods(config, "getConfigBooleanValue", hide);
+        XposedBridge.hookAllMethods(config, "d", hide);
+        dropStalePanelEntry();
+        Log.i(TAG, "fish-eye entry hidden: answering " + String.join(", ", KEYS) + " = false");
+    }
+
+    /**
+     * The mode panel is not built from the config key alone: once a tile has been persisted, {@code
+     * op.g} serves it straight out of {@code mode_data.db} / {@code mode_info} and never asks again.
+     * The row for fish-eye ({@code mode_id 29}) was written while this class still answered the keys
+     * true, so the tile survived even with the config key forced false - measured 2026-11-01: the
+     * panel kept showing 150 degrees after the key was false, and dropping the row removed it.
+     *
+     * <p>The row cannot come back on its own: the insert in {@code op.e} sits inside the same config
+     * check, so with the key false a rebuilt database never writes it again. Deleting it here keeps
+     * that true for cameras that already carry the row, and re-runs harmlessly once it is gone.
+     */
+    private static void dropStalePanelEntry() {
+        java.io.File file = new java.io.File(DB_PATH);
+        if (!file.exists()) return;
+        android.database.sqlite.SQLiteDatabase database = null;
+        try {
+            database = android.database.sqlite.SQLiteDatabase.openDatabase(
+                DB_PATH, null, android.database.sqlite.SQLiteDatabase.OPEN_READWRITE);
+            int rows = database.delete("mode_info", "mode_id = '29'", null);
+            if (rows > 0) {
+                Log.i(TAG, "dropped " + rows + " stale fishEye row from mode_info");
+            }
+        } catch (Throwable error) {
+            Log.i(TAG, "mode_info cleanup skipped: " + error);
+        } finally {
+            if (database != null) {
+                try {
+                    database.close();
+                } catch (Throwable ignored) {
+                    // nothing to do
+                }
+            }
+        }
     }
 
     /**
@@ -368,24 +446,29 @@ public final class PopFisheyeSupport {
         if (traced.add(text)) Log.i(TAG, "asked " + text + " = " + param.getResult());
     }
 
-    private static boolean isFishEyeKey(XC_MethodHook.MethodHookParam param) {
+    private static boolean isFishKey(XC_MethodHook.MethodHookParam param) {
         if (param.args == null || param.args.length == 0) return false;
         Object key = param.args[0];
         if (!(key instanceof String)) return false;
-        if (java.util.Arrays.asList(KEYS).indexOf(key) < 0) return false;
-        // A vendor tag that is already true keeps its value; answering it again is harmless, but
-        // logging once per key is what makes the next device diagnosis readable.
-        if (answeredOnce.add(String.valueOf(key))) Log.i(TAG, "answering " + key + " = true");
-        return true;
+        return java.util.Arrays.asList(KEYS).indexOf(key) >= 0;
+    }
+
+    /**
+     * {@code persist.omnicam.aura.fisheye} has to be an explicit opt-in now: absent, empty, 0 and
+     * anything else all mean "hide". Only 1 / on / true bring the old answering-true behaviour back.
+     */
+    private static boolean optIn() {
+        String value = readProp();
+        return "1".equals(value) || "on".equalsIgnoreCase(value) || "true".equalsIgnoreCase(value);
     }
 
     private static String readProp() {
         try {
             Class<?> type = Class.forName("android.os.SystemProperties");
             return String.valueOf(type.getMethod("get", String.class, String.class)
-                .invoke(null, PROP, "1"));
+                .invoke(null, PROP, ""));
         } catch (Throwable error) {
-            return "1";
+            return "";
         }
     }
 }
