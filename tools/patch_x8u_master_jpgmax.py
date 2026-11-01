@@ -1,5 +1,34 @@
 """X8U (PKJ110) 大师模式 JPG MAX：把 50MP 输出的照度门槛降下来。
 
+.. warning::
+
+   **实验结论：此路不通，勿再生产使用（2026-11-01 定案）。**
+
+   两种改法都试过，全部失败：
+
+   1. 摘掉 plan[5] 全部 limiter（iso / lux / 夜景增益 / DR 增益）→ 暗场景相机必崩：
+      出 ``featuretype 60 + capturenum 6``（原厂从不产生的组合），OFE 跑挂
+      ``CamxResultExtOFERunPassFailed (7695)``，10 秒后 ``TriggerCoreDumpForForcesSigabrtEvent``；
+   2. 只摘 ``hqRawNightLuxLimiter || hqRawDrcGainLimiter`` 那一层、保留
+      ``hqRawIsoLimiter && hqRawLuxLimiter``（"soft" 版）→ 用户实测仍然崩。
+
+   崩溃现场 tombstone 一致：``signal 6 (SIGABRT)``，栈顶
+   ``Usecase::DumpSystemEvent() ← ExtensionModule::RequestThreadProcessing() ← RecoveryThread``
+   —— 即 Chi 的 recovery 超时看门狗主动 abort，不是某一条 plan 选错了那么简单。
+
+   **根因**：``hqRawIsoLimiter && hqRawLuxLimiter`` 是硬边界。50MP 四帧全尺寸合成只能在
+   照度足够、帧数 ≤4 时跑；越过这条线，管线要么落到 6 帧多帧（OFE 直接失败），要么
+   全尺寸帧把处理时间拖过 recovery 超时。**没有安全余量，任何放宽都会崩。**
+
+   因此 ``module/payload_pkj110/pop_decision.json`` 已回滚到 r31（``a56fb18``）基线；
+   本脚本仅作逆向记录保留：HQRAW 节点的 plan 结构、各分支条件、tombstone 判据都在这里，
+   比重复逆向划算。**不要直接拿它产出的 json 上线。**
+
+   如果将来还想做 50MP 易得性，唯一没试过的方向是**压帧数**（把暗场景的
+   ``APS_BRACKET_HR_PSL`` 从 6 帧降到 4 帧），那是 tuning／算法层的事，改决策树做不到。
+
+原始的逆向分析如下，仍然有效。
+
 大师模式选 JPG MAX 时，决定走哪条管线的是 ``ALGO_HYBRIDRAW_MASTER_HQRAW`` 这个节点：它的入口
 条件里有一条 ``paramsHolder->raw_value == "jpg_max"``，所以**节点本身不看光线**；真正卡住 50MP
 的是节点内部按顺序匹配的 plan：
