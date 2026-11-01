@@ -69,6 +69,14 @@ public final class ModuleSettings {
     public static final String VIDEO_FILTER_HIGH_SPEC = "video_filter_high_spec";
 
     /**
+     * Pro video: add 片门全开 (open gate) to the resolution list, after 4K and 2K. The build ships
+     * the whole feature but hides the entry behind MasterVideoDecision.p(); letting that answer
+     * true restores it, and stock then records the sensor's full 4:3 area (4096x3072, 30fps, OIS
+     * only, no EIS -- same as the X10). Picking any other resolution is unchanged.
+     */
+    public static final String OPEN_GATE = "open_gate";
+
+    /**
      * Photo: set the camera's in-sensor-zoom request tag on still captures, so a 2x-3x still is
      * read from the cropped sensor instead of the whole sensor upscaled. The stock config row for
      * the photo opmode is already there; only the request tag is missing (the app never sets it).
@@ -217,6 +225,10 @@ public final class ModuleSettings {
             case VIDEO_MASTER_FILTERS:
                 // On by default: the video scope only adds entries with a table the renderer can
                 // read (VideoFilterLuts), and picking none of them is the stock behaviour.
+                return true;
+            case OPEN_GATE:
+                // On by default: it only adds one entry to the resolution list, so anyone who
+                // does not pick it keeps the stock 16:9 sizes.
                 return true;
             case PHOTO_IZOOM:
                 // Off by default. The app side of this turned out to be deliverable but inert:

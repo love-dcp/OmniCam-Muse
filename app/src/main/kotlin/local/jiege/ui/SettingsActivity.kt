@@ -266,6 +266,12 @@ private fun LazyListScope.shootItems(store: SettingsStore, cardModifier: Modifie
                 title = "4K / 60fps 视频滤镜",
                 summary = "普通视频在 4K、60fps 下保留滤镜，不回退到 1080p30",
             )
+            SettingSwitch(
+                store = store,
+                key = ModuleSettings.OPEN_GATE,
+                title = "专业视频片门全开",
+                summary = "分辨率列表里多一项「片门全开」，4:3 全画幅 4096×3072 / 30fps；不选它仍是原来的 16:9",
+            )
         }
     }
     softLightItems(store, cardModifier, onOpenSoftLight, onOpenXpanClean)

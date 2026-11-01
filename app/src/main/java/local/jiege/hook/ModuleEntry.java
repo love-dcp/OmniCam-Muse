@@ -46,6 +46,7 @@ import local.jiege.hook.watermark.VideoWatermarkGuard;
 import local.jiege.hook.watermark.XpanWatermarkIsolation;
 import local.jiege.hook.xpan.XpanLivePhoto;
 import local.jiege.hook.xpan.XpanViewfinderClean;
+import local.jiege.hook.video.OpenGate;
 import local.jiege.hook.video.VideoFilterHighSpec;
 import local.jiege.hook.x10.PaletteFeatureSwitch;
 import local.jiege.hook.x10.X10FilterPort;
@@ -161,6 +162,8 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("sound")) ShutterSound.installCamera(classLoader);
             if (!Skip.off("modestate")) ModeStateSplit.installCamera(classLoader);
             if (!Skip.off("video")) VideoFilterHighSpec.installCamera(classLoader);
+            // Pro video open gate: adds the resolution entry stock ships but never shows.
+            if (!Skip.off("video")) OpenGate.installCamera(classLoader);
             // Photo ISZ: the request tag the app never sets, on the still capture only.
             if (!Skip.off("photoisz")) {
                 Log.guard("PhotoIzoom", "install", () -> PhotoIzoom.installCamera(classLoader));
