@@ -73,9 +73,13 @@ public final class MainThreadWatchdog {
         try {
             Class<?> type = Class.forName("android.os.SystemProperties");
             Object value = type.getMethod("get", String.class, String.class).invoke(null, PROP, "");
-            return !"0".equals(String.valueOf(value));
+            // A diagnostic, so it is opt-in: only an explicit "1" turns it on. The old test was
+            // `!"0".equals(value)`, which is true for an unset (empty) property too -- so the
+            // watchdog spun forever on every device, posting a tick to the main looper once a
+            // second for the whole lifetime of the camera process.
+            return "1".equals(String.valueOf(value));
         } catch (Throwable error) {
-            return true;
+            return false;
         }
     }
 

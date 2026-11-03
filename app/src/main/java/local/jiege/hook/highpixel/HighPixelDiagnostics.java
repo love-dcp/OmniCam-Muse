@@ -13,6 +13,8 @@ import local.jiege.hook.common.Log;
 final class HighPixelDiagnostics {
     private static final String TAG = "HighPixelRequest";
     private static final String MODE = "high_pixel_mode";
+    /** Opt-in: only an explicit "1" arms the request dump. Off, the probe costs nothing. */
+    private static final String PROP = "persist.omnicam.aura.hpdump";
     private static final java.util.Set<String> snap =
         java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
@@ -22,6 +24,10 @@ final class HighPixelDiagnostics {
     private static ClassLoader appLoader;
 
     static void install(ClassLoader classLoader) throws Throwable {
+        if (!"1".equals(prop(PROP))) {
+            Log.i(TAG, "off: request dump not armed");
+            return;
+        }
         appLoader = classLoader;
         Class<?> processor = XposedHelpers.findClass("com.oplus.ocs.camera.consumer.ApsProcessor", classLoader);
         Class<?> tagClass = XposedHelpers.findClass("com.oplus.ocs.camera.common.util.CameraRequestTag", classLoader);
@@ -204,5 +210,15 @@ final class HighPixelDiagnostics {
             return sum;
         }
         return String.valueOf(value).length();
+    }
+
+    private static String prop(String key) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            return String.valueOf(type.getMethod("get", String.class, String.class)
+                .invoke(null, key, ""));
+        } catch (Throwable error) {
+            return "";
+        }
     }
 }

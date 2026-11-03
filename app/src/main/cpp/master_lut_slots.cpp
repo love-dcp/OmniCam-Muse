@@ -182,22 +182,40 @@ float *field(void *object, size_t offset) {
     return *reinterpret_cast<float **>(static_cast<char *>(object) + offset);
 }
 
+/**
+ * Per-thread scratch for the merged cube, grown on demand and never released.
+ *
+ * <p>Each of these entry points used to allocate a fresh cube (3*n^3 floats -- 3.3MB at n=65) and
+ * free it again. In the master mode the preview rebuilds its table whenever the CCT buckets move,
+ * and the composition feature moves exposure constantly, so that was a multi-megabyte
+ * allocate/free cycle several times a second. glibc keeps the freed pages in its arenas instead of
+ * returning them, so the process grew without bound (1.5GB of swapped-out [anon:libc_malloc]
+ * mappings) and then could not get a capture buffer -- the shutter sat on "saving photo" until the
+ * system killed the camera. Reusing one cube per thread allocates nothing after the first pass.
+ */
+thread_local std::vector<float> cubeScratch;
+
+float *cubeFor(size_t count) {
+    if (cubeScratch.size() < count) cubeScratch.resize(count);
+    return cubeScratch.data();
+}
+
 uintptr_t resize(void *object, float *src, float *lut, float *dst, int nSrc, int nLut) {
     auto active = slots();
     if (!basicToneMasterFrame() || (active->pre.empty() && active->post.empty()) || src != field(object, kLmtTable)) {
         return originalResize(object, src, lut, dst, nSrc, nLut);
     }
     int count = nSrc * nSrc * nSrc;
-    std::vector<float> input(3 * static_cast<size_t>(count));
+    float *input = cubeFor(3 * static_cast<size_t>(count));
     if (lut == field(object, kScCwcmTable)) {
-        applyPlanar({&active->pre}, src, input.data(), count, 0, count);
-        uintptr_t result = originalResize(object, input.data(), lut, dst, nSrc, nLut);
+        applyPlanar({&active->pre}, src, input, count, 0, count);
+        uintptr_t result = originalResize(object, input, lut, dst, nSrc, nLut);
         applyPlanar({&active->post}, dst, dst, count, 0, count);
         return result;
     }
     if (lut == field(object, kOdtTable)) {
-        applyPlanar({&active->pre, &active->post}, src, input.data(), count, 0, count);
-        return originalResize(object, input.data(), lut, dst, nSrc, nLut);
+        applyPlanar({&active->pre, &active->post}, src, input, count, 0, count);
+        return originalResize(object, input, lut, dst, nSrc, nLut);
     }
     return originalResize(object, src, lut, dst, nSrc, nLut);
 }
@@ -208,9 +226,9 @@ uintptr_t load3D(void *object, float *src, void *dst, int n) {
         return originalLoad3D(object, src, dst, n);
     }
     int count = n * n * n;
-    std::vector<float> input(3 * static_cast<size_t>(count));
-    applyPlanar({&active->pre, &active->post}, src, input.data(), count, 0, count);
-    return originalLoad3D(object, input.data(), dst, n);
+    float *input = cubeFor(3 * static_cast<size_t>(count));
+    applyPlanar({&active->pre, &active->post}, src, input, count, 0, count);
+    return originalLoad3D(object, input, dst, n);
 }
 
 // ---- preview ----
@@ -227,10 +245,11 @@ uintptr_t resize2Rgb(float *src, float *lut, float *dst, int nSrc, int nLut, int
     }
     previewApplied.store(true);
     int count = nSrc * nSrc * nSrc;
-    // Each call reads only its own [begin, end) of the three planes.
-    std::unique_ptr<float[]> input(new float[3 * static_cast<size_t>(count)]);
-    applyPlanar({&active->pre}, src, input.get(), count, begin, end);
-    uintptr_t result = originalResize2Rgb(input.get(), lut, dst, nSrc, nLut, begin, end);
+    // Each call reads only its own [begin, end) of the three planes, so one cube per thread is
+    // enough even though four threads come through here for the same frame.
+    float *input = cubeFor(3 * static_cast<size_t>(count));
+    applyPlanar({&active->pre}, src, input, count, begin, end);
+    uintptr_t result = originalResize2Rgb(input, lut, dst, nSrc, nLut, begin, end);
     applyInterleaved(active->post, dst, begin, end);
     return result;
 }

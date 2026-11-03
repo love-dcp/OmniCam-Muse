@@ -272,6 +272,12 @@ private fun LazyListScope.shootItems(store: SettingsStore, cardModifier: Modifie
                 title = "专业视频片门全开",
                 summary = "分辨率列表里多一项「片门全开」，4:3 全画幅 4096×3072，24/30/60fps 均可，SDR / HDR / Log 也都能录；不选它仍是原来的 16:9",
             )
+            SettingSwitch(
+                store = store,
+                key = ModuleSettings.AI_COMPOSITION,
+                title = "AI 构图（灵感构图入口）",
+                summary = "打开相机自带的灵感构图 / 实景构图入口。灵感构图走云端（需要联网和 com.oplus.deepthinker 可用），面板与引导线可正常显示；实景跟踪依赖本机缺失的 libai_camera_composition_lite2.so，只有纹理级效果出不来",
+            )
         }
     }
     softLightItems(store, cardModifier, onOpenSoftLight, onOpenXpanClean)

@@ -79,6 +79,15 @@ public final class ModuleSettings {
     public static final String OPEN_GATE = "open_gate";
 
     /**
+     * Photo: open the build's AI composition gates (灵感构图 / 实景构图). The camera ships the whole
+     * com.oplus.camera.feature.aicomposition package, but three feature-table answers keep it out
+     * of the module list: FeatureConfigureAdapter.getFeatureInfoList / hasConfigFeature and
+     * CameraConfig.d. The engine itself is not in the camera -- libaiunit_sdk_core.so is a client
+     * for the system AIUnit service, so opening the gates only shows what stock does with them.
+     */
+    public static final String AI_COMPOSITION = "ai_composition";
+
+    /**
      * Photo: set the camera's in-sensor-zoom request tag on still captures, so a 2x-3x still is
      * read from the cropped sensor instead of the whole sensor upscaled. The stock config row for
      * the photo opmode is already there; only the request tag is missing (the app never sets it).
@@ -231,6 +240,18 @@ public final class ModuleSettings {
             case OPEN_GATE:
                 // On by default: it only adds one entry to the resolution list, so anyone who
                 // does not pick it keeps the stock 16:9 sizes.
+                return true;
+            case AI_COMPOSITION:
+                // On by default: the entry itself is useful even without the local engine.
+                // Measured on PKJ110 (7.006.123): the two paths are independent.
+                //  - realscene (live tracking) needs ApsAICompositionJni -> sphal dlopen of
+                //    libai_camera_composition_lite2.so + libAITracker.so; neither ships on this
+                //    build, so it keeps logging "invalid zoom result" and only the texture-level
+                //    preview effects are lost.
+                //  - inspiration (cloud) is a separate chain: captureInspirationPreviewFrame ->
+                //    InspirationNetworkClient -> server templates, gated on OPPO account/network
+                //    and on com.oplus.deepthinker being reachable. Its panel, tabs and viewfinder
+                //    guides work with the entry open, so keep the gate open and let the user try.
                 return true;
             case PHOTO_IZOOM:
                 // Off by default. The app side of this turned out to be deliverable but inert:

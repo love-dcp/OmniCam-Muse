@@ -1,4 +1,8 @@
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell 5.1 turns every native stderr write into a terminating
+# NativeCommandError, and javac writes an ordinary "注: ... 使用或覆盖了已过时的 API" note to stderr
+# even on a clean compile. Every native step below is gated on $LASTEXITCODE instead, which is the
+# signal that actually means failure.
+$ErrorActionPreference = 'Continue'
 # Offline tests for the filter catalogs, group injection and preset selection (plain JVM).
 $project = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $sdk = (Get-Content (Join-Path $project 'local.properties') | Where-Object { $_ -like 'sdk.dir=*' }) -replace '^sdk.dir=', ''

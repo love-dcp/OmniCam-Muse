@@ -3,7 +3,9 @@ package local.jiege.hook;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import local.jiege.hook.aicomposition.AiComposition;
 import local.jiege.hook.capture.CaptureDumps;
+import local.jiege.hook.capture.MemoryGate;
 import local.jiege.hook.common.CameraLogMirror;
 import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Skip;
@@ -152,6 +154,8 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             }
             if (!Skip.off("capture")) TiltShiftCapture.installCamera(classLoader);
             if (!Skip.off("capture")) SeamlessBlurGuard.installCamera(classLoader);
+            // The shutter's own 648 MB free-RAM floor, which this build sits under most of the time.
+            if (!Skip.off("capture")) MemoryGate.installCamera(classLoader);
             if (!Skip.off("launch")) KeyLaunchMode.installCamera(classLoader);
             if (!Skip.off("diag")) {
                 Log.guard("CameraLog", "camera log mirror", () -> CameraLogMirror.install(classLoader));
@@ -164,6 +168,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("video")) VideoFilterHighSpec.installCamera(classLoader);
             // Pro video open gate: adds the resolution entry stock ships but never shows.
             if (!Skip.off("video")) OpenGate.installCamera(classLoader);
+            // AI composition: open the three feature-table gates the build keeps closed.
+            if (!Skip.off("aicomp")) {
+                Log.guard("AiComposition", "install", () -> AiComposition.installCamera(classLoader));
+            }
             // Photo ISZ: the request tag the app never sets, on the still capture only.
             if (!Skip.off("photoisz")) {
                 Log.guard("PhotoIzoom", "install", () -> PhotoIzoom.installCamera(classLoader));

@@ -44,7 +44,11 @@ final class PopHeifProbe {
     private PopHeifProbe() {}
 
     static boolean enabled() {
-        return !"0".equals(readProp(PROP));
+        // A diagnostic probe, so it is opt-in: only an explicit "1" turns it on. The old test
+        // `!"0".equals(readProp(PROP))` is true for an unset (empty) property too, which left the
+        // HEIC/JPEG receive probe wired up on every device and appending to pop_heif.txt on every
+        // capture for the whole lifetime of the camera process.
+        return "1".equals(readProp(PROP));
     }
 
     /**

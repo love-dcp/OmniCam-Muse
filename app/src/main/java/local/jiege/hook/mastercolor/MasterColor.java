@@ -45,14 +45,54 @@ public final class MasterColor {
     private static final String MASTER_MODE = "professional";
     private static final String ROOT = "/data/user/0/com.oplus.camera/files/jiege/mastercolor";
     private static final String LIVE = ROOT + "/live/";
-    private static final int PREVIEW_INTERVAL_MS = 200;
+    private static final int PREVIEW_INTERVAL_MS = 600;
     // Some streams (dual-camera portrait) alternate two physical cameras frame by frame; the preview follows a
     // new camera only after it has been the only one reporting for this long.
     private static final int CAMERA_SWITCH_MS = 300;
-    private static final int CCT_STEP = 100;
-    private static final int CCT_HYSTERESIS = 40;
+    private static final int CCT_STEP = 400;
+    private static final int CCT_HYSTERESIS = 80;
     private static final float PREVIEW_MATRIX_CHANGE = 0.02f;
     private static final long SETTING_INTERVAL_MS = 1000;
+
+    /**
+     * Wall clock up to which the preview table must not be rebuilt.
+     *
+     * <p>The real-scene composition feature moves exposure and white balance on every frame, and
+     * every CCT bucket / colour-matrix change here bakes a fresh 19MB blend table into a new
+     * directory that the camera then loads. The camera never gives those back: with composition
+     * running the process grew by roughly 29MB a second, all of it in {@code [anon:libc_malloc]},
+     * and the shutter died on "saving photo" within a minute. The hold is armed once by the shutter
+     * hook and covers the whole save window, so the preview table stops following exactly while the
+     * capture path is busy and picks up again six seconds later.
+     */
+    private static volatile long previewHoldUntil;
+
+    /** Called once from the shutter hook, right before the capture request is dispatched. */
+    public static void holdPreview(long ms) {
+        previewHoldUntil = System.currentTimeMillis() + ms;
+    }
+
+    /**
+     * True while the composition session is active; the preview table must not follow then.
+     *
+     * <p>Composition drives exposure and white balance itself, so every frame lands on a new CCT
+     * bucket and {@link #onPreviewResult} would otherwise bake a fresh 19MB blend table for each
+     * one. That is the "point composition and the camera stutters, then hangs after the shot and on
+     * the gallery round-trip" report: a table rebuild storm while the panel is up, and a backlog
+     * that bursts the moment the shot unfreezes it. A single boolean flips the whole follow off for
+     * the duration of the session.
+     */
+    private static volatile boolean compositionActive;
+
+    /** Composition has begun: stop the preview table from chasing every CCT hop. */
+    public static void compositionStart() {
+        compositionActive = true;
+    }
+
+    /** Composition is over: let the preview table follow again. */
+    public static void compositionStop() {
+        compositionActive = false;
+    }
 
     private static final CaptureResult.Key<Integer> AWB_CCT = key("org.quic.camera2.statsconfigs.AWBFrameControlCCT", Integer.class);
 
@@ -393,6 +433,14 @@ public final class MasterColor {
 
     private static synchronized void onPreviewResult(Object metadata) throws Exception {
         if (!enabled || look == null) return;
+        // A shutter is in flight. Rebuilding the preview table now bakes a 19MB blend table inside
+        // the same native library the capture path is using, and a rebuild landing mid-save leaves
+        // the camera unable to take another photo until it is restarted. holdPreview() is called
+        // from the capture hook, so this only covers the save window.
+        if (System.currentTimeMillis() < previewHoldUntil) return;
+        // Composition drives its own white balance, so the CCT hops every frame; baking a table per
+        // hop is the whole storm. Sit out the session instead.
+        if (compositionActive) return;
         String id = (String) read(metadata, CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
         if (id == null) id = (String) XposedHelpers.callMethod(metadata, "getCameraId");
         if (id == null) { clearPreview("preview: physical camera identity unavailable"); return; }
