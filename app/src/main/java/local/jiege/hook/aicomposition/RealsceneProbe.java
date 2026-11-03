@@ -561,8 +561,16 @@ public final class RealsceneProbe {
     private static volatile boolean blockReopen;
     private static final long SESSION_TTL = 8000L;
     private static final int PASS_MAX = 400;
-    /** A quieter gap than this between two passes means a new request, not a continuation. */
-    private static final long STREAM_GAP = 1500L;
+    /**
+     * A quieter gap than this between two passes means a new request, not a continuation.
+     *
+     * <p>The camera re-asks about every two seconds while the panel is open, and 1.5s used to treat
+     * every one of those as a new request: the held answer was dropped, a fresh model round trip
+     * went out, and the passes in between answered with the full-frame fallback -- on screen that
+     * is "no subject detected" flickering against a real suggestion. Five seconds keeps the whole
+     * panel session on one answer while still catching a real re-entry.
+     */
+    private static final long STREAM_GAP = 5000L;
 
     /**
      * Following is opt-in per shot: the entry button has to be tapped, and the permission expires.
@@ -602,10 +610,9 @@ public final class RealsceneProbe {
         if (previous != 0 && now - previous <= STREAM_GAP) return;
         sessionAt = now;
         sessionPasses = 0;
-        // A new burst starts from no recommendation: the previous session's ratio describes a
-        // different subject, and the launch would otherwise inherit it for the frame or two before
-        // this session's own answer lands.
-        recommendZoom = 1.0f;
+        // A new framing is decided on the frame that is in front of the lens now, not on the
+        // answer the last one left behind ("为什么次次都是 1.4X").
+        refreshFraming();
         rectSince = 0;
         directDone = false;
         // Composition drives its own white balance, which makes the master preview table rebuild
@@ -1394,6 +1401,41 @@ public final class RealsceneProbe {
     }
 
     /**
+     * Drops every held framing so the next answer is decided on the frame that is in front of the
+     * lens right now.
+     *
+     * <p>Both answers -- the model's and the on-device detector's -- are held for the life of the
+     * camera process: {@code cloudGiven} is filled once and reused forever, and the detector's JSON
+     * is frozen per session. That is right for the frames inside one composition, and wrong the
+     * moment the user frames something new: the panel then keeps asking for the ratio of a subject
+     * that left the frame minutes ago. The report was "为什么次次都是 1.4X，手机拉远了也是 1.4X".
+     *
+     * <p>k4 is the entry point the camera runs when the panel opens, so it is exactly the moment a
+     * new framing begins. Throttled because the panel calls it more than once while opening.
+     */
+    private static void refreshFraming() {
+        if (!"1".equals(prop("persist.omnicam.comp.refresh", "1"))) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - refreshedAt < 2500L) return;
+        refreshedAt = now;
+        clearCloudSession();
+        cloudAt = 0;
+        SubjectLocator.dropHeld();
+        frozenAnswer = null;
+        frozenFor = -1L;
+        // A new framing gets one launch of its own. The baseline is always 1.0 -- *not* the ratio the
+        // previous framing asked for: carrying that over composes, because each answer is measured
+        // on a preview the last launch already zoomed, so the base would grow 1.0 -> 1.5 -> 2.2 ->
+        // 3.3 -> ... on every entry ("现在又是每次都是3.3X"). The panel is entered from a 1x preview.
+        zoomLaunched = false;
+        framingBase = 1.0f;
+        appliedZoom = 1.0f;
+        Log.i(TAG, "framing refreshed: held answer dropped, base " + framingBase);
+    }
+
+    private static volatile long refreshedAt;
+
+    /**
      * {@code vb.c3.k4(int)} branches on whether the AIUnit service is reachable at all:
      *
      * <pre>
@@ -1648,6 +1690,11 @@ public final class RealsceneProbe {
         // tracker's scale would have made it converge.
         String phase = phaseName(machine);
         if ("ZOOM_TRIGGERED".equals(phase) || "FINISHED".equals(phase)) {
+            // The launch went out and carried this ratio, so the lens is there (or on its way).
+            // Remember it: the next framing is measured on the preview it produces, and its own
+            // ratio has to be turned back into an absolute one against this.
+            zoomLaunched = true;
+            if (queued > 0.01f) appliedZoom = queued;
             if (queued <= 0.01f) return;
             if (Math.abs(recommended - queued) <= 0.01f) return;
             try {
@@ -1662,6 +1709,17 @@ public final class RealsceneProbe {
             return;
         }
 
+        // One launch per session. Every answered crop is measured on the frame the lens is showing
+        // right now, so once the camera has moved to 1.6x the next answer reads "this framing needs
+        // 1.0x more" and -- if it were applied as an absolute ratio again -- the preview would walk
+        // up in steps (observed: 1.4x -> 1.6x -> ...) until the subject is a blur. A suggestion is
+        // decided once per framing; only a fresh entry to the panel starts another one.
+        if (zoomLaunched) return;
+        // Only once the rect is on screen. Before that the session is still COMPOSING and the only
+        // answer in hand is the standby one the module pushes while the model is still thinking --
+        // writing j then locks the launch to that placeholder's ratio and the real answer, which
+        // arrives a couple of seconds later, never gets a say.
+        if (!"RECT_SHOWN".equals(phase)) return;
         // The recommended zoom is the one the answered crop was computed for; machine.i only ever
         // reads 1.0 here because the camera fills it from its own crop objects, which our JSON is
         // not part of. Prefer the answered value so the launch lands on the framing being shown.
@@ -1688,6 +1746,10 @@ public final class RealsceneProbe {
 
     private static void noteRecommendZoom(String json) {
         if (json == null) return;
+        // The full-frame standby answer ("nothing detected yet, keep this framing") is pushed on
+        // every pass that has no suggestion. It is a real answer for the pass, but it is not a
+        // framing, so it must not overwrite the ratio a suggestion asked for.
+        if (json.indexOf("omnicam-probe") >= 0) return;
         int at = json.indexOf("\"zoom\":");
         if (at < 0) return;
         int end = json.indexOf(',', at);
@@ -1703,6 +1765,46 @@ public final class RealsceneProbe {
 
     private static final java.util.concurrent.atomic.AtomicInteger zoomFixed =
         new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Set once the launch for this framing has gone out; cleared when a new framing starts. */
+    private static volatile boolean zoomLaunched;
+
+    /**
+     * The ratio the lens is believed to be at -- the last one a launch carried.
+     *
+     * <p>Every answered crop is measured on the preview as it looks right now, so its {@code zoom}
+     * is a multiplier over the current ratio, while the camera applies it as an absolute one. At
+     * 1.0x the two are the same, which is why this only shows up after the first launch: the panel
+     * then asks for 1.0x "more" and the preview snaps back, or for 1.3x and it steps up. Multiplying
+     * by this turns the answer back into an absolute ratio.
+     */
+    private static volatile float appliedZoom = 1.0f;
+
+    /** The ratio {@link #appliedZoom} had when the current framing began. */
+    private static volatile float framingBase = 1.0f;
+
+    /**
+     * Rewrites our own answers so {@code zoom} means "absolute ratio" rather than "multiplier over
+     * what the lens is showing".
+     */
+    private static String absoluteZoom(String json, float base) {
+        if (json == null || base <= 0f || Math.abs(base - 1f) < 0.03f) return json;
+        if (json.indexOf("omnicam-") < 0) return json;
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(json);
+            org.json.JSONArray crops = root.optJSONArray("crops");
+            if (crops == null) return json;
+            for (int i = 0; i < crops.length(); i++) {
+                org.json.JSONObject crop = crops.optJSONObject(i);
+                if (crop == null) continue;
+                double ratio = crop.optDouble("zoom", 0d);
+                if (ratio > 0.01d) crop.put("zoom", ratio * base);
+            }
+            return root.toString();
+        } catch (Throwable error) {
+            return json;
+        }
+    }
 
     /**
      * Drops the zoom launch that RECT_SHOWN queues with an empty target.
@@ -2191,6 +2293,7 @@ public final class RealsceneProbe {
      */
     private static boolean push(Object callback, String json) {
         try {
+            json = absoluteZoom(json, framingBase);
             noteRecommendZoom(json);
             // Event 1 is the crop the panel draws. Event 2 is the "answer delivered" signal, and the
             // camera's own canned path sends exactly this pair before treating the pass as handled
