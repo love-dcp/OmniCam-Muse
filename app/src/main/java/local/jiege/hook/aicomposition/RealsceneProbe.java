@@ -378,6 +378,24 @@ public final class RealsceneProbe {
     }
 
     /**
+     * Modes that ship no composition pipeline at all, beyond the two that are merely unsafe.
+     *
+     * <p>Only used to decide whether a tap may <em>open</em> composition; everything else about the
+     * feature keeps working as before. The list is a deny-list on purpose: mode names come from the
+     * feature presenter and a mode this build invents later must not silently lose the entry.
+     */
+    private static final java.util.Set<String> NOT_PHOTO = new java.util.HashSet<>(
+        java.util.Arrays.asList("professional", "gr", "video", "video_pro", "pro_video",
+            "portrait", "panorama", "time_lapse", "slow_shutter", "night", "super_night"));
+
+    /** Is the camera in one of the modes composition runs in? Unknown counts as yes. */
+    private static boolean photoMode() {
+        String mode = modeName;
+        if (mode == null || mode.isEmpty()) return true;
+        return !NOT_PHOTO.contains(mode);
+    }
+
+    /**
      * Current camera mode name, kept current by the feature presenter itself: "photo" and the
      * other general modes are the ones the composition pipeline supports, "professional" is the
      * mode the module relabels 大师, and "gr" is the stock GR mode. FeaturePresenter is built for
@@ -506,6 +524,21 @@ public final class RealsceneProbe {
                     Object event = param.args[0];
                     if (!(event instanceof android.view.MotionEvent)) return;
                     android.view.MotionEvent motion = (android.view.MotionEvent) event;
+                    if (motion.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                        // The one honest signal that this touch belongs to the composition entry.
+                        // It has to be taken on DOWN: by the time the UP arrives, the activity-level
+                        // hook has already decided the gesture was a tap on the viewfinder and
+                        // pinned a subject -- which also switched the whole session to the on-device
+                        // detector for two minutes (LOCAL_TTL), so the model was never asked at all.
+                        // Every "打开构图按钮默认识别不到主体" report traces back to this ordering.
+                        //
+                        // Modes whose entry is disabled keep the flag clear, otherwise this shortcut
+                        // would reopen composition in exactly the modes the guard exists to protect.
+                        if (!compositionBlocked("entry")) {
+                            entryDownAt = android.os.SystemClock.uptimeMillis();
+                        }
+                        return;
+                    }
                     if (motion.getActionMasked() != android.view.MotionEvent.ACTION_UP) return;
                     // Kept as a diagnostic only: the camera itself dispatches touches to this
                     // button during start-up, so a touch here is not proof of anything.
@@ -515,6 +548,9 @@ public final class RealsceneProbe {
             });
         }
     }
+
+    /** When the composition entry last went down; the activity hook reads it to skip the pin. */
+    private static volatile long entryDownAt;
 
     /** vb.c3 keeps itself reachable for the re-arm loop below. */
     private static volatile Object cameraHost;
@@ -592,6 +628,22 @@ public final class RealsceneProbe {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Is the composition panel up right now? Read-only on purpose -- {@link #armed()} closes an
+     * expired session as a side effect, and calling it from a touch handler would let a shutter tap
+     * tear down a session the camera is still using.
+     *
+     * <p>The panel flag ({@code vb.c3.N0}) is the direct answer. The session timestamp is the
+     * fallback for the first frames after the panel opens, before that flag is written.
+     */
+    private static boolean compositionOpen() {
+        if (!following()) return false;
+        Object host = cameraHost;
+        if (host != null && Boolean.TRUE.equals(field(host, "N0"))) return true;
+        long at = sessionAt;
+        return at != 0 && android.os.SystemClock.uptimeMillis() - at <= SESSION_TTL;
     }
 
     /**
@@ -867,6 +919,20 @@ public final class RealsceneProbe {
                         // short presses are still aimed presses, and a minimum hold only made fast
                         // taps disappear.
                         if (Math.abs(rawX - downX) > 40f || Math.abs(rawY - downY) > 40f) return;
+                        // The composition entry saw this gesture go down. Its own onTouchEvent runs
+                        // after this hook, so without the flag below the tap would be read here first
+                        // and pin a subject under the icon -- and pinning also forces the on-device
+                        // channel, which is why the model never got asked on a plain entry tap.
+                        //
+                        // Only the pin is skipped. The entry button opens the panel itself; reopening
+                        // it from here as well put a composition panel on screen in modes that do not
+                        // support it, on any gesture that happened to reach that button -- "在其他
+                        // 模式按一下快门和变焦都会触发构图".
+                        long entryAt = entryDownAt;
+                        if (entryAt != 0 && android.os.SystemClock.uptimeMillis() - entryAt < 1500L) {
+                            entryDownAt = 0;
+                            return;
+                        }
                         android.app.Activity activity = (android.app.Activity) param.thisObject;
                         android.view.View decor = activity.getWindow().getDecorView();
                         android.view.View preview = findPreview(decor);
@@ -879,6 +945,11 @@ public final class RealsceneProbe {
                             // The icon is how the user asks for composition, so it also lifts the
                             // cap a finished session left behind; without that the second tap of a
                             // visit would open the panel and then answer nothing at all.
+                            //
+                            // Composition only exists in the photo modes. Everywhere else the icon
+                            // is either absent or borrowed by another feature, and reopening here
+                            // is what put a composition panel on a video or portrait screen.
+                            if (!photoMode()) return;
                             reopenComposition();
                             return;
                         }
@@ -886,10 +957,17 @@ public final class RealsceneProbe {
                         // rectangle path above can miss it and turn a tap on the icon into a tap on
                         // the viewfinder -- which pinned the subject to the point under the icon.
                         if (CompositionIconShift.isEntry(hitTest(decor, rawX, rawY, 0))) {
+                            if (!photoMode()) return;
                             reopenComposition();
                             return;
                         }
                         if (touchesControl(decor, rawX, rawY, preview)) return;
+                        // A pick only means something while the composition panel is up. The shutter,
+                        // the zoom ladder and the mode strip all sit inside the preview rectangle, so
+                        // every one of those taps used to "pick a subject": that pinned a point,
+                        // forced the on-device channel for two minutes and reopened composition --
+                        // which is the report "在其他模式按一下快门和变焦都会触发构图".
+                        if (!compositionOpen()) return;
                         int[] origin = new int[2];
                         preview.getLocationOnScreen(origin);
                         int width = preview.getWidth();
@@ -2345,8 +2423,17 @@ public final class RealsceneProbe {
 
     /* -------------------------------------------------------------- cloud model */
 
-    /** At most one model request per this window; each one leaves the device and costs seconds. */
-    private static final long CLOUD_GAP = 15000L;
+    /**
+     * At most one model request per this window; each one leaves the device and costs seconds.
+     *
+     * <p>Fifteen seconds was the first guess and it made the panel look dead: leaving composition
+     * and opening it again a few seconds later -- which is exactly how a user retries after a bad
+     * suggestion -- did not ask the model at all, so the answer on screen was whatever the previous
+     * request had said about a different framing. Three seconds is still long enough that the
+     * camera's own repeated calls cannot stack up, and {@code CloudComposer.busy()} already prevents
+     * two requests from being in flight at once.
+     */
+    private static final long CLOUD_GAP = 3000L;
 
     private static volatile Object cloudAnswered;
     private static volatile long cloudAt;

@@ -118,6 +118,8 @@ final class SubjectLocator {
     private static final int KIND_AMBIENT = 4;
     /** A subject the user pinned by hand; frames itself differently on screen. */
     private static final int KIND_PINNED = 5;
+    /** Foliage: flowers, leaves, a potted plant. Found by hue, not by shape. */
+    private static final int KIND_PLANT = 6;
 
     /** A portrait crop shows roughly four face heights. */
     private static final float FACE_TO_CROP = 4.2f;
@@ -397,6 +399,14 @@ final class SubjectLocator {
                 kind = KIND_PINNED;
             } else {
                 raw = faceIn(frame);
+                // Foliage outranks the object scorer. A flowering plant is a mass of one soft-edged
+                // colour, so the object scorer's "compact high-contrast blob" test hands the shot to
+                // the pot or to whatever rectangle is behind it -- which is why pointing at flowers
+                // used to frame the table edge.
+                if (raw == null && !"0".equals(prop("persist.omnicam.plantdetect", "1"))) {
+                    raw = plantIn(frame);
+                    if (raw != null) kind = KIND_PLANT;
+                }
                 // Objects outrank skin. A wooden desk is warm brown and passes the skin test, and a
                 // can of energy drink is that same warm orange, so "largest skin blob" framed the
                 // tabletop next to the can -- the "I aimed at the can and the box landed on the
@@ -428,6 +438,24 @@ final class SubjectLocator {
                 if (raw == null && !"0".equals(prop("persist.omnicam.scenedetect", "1"))) {
                     framed = sceneIn(frame);
                     kind = framed == null ? KIND_FACE : sceneKind;
+                }
+            }
+            if (raw == null && framed == null
+                && !"0".equals(prop("persist.omnicam.comp.fallback", "1"))) {
+                // Nothing identified at all -- a blank wall, a plate of food, a sign, a flower bed
+                // seen from too far. Answering with nothing is what made the default button feel
+                // like it did nothing ("不点击默认点构图按钮成功率不高"): the pass still gets a valid
+                // full-frame answer, but there is no rect on screen and no card in the panel.
+                // A gentle centre crop is an honest composition for a scene without a subject, and
+                // it is the widest suggestion the ladder allows, so it cannot ruin the shot.
+                framed = fallbackBox();
+                kind = KIND_AMBIENT;
+                int calls;
+                synchronized (LOCK) {
+                    calls = ++fallbackCalls;
+                }
+                if (calls <= 5 || calls % 60 == 0) {
+                    Log.i(TAG, "no subject found, offering the whole scene (" + calls + ")");
                 }
             }
             if (raw == null && framed == null) {
@@ -1062,6 +1090,127 @@ final class SubjectLocator {
     }
 
     /**
+     * Foliage: flowers, leaves, a potted plant, a bush, grass.
+     *
+     * <p>This is the subject class no other detector here can see. A plant has no face; its colour
+     * fails the warm-skin test by construction (green, not warm); and the object scorer wants one
+     * compact high-contrast blob, while a plant is a mass of the same colour with soft edges, so it
+     * loses to whatever crisp rectangle is nearby. What a plant does have is a hue nothing else in a
+     * room usually shares, so a green mask finds it directly instead of by shape.
+     *
+     * <p>Green is the whole test on purpose: flowering plants with yellow or red blossoms still have
+     * leaves around them, and a mask that also accepted warm hues would claim wooden furniture -- the
+     * exact confusion the skin classifier was rewritten to avoid. {@code
+     * persist.omnicam.plantdetect=0} switches it off without a rebuild.
+     */
+    private static float[] plantIn(Bitmap frame) {
+        if ("0".equals(prop("persist.omnicam.plantdetect", "1"))) return null;
+        final int width = frame.getWidth();
+        final int height = frame.getHeight();
+        final int step = 8;
+        final int gw = width / step;
+        final int gh = height / step;
+        if (gw < 4 || gh < 4) return null;
+        final int[] data = new int[width * height];
+        frame.getPixels(data, 0, width, 0, 0, width, height);
+
+        final boolean[] leaf = new boolean[gw * gh];
+        int cells = 0;
+        for (int gy = 0; gy < gh; gy++) {
+            for (int gx = 0; gx < gw; gx++) {
+                int hits = 0;
+                for (int y = 0; y < step; y++) {
+                    int row = (gy * step + y) * width + gx * step;
+                    for (int x = 0; x < step; x++) {
+                        if (isLeaf(data[row + x])) hits++;
+                    }
+                }
+                // A third of a cell is enough: leaf edges are soft and a strict majority would
+                // break the mask up into speckle that no flood fill can join into a subject.
+                if (hits * 3 >= step * step) {
+                    leaf[gy * gw + gx] = true;
+                    cells++;
+                }
+            }
+        }
+        // Trim on a desk, a green sticker or a plant on a distant shelf is not the subject. Two
+        // percent of the frame is about a small bunch of flowers held at arm's length.
+        if (cells < Math.max(6, gw * gh / 50)) return null;
+
+        int[] stack = new int[gw * gh];
+        boolean[] seen = new boolean[gw * gh];
+        int bestCount = 0, bestLeft = 0, bestRight = 0, bestUpper = 0, bestLower = 0;
+        for (int seed = 0; seed < leaf.length; seed++) {
+            if (!leaf[seed] || seen[seed]) continue;
+            int top = 0;
+            stack[top++] = seed;
+            seen[seed] = true;
+            int count = 0, left = gw, right = -1, upper = gh, lower = -1;
+            while (top > 0) {
+                int index = stack[--top];
+                int y = index / gw, x = index % gw;
+                count++;
+                if (x < left) left = x;
+                if (x > right) right = x;
+                if (y < upper) upper = y;
+                if (y > lower) lower = y;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+                        int next = ny * gw + nx;
+                        if (!leaf[next] || seen[next]) continue;
+                        seen[next] = true;
+                        stack[top++] = next;
+                    }
+                }
+            }
+            if (count > bestCount) {
+                bestCount = count;
+                bestLeft = left;
+                bestRight = right;
+                bestUpper = upper;
+                bestLower = lower;
+            }
+        }
+        if (bestCount < 6) return null;
+        float boxW = (bestRight - bestLeft + 1) / (float) gw;
+        float boxH = (bestLower - bestUpper + 1) / (float) gh;
+        // A frame full of grass or a hedge fills the picture; that is scenery, and the scene branch
+        // frames it better than a blob that touches both sides of the frame.
+        if (boxW > 0.92f && boxH > 0.92f) return null;
+        float[] blob = {bestCount, bestLeft, bestRight, bestUpper, bestLower, 0f, 0f};
+        float[] subject = subjectOf(blob, gw, gh, width, height);
+        if (subject != null) {
+            int calls;
+            synchronized (LOCK) {
+                calls = ++plantCalls;
+            }
+            if (calls <= 5 || calls % 40 == 0) {
+                Log.i(TAG, String.format(Locale.US,
+                    "plant #%d cells %d box %.2fx%.2f centre %.2f,%.2f height %.0f%%",
+                    calls, bestCount, boxW, boxH, subject[0], subject[1], subject[2] * 100f));
+            }
+        }
+        return subject;
+    }
+
+    /** Green, as a leaf is green: enough `g` to beat both other channels at any brightness. */
+    private static boolean isLeaf(int pixel) {
+        int r = (pixel >> 16) & 0xff;
+        int g = (pixel >> 8) & 0xff;
+        int b = pixel & 0xff;
+        int luma = (77 * r + 150 * g + 29 * b) >> 8;
+        // Deep shade reads as noise; a lit leaf is never that dark.
+        if (luma < 20) return false;
+        // Green has to be the dominant channel with a margin. `g > r + 10` alone also accepts olive
+        // walls, so the blue side is checked too -- foliage reflects very little blue.
+        return g > 42 && g > r + 12 && g > b + 8;
+    }
+
+    private static int plantCalls;
+
+    /**
      * Whatever the camera is pointed at: a blob grown from the middle of the frame.
      *
      * <p>This is the automatic path's first attempt, and it is deliberately a hard rule rather than
@@ -1321,9 +1470,11 @@ final class SubjectLocator {
             horizon = clamp(skyRatio, 0.08f, 0.86f);
         } else {
             // No sky. Still worth framing when the scene has layers; a blank wall has neither a step
-            // between rows nor much colour, and a suggestion there would be noise.
-            if (texture < 2.4f && meanSat < 16f) return null;
-            if (edgeRow < 0 || edge < 6f) return null;
+            // between rows nor much colour, and a suggestion there would be noise. Both gates used
+            // to sit higher (2.4 / 16, 6.0) and that turned ordinary rooms, streets without a
+            // visible horizon and close-up foliage into "no suggestion for this scene".
+            if (texture < 1.9f && meanSat < 13f) return null;
+            if (edgeRow < 0 || edge < 4.5f) return null;
             horizon = edgeRow / (float) gh;
         }
 
@@ -1356,6 +1507,22 @@ final class SubjectLocator {
         }
         return box;
     }
+
+    /**
+     * The framing of last resort: the widest suggestion the crop ladder allows, centred.
+     *
+     * <p>{@link #MAX_CROP_W} is 588 of 768 reference pixels, which is 1.3x -- the loosest crop that
+     * still counts as a composition to the camera. It is deliberately not tighter: this answer is
+     * given for scenes where nothing was recognised, so the only thing it may do is tidy the edges.
+     */
+    private static int[] fallbackBox() {
+        int cropW = MAX_CROP_W;
+        int cropH = cropW * 4 / 3;
+        if (cropH > REF_H) cropH = REF_H;
+        return new int[]{(REF_W - cropW) / 2, (REF_H - cropH) / 2, cropW, cropH};
+    }
+
+    private static int fallbackCalls;
 
     /** Blob bounds in grid cells to the {centre x, eye y, subject height} triple cropOf expects. */
     private static float[] subjectOf(float[] blob, int gw, int gh, int width, int height) {
@@ -1553,6 +1720,7 @@ final class SubjectLocator {
     private static String label(int kind) {
         switch (kind) {
             case KIND_OBJECT: return "object";
+            case KIND_PLANT: return "plant";
             case KIND_PINNED: return "locked";
             case KIND_LANDSCAPE: return "landscape";
             case KIND_AMBIENT: return "ambient";
@@ -1573,6 +1741,11 @@ final class SubjectLocator {
         } else if (kind == KIND_LANDSCAPE) {
             title = "风光构图";
             desc = "地平线落在三分线上，天空与地面分开层次，画面开阔有纵深。";
+        } else if (kind == KIND_PLANT) {
+            title = closeUp ? "花草特写" : "花草构图";
+            desc = closeUp
+                ? "花叶收进三分线，突出形状与色彩，背景轻轻化开。"
+                : "留住花木周围的枝叶与环境，主体不顶边，画面更舒展。";
         } else if (kind == KIND_AMBIENT) {
             title = "环境构图";
             desc = "画面没有单一主体，收住四周杂边，让光线与层次成为主体。";

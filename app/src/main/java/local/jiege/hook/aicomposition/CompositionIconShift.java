@@ -138,6 +138,15 @@ final class CompositionIconShift {
     static boolean overEntry(float x, float y) {
         View view = entry;
         if (view == null) return false;
+        // Only while the icon is actually on screen. Modes without composition never show it, but
+        // the view survives from the last photo session, so its rectangle kept claiming a spot at
+        // the right edge of whatever mode the user switched to -- and the zoom ladder's last stop
+        // sits inside that spot, which made zooming open composition.
+        try {
+            if (view.getVisibility() != View.VISIBLE || !view.isShown()) return false;
+        } catch (Throwable error) {
+            return false;
+        }
         int[] at = new int[2];
         try {
             view.getLocationOnScreen(at);
@@ -147,7 +156,9 @@ final class CompositionIconShift {
         float width = view.getWidth() * view.getScaleX();
         float height = view.getHeight() * view.getScaleY();
         if (width <= 0f || height <= 0f) return false;
-        float pad = 48f;
+        // A finger's worth, not a hand's: this used to be 48px on every side, which grew the hit
+        // area to ~190px tall and swallowed the zoom ladder's last two stops.
+        float pad = 6f;
         return x >= at[0] - pad && x <= at[0] + width + pad
             && y >= at[1] - pad && y <= at[1] + height + pad;
     }
