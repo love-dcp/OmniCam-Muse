@@ -48,6 +48,75 @@ log() { echo "$1" >> "$LOG"; }
 log "selfheal start: $(date '+%Y-%m-%d %H:%M:%S') model=$(getprop ro.product.model)"
 log "moddir=$MODDIR"
 
+# A flash that unpacks a zip without unix modes leaves every script 0644, and after the next boot
+# KernelSU cannot exec post-fs-data.sh / service.sh at all. The directory swap preserved exactly
+# those modes on r147 (verified by snapshot), so fix them here too: this runs on every install and
+# on every manual repair.
+SCRIPTS_BEFORE=$(ls -l "$MODDIR"/*.sh 2>/dev/null | grep -c '^-rwx')
+chmod 0755 "$MODDIR"/*.sh 2>/dev/null
+SCRIPTS_AFTER=$(ls -l "$MODDIR"/*.sh 2>/dev/null | grep -c '^-rwx')
+NOSHEBANG=$(ls -l "$MODDIR"/*.sh 2>/dev/null | wc -l)
+log "script modes: $SCRIPTS_BEFORE/$NOSHEBANG executable before, $SCRIPTS_AFTER after chmod 0755"
+
+# ---------------------------------------------------------------------------
+# 0. UI-mirrored properties. MUST run before any stage: post-mount.sh reads
+#    aura.palettebt to choose the BasicTone backend library, and post-fs-data
+#    reads others while building the bind set.
+#
+#   The camera process cannot read the module's preferences (different uid and
+#   SELinux categories), so settings reach it as persist.omnicam.* properties.
+#   The ONLY writer is the settings page (PhotoSection.pushInspiration), and a
+#   full uninstall deletes every persist.omnicam.* property AND pm-uninstalls
+#   the app -- so after a reinstall neither side exists, nothing writes the
+#   property back, and composition silently runs on the on-device engine while
+#   the panel still looks normal. Seed the properties whose default is "on".
+#
+#   Only when absent: a deliberate "0" from the user survives a reinstall.
+# ---------------------------------------------------------------------------
+seed_prop() {
+    _k=$1
+    _v=$2
+    _cur=$(getprop "$_k" 2>/dev/null)
+    if [ -z "$_cur" ]; then
+        if setprop "$_k" "$_v" 2>/dev/null; then
+            log "  seeded $_k=$_v"
+        else
+            log "  could not seed $_k"
+        fi
+    else
+        log "  kept $_k=$_cur"
+    fi
+}
+log "--- mirrored properties ---"
+# Replay the backup the full uninstaller leaves behind before seeding defaults: those properties
+# were the user's actual settings, and they are the only copy that survives a pm-uninstall.
+# Only properties that are currently absent are written, so anything the user changed after the
+# reinstall wins over the backup.
+PROPS_BACKUP=/sdcard/OmniCam-Muse/omnicam-props.txt
+if [ -f "$PROPS_BACKUP" ]; then
+    _restored=0
+    _skipped=0
+    while IFS= read -r _line; do
+        _k=$(printf '%s\n' "$_line" | sed -n 's/^\[\([^]]*\)\]: \[\(.*\)\]$/\1/p')
+        _v=$(printf '%s\n' "$_line" | sed -n 's/^\[\([^]]*\)\]: \[\(.*\)\]$/\2/p')
+        [ -n "$_k" ] || continue
+        [ -n "$_v" ] || continue
+        if [ -z "$(getprop "$_k" 2>/dev/null)" ]; then
+            if setprop "$_k" "$_v" 2>/dev/null; then
+                _restored=$((_restored + 1))
+            else
+                log "  restore failed $_k"
+            fi
+        else
+            _skipped=$((_skipped + 1))
+        fi
+    done < "$PROPS_BACKUP"
+    log "  restored $_restored properties from $PROPS_BACKUP ($_skipped already set, left alone)"
+else
+    log "  no property backup at $PROPS_BACKUP (clean install or never uninstalled fully)"
+fi
+seed_prop persist.omnicam.comp.inspiration 1
+
 # ---------------------------------------------------------------------------
 # 1. Stop the camera. It holds the old configs, the old staged data and the old
 #    hook classes; leaving it running means the user sees the previous build
@@ -119,35 +188,6 @@ else
     log "mode_data.db already carries the feature rows"
 fi
 
-# ---------------------------------------------------------------------------
-# 4b. UI-mirrored properties.
-#
-#   The camera process cannot read the module's preferences (different uid and
-#   SELinux categories), so settings reach it as persist.omnicam.* properties.
-#   The ONLY writer is the settings page (PhotoSection.pushInspiration), and a
-#   full uninstall deletes every persist.omnicam.* property AND pm-uninstalls
-#   the app -- so after a reinstall neither side exists, nothing writes the
-#   property back, and composition silently runs on the on-device engine while
-#   the panel still looks normal. Seed the properties whose default is "on".
-#
-#   Only when absent: a deliberate "0" from the user survives a reinstall.
-# ---------------------------------------------------------------------------
-seed_prop() {
-    _k=$1
-    _v=$2
-    _cur=$(getprop "$_k" 2>/dev/null)
-    if [ -z "$_cur" ]; then
-        if setprop "$_k" "$_v" 2>/dev/null; then
-            log "  seeded $_k=$_v"
-        else
-            log "  could not seed $_k"
-        fi
-    else
-        log "  kept $_k=$_cur"
-    fi
-}
-log "--- mirrored properties ---"
-seed_prop persist.omnicam.comp.inspiration 1
 
 # ---------------------------------------------------------------------------
 # 5. Camera provider. It parses /odm/etc/camera/config/* once when it loads and

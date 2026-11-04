@@ -144,6 +144,17 @@ MODULE_SCRIPTS = {
     #                              (realfollow=0, aesthetic=1, compdump=1) survived the flash and
     #                              made the new build look broken, so a flash now puts them back
     #                              to shipped defaults. Nothing else in the file changed.
+    # r148: a flash could leave the module installed and inert. Three fixes, all verified by
+    # comparing an r146 snapshot with the tree after a full uninstall + reinstall:
+    #   * customize.sh 13 614 - chmod 0755 on every *.sh. KernelSU unpacks with the modes stored
+    #     in the zip, and a zip written without unix modes gives everything 0644, so
+    #     post-fs-data.sh / service.sh / action.sh were not executable after a reboot. The r147
+    #     tree was measured at 0644 across all 13 scripts (r146, installed by hand, was 0755).
+    #   * selfheal.sh 12 077 - the same chmod (covers the directory swap), plus replaying
+    #     /sdcard/OmniCam-Muse/omnicam-props.txt and seeding comp.inspiration. The mirrored
+    #     properties live only in the camera process's view of getprop, and a full uninstall
+    #     deletes all 74 of them together with the settings app, so nothing ever rebuilt them.
+    #   * uninstall_full.sh 26 621 - writes those 74 properties to that file before deleting them.
     "post-fs-data.sh": (29228, "e6a140df3b12c565e5d755922c3bd9b5"),
     "post-mount.sh": (13856, "6a24af1fbc6f660976ce8820465da041"),
     # r23: service.sh now clears the in-place update marker; uninstall.sh distinguishes
@@ -152,13 +163,13 @@ MODULE_SCRIPTS = {
     # installs the APK; apply-now.sh binds the native patches without a reboot.
     "service.sh": (15276, "b97af2b8915343d73dae03ce1713919b"),
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
-    "uninstall_full.sh": (25600, "6a05587a77cb5184603021c39e4cea08"),
+    "uninstall_full.sh": (26621, "1fad4868a0dac11b23d8c9c0bc9dc302"),
     "action.sh": (2741, "75ddeb3ab87ac843eea37eda70c7b73d"),
-    "customize.sh": (13104, "cbf435cb40b5c699faeae478df611161"),
+    "customize.sh": (13614, "283c64281623bb012fcb79b505ba9f58"),
     "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
     # r147: the flash-time self-heal (staged data + /odm binds + mode table). customize.sh
     # calls it directly, and mountify runs it through MODULE_HOT_RUN_SCRIPT after the swap.
-    "selfheal.sh": (8855, "c9eaa2d6a73f5cc137ff05f68a7c5e72"),
+    "selfheal.sh": (12077, "3bf43471fe9f3f52c489cafac951a618"),
     "x8u-fix-pop.sh": (9181, "2964db9cccf9d7197ece95eab99af699"),
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),
     "x8u-fix-vibrant.sh": (8919, "c1592457cb521e1016a13c68c51bf513"),

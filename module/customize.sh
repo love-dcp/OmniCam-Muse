@@ -1,3 +1,10 @@
+# KernelSU unpacks the module with whatever modes the zip carries, and a plain "zip -r" carries
+# none -- every file arrives 0644. post-fs-data.sh, service.sh and action.sh are then not
+# executable, so after a reboot the module reports itself installed and silently does nothing
+# (only the mountify overlay still applies). tools/zip_module.py now records 0755, and this is the
+# guaranteed fallback: customize.sh runs after extraction, before the menu manager's swap.
+chmod 0755 "$MODPATH"/*.sh 2>/dev/null
+
 # Settings app and hooks: install the APK this module ships while the module is flashed, so LSPosed
 # points at it before the reboot that activates the module. A failed install (e.g. a different
 # signing key) is left as it is and logged to install.log; the installed app is never uninstalled.

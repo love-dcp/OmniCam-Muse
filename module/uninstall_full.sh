@@ -371,9 +371,24 @@ remove_mountify_workspace() {
 # Deletes every persist.omnicam.* property. `resetprop` ships with KernelSU (and Magisk);
 # without it the properties cannot be removed cleanly, so report that instead of leaving an
 # empty value behind.
+#
+# Before deleting, the live values are written to /sdcard/OmniCam-Muse/omnicam-props.txt.
+# Those properties are the only place a setting lives once the camera process has to read it
+# (different uid, SELinux categories), and this script also pm-uninstalls the settings app, so
+# after a reinstall nothing can rebuild them: composition fell back to the on-device engine,
+# the gallery palette lost its backend and the natural-mode / soft-light switches came back off.
+# selfheal.sh replays this file on the next install (only for properties that are absent, so a
+# deliberate change made after the reinstall still wins). Delete the file to start clean.
+PROPS_BACKUP=/sdcard/OmniCam-Muse/omnicam-props.txt
 clean_props() {
     _keys=$(getprop 2>/dev/null | sed -n 's/^\[\(persist\.omnicam[^]]*\)\].*/\1/p')
     [ -n "$_keys" ] || return 0
+    if mkdir -p "${PROPS_BACKUP%/*}" 2>/dev/null; then
+        getprop 2>/dev/null | grep '^\[persist\.omnicam' > "$PROPS_BACKUP" 2>/dev/null \
+            && say "  已备份 $(wc -l < "$PROPS_BACKUP") 条属性到 $PROPS_BACKUP"
+    else
+        warn "无法写属性备份，重装后将回到默认值"
+    fi
     _resetprop=
     for _candidate in /data/adb/ksu/bin/resetprop /data/adb/magisk/resetprop; do
         [ -x "$_candidate" ] && { _resetprop=$_candidate; break; }
