@@ -65,7 +65,15 @@ final class CloudComposer {
     private CloudComposer() {}
 
     static boolean enabled() {
-        return "1".equals(prop("persist.omnicam.cloudcomp", "1"));
+        // Opt-in, and read live: the camera process cannot read the module's preferences (different
+        // uid and SELinux categories), so the settings switch mirrors into a property the way the
+        // natural-mode controls do. Empty means off -- inspiration composition uploads a frame, so
+        // it has to be asked for. persist.omnicam.cloudcomp stays as a per-run override for tests:
+        // anything but empty wins.
+        String forced = prop("persist.omnicam.cloudcomp", "");
+        if ("1".equals(forced)) return true;
+        if ("0".equals(forced)) return false;
+        return "1".equals(prop("persist.omnicam.comp.inspiration", "0"));
     }
 
     static String status() {

@@ -88,6 +88,18 @@ public final class ModuleSettings {
     public static final String AI_COMPOSITION = "ai_composition";
 
     /**
+     * Photo: 灵感构图 -- hand the frame to OPPO's vision-aesthetics model and let it suggest the
+     * crop, the same model the gallery's AI inspiration mode asks.
+     *
+     * <p>Off by default. Every request uploads a downscaled frame to OPPO's service and comes back
+     * in one to three seconds, which is a trade most people should opt into rather than meet by
+     * surprise; with the switch off the feature decides entirely on the device and nothing leaves
+     * the phone. {@link #AI_COMPOSITION} (the entry icon) is independent: the icon, the panel and
+     * the on-device framing all work with this off.
+     */
+    public static final String INSPIRATION_COMPOSITION = "inspiration_composition";
+
+    /**
      * Photo: set the camera's in-sensor-zoom request tag on still captures, so a 2x-3x still is
      * read from the cropped sensor instead of the whole sensor upscaled. The stock config row for
      * the photo opmode is already there; only the request tag is missing (the app never sets it).
@@ -197,6 +209,7 @@ public final class ModuleSettings {
             case VIDEO_FILTER_HIGH_SPEC:
             case POP_SDR_STYLE:
             case NATURAL_MODE:
+            case INSPIRATION_COMPOSITION:
             case DUMP_RAW:
             case DUMP_CCM:
             case DUMP_HDRT:

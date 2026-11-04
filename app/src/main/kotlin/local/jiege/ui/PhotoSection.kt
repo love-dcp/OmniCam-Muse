@@ -72,6 +72,36 @@ internal fun PhotoSection(store: SettingsStore, cardModifier: Modifier) {
             summary = "放宽照度、ISO、温度和运动限制。需在相机设置里选“超清优先”",
         )
     }
+    SmallTitle(text = "构图")
+    Card(modifier = cardModifier) {
+        SettingSwitch(
+            store = store,
+            key = ModuleSettings.AI_COMPOSITION,
+            title = "构图入口",
+            summary = "在取景框右侧显示构图图标，照片模式和大师模式可用。点它打开构图面板",
+        )
+        LaunchedEffect(Unit) { pushInspiration(store) }
+        SettingSwitch(
+            store = store,
+            key = ModuleSettings.INSPIRATION_COMPOSITION,
+            title = "灵感构图（云端模型）",
+            summary = "点构图图标时把画面交给 OPPO 的美学模型，1~3 秒返回建议框。需要联网和 com.oplus.deepthinker；关闭时全部在手机上判断，画面不上传",
+            quiet = true,
+            onChange = { pushInspiration(store) },
+        )
+    }
+}
+
+/**
+ * Mirrors the inspiration switch into the property the camera reads.
+ *
+ * The camera process cannot read the module's preferences (different uid and SELinux categories),
+ * which is why the natural-mode card does the same thing. Read live by CloudComposer.enabled(),
+ * so a flip applies to the next entry tap without restarting the camera.
+ */
+private fun pushInspiration(store: SettingsStore) {
+    val on = store.get(ModuleSettings.INSPIRATION_COMPOSITION)
+    rootCommand("setprop persist.omnicam.comp.inspiration ${if (on) 1 else 0}")
 }
 
 /** Mirrors the natural-mode switches and the soften percent into the properties the camera reads. */

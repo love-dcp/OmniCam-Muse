@@ -596,6 +596,14 @@ public final class RealsceneProbe {
                             // this module answered nothing ("照片模式构图3次后再点几次都不能构图").
                             // A touch on the entry is the user's request; it does not need a view
                             // tree to confirm it.
+                            //
+                            // The entry is also the "let the model frame this" gesture, so a pin or
+                            // a local-only session left over from a viewfinder tap is lifted here.
+                            // Doing it in the activity hook instead never runs: this DOWN has just
+                            // set entryDownAt, and that hook returns early on that flag -- which is
+                            // why the cloud was never asked again once a subject had been picked
+                            // ("现在好像都是本地构图，没有触发云端构图").
+                            returnToModel();
                             reopenComposition();
                         }
                         return;
@@ -1040,6 +1048,12 @@ public final class RealsceneProbe {
                             // is either absent or borrowed by another feature, and reopening here
                             // is what put a composition panel on a video or portrait screen.
                             if (!photoMode()) return;
+                            // The entry is the "let the model frame this" gesture. A viewfinder tap
+                            // earlier in the session had pinned a subject and switched the channel
+                            // to the device for two minutes; without lifting that here, every
+                            // later entry tap was answered on the device too and the model was
+                            // never asked -- the report "现在好像都是本地构图，没有触发云端构图".
+                            returnToModel();
                             reopenComposition();
                             return;
                         }
@@ -1048,6 +1062,7 @@ public final class RealsceneProbe {
                         // the viewfinder -- which pinned the subject to the point under the icon.
                         if (CompositionIconShift.isEntry(hitTest(decor, rawX, rawY, 0))) {
                             if (!photoMode()) return;
+                            returnToModel();
                             reopenComposition();
                             return;
                         }
@@ -2718,6 +2733,23 @@ public final class RealsceneProbe {
         cloudAt = 0;
         SubjectLocator.dropHeld();
         Log.i(TAG, "local-only released: back to the model");
+    }
+
+    /**
+     * A tap on the composition entry icon: the framing is the model's business again.
+     *
+     * <p>The pinned subject goes with it. A pin means "frame this exact thing", the model answers
+     * "what is worth framing here", and they cannot both drive the same session -- keeping the pin
+     * would also keep {@code maybeAskCloud} out (it never asks while a subject is locked), so the
+     * entry would look like it did nothing.
+     */
+    static void returnToModel() {
+        SubjectLocator.clearPin();
+        SubjectLocator.dropHeld();
+        cloudGiven = null;
+        cloudAnswered = null;
+        cloudAt = 0;
+        releaseLocal();
     }
 
     /**

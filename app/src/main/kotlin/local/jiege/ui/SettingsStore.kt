@@ -26,6 +26,15 @@ class SettingsStore(context: Context) {
 
     fun getInt(key: String): Int = preferences.getInt(key, ModuleSettings.defaultInt(key))
 
+    /**
+     * Saved without stopping the camera. For switches whose effect the hooks read live (they are
+     * mirrored into a property as well), so flipping one does not have to end a running session.
+     */
+    fun setQuiet(key: String, value: Boolean) {
+        if (get(key) == value) return
+        preferences.edit().putBoolean(key, value).apply()
+    }
+
     fun setInt(key: String, value: Int) {
         if (getInt(key) == value) return
         preferences.edit().putInt(key, value).apply()
