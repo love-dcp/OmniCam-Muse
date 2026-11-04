@@ -696,7 +696,12 @@ public final class RealsceneProbe {
         long now = android.os.SystemClock.uptimeMillis();
         // It also probes once while the preview is still warming up, before any finger could have
         // reached the entry button; answering that puts a box on a camera the user just opened.
-        if (now - startedAt < STARTUP_GRACE) return false;
+        //
+        // A press on the entry is that finger, so it overrides the grace: the user who opens the
+        // camera and taps composition straight away gets a composition, not silence for the first
+        // eight seconds ("刚打开相机点构图没反应"). The override is short-lived so a stray press
+        // during start-up cannot arm the session the grace exists to keep quiet.
+        if (now - startedAt < STARTUP_GRACE && now - askedAt > ASK_OVERRIDE) return false;
         long at = sessionAt;
         if (at == 0) return false;
         // Idle time, not session age: the pipeline asks every couple of seconds while the panel is
@@ -768,6 +773,9 @@ public final class RealsceneProbe {
         boolean lifted = blockReopen;
         blockReopen = false;
         sessionAt = android.os.SystemClock.uptimeMillis();
+        // Only a gesture gets here, so this is the moment the user asked. {@link #armed()} reads it
+        // to let the request through the start-up grace.
+        askedAt = sessionAt;
         sessionPasses = 0;
         local.jiege.hook.mastercolor.MasterColor.compositionStart();
         if (lifted) {
@@ -776,6 +784,10 @@ public final class RealsceneProbe {
     }
 
     private static final long STARTUP_GRACE = 8000L;
+    /** How long a press on the entry counts as "the user asked", overriding {@link #STARTUP_GRACE}. */
+    private static final long ASK_OVERRIDE = 3000L;
+    /** When the user last asked for a composition by hand. */
+    private static volatile long askedAt;
 
     private static boolean stillWarm() {
         long at = armedAt;
@@ -1719,8 +1731,22 @@ public final class RealsceneProbe {
         long now = android.os.SystemClock.uptimeMillis();
         if (now - refreshedAt < 2500L) return;
         refreshedAt = now;
-        clearCloudSession();
-        cloudAt = 0;
+        // A reply the model produced moments ago belongs to the framing being opened, not to the one
+        // that is ending: the reply itself is what kicks the stream open again (so it can travel
+        // through the camera's own callback), and wiping it here is what made every request fall
+        // back to the on-device answer -- "还是侧端构图". Anything older really is a leftover from a
+        // different scene, and goes.
+        if (cloudGiven != null && now - cloudGivenAt < CLOUD_KEEP) {
+            Log.i(TAG, "framing refreshed: keeping the model answer that just arrived");
+        } else {
+            cloudGiven = null;
+        }
+        cloudPending = null;
+        cloudAnswered = null;
+        // cloudAt is deliberately left alone: it says when the current request went out, and the
+        // pass gate uses it to keep the preview still until the reply lands. Clearing it here made
+        // the very next pass fall straight through to the detector, which is the "two compositions"
+        // report. CLOUD_GAP still spaces requests apart.
         SubjectLocator.dropHeld();
         frozenAnswer = null;
         frozenFor = -1L;
@@ -2455,6 +2481,19 @@ public final class RealsceneProbe {
                 // the demo answer when the detector has nothing to say either.
                 boolean deviceOnly = localNow();
                 String json = deviceOnly ? null : cloudGiven;
+                // The model decides this one: do not put a detector crop on screen and then replace
+                // it. Answering twice is what the user sees as the camera composing twice
+                // ("第一次侧端，第二次云端").
+                //
+                // Answered anyway, with a crop that changes nothing. Leaving the pass unanswered is
+                // not neutral: the worker reads "started: false, cropHandled: false" as a failed
+                // stream, reports onInvalidZoomResult, and Composition_reset tears the panel down --
+                // and a reset panel asks for no further frames, so the model's reply a second later
+                // has nowhere to land. That is exactly the report "第一下点了没反应，要点屏幕再点
+                // 构图才能构图".
+                if (json == null && awaitingModelAnswer()) {
+                    json = cloudGiven;
+                }
                 // One recommendation per session, not one per frame.
                 //
                 // The camera runs a native "align to the target point" guide once the state machine
@@ -2564,6 +2603,12 @@ public final class RealsceneProbe {
                     param.setResult(Boolean.TRUE);
                     return;
                 }
+                if (awaitingModelAnswer() && cloudGiven != null) {
+                    push(callback, cloudGiven);
+                    answered = callback;
+                    param.setResult(Boolean.TRUE);
+                    return;
+                }
                 String json = param.args[0] instanceof HardwareBuffer
                     ? SubjectLocator.follow((HardwareBuffer) param.args[0]) : null;
                 if (json == null) {
@@ -2664,11 +2709,112 @@ public final class RealsceneProbe {
      */
     private static final long CLOUD_GAP = 3000L;
 
+    /**
+     * How long a model answer counts as "just arrived" and survives the framing refresh that its own
+     * reply triggers. The round trip is 1-3 s and the reopen happens right after it, so a few seconds
+     * is all that is needed; longer would keep showing one scene's framing on the next one.
+     */
+    /**
+     * How long a model answer counts as "just arrived" and survives the framing refresh that its own
+     * reply triggers. The round trip is 1-3 s and the reopen happens right after it, so a few seconds
+     * is all that is needed; longer would keep showing one scene's framing on the next one.
+     */
+    private static final long CLOUD_KEEP = 10000L;
+
+    /**
+     * How long a pass is held open for the model. Below {@code CloudComposer.TIMEOUT} (8 s) on
+     * purpose: after this a slow or offline model stops costing the feature, and the on-device
+     * framing appears.
+     */
+    /**
+     * Longest single pass that waits for the model. Measured on this device: the cloud answers in
+     * 1300-1800 ms, so 2200 ms covers the normal case and still fails fast enough that a dead
+     * network does not read as a frozen panel.
+     */
+    private static final long CLOUD_BLOCK = 2200L;
+
+    /** One line per request, so a held-back pass does not flood the log. */
+    private static final java.util.concurrent.atomic.AtomicBoolean waitLogged =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * Hold this pass until the model answers, then let the caller push that answer.
+     *
+     * <p>Why not answer with something in the meantime: the camera closes a composition session
+     * the moment it gets one usable answer -- it applies the crop, runs the state machine to
+     * ZOOM_TRIGGERED and drops to IDLE. Whatever we answer with first therefore IS the composition
+     * the user sees, and everything after it needs a new session. That is why both earlier
+     * approaches were reported the same way:
+     *
+     * <ul>
+     *   <li>answering with the detector while the model thought -> the box appears, then the model
+     *       answer reopens the session -> "构图两次，第一次侧端，第二次云端";</li>
+     *   <li>answering with a placeholder crop -> the camera takes it as the recommendation, pops a
+     *       rect and zooms to it -> "第一次先出来一次构图框";</li>
+     *   <li>answering with an empty crop list -> rejected as {@code invalid zoom result}, and it
+     *       carries no text either, so the panel just looks dead -> "点构图没反应".</li>
+     * </ul>
+     *
+     * <p>So the pass is not answered at all until the model replies. This runs on the composition
+     * worker thread ({@code wb.m.run}), not the UI thread: waiting here holds this one pass and
+     * leaves the camera responsive. Bounded by {@link #CLOUD_BLOCK}.
+     */
+    private static boolean awaitingModelAnswer() {
+        if (localNow()) return false;
+        if (!CloudComposer.enabled()) return false;
+        // A locked subject is the user taking over: the device answers that one immediately.
+        if (SubjectLocator.pinned() != null) return false;
+        long at = cloudAt;
+        if (at == 0) return false;
+        long budget = CLOUD_BLOCK;
+        try {
+            budget = Long.parseLong(prop("persist.omnicam.comp.block", String.valueOf(CLOUD_BLOCK)));
+        } catch (Throwable ignored) {
+            // keep the default
+        }
+        long deadline = at + budget;
+        boolean announced = false;
+        holdingPass = true;
+        try {
+            while (true) {
+                if (cloudGiven != null) return true;
+                if (SubjectLocator.pinned() != null) return false;
+                long now = android.os.SystemClock.uptimeMillis();
+                if (now >= deadline) {
+                    if (waitLogged.compareAndSet(false, true)) {
+                        Log.i(TAG, "model did not answer in time, the device takes this pass");
+                    }
+                    return false;
+                }
+                if (!announced) {
+                    announced = true;
+                    Log.i(TAG, "holding this pass for the model (" + (deadline - now) + "ms left)");
+                }
+                try {
+                    Thread.sleep(25);
+                } catch (InterruptedException stopped) {
+                    Thread.currentThread().interrupt();
+                    return cloudGiven != null;
+                }
+            }
+        } finally {
+            holdingPass = false;
+        }
+    }
+
+    /**
+     * True while a composition pass is inside {@link #awaitingModelAnswer()}. The model callback
+     * reads it to decide whether the answer has a live pass to land on.
+     */
+    private static volatile boolean holdingPass;
+
     private static volatile Object cloudAnswered;
     private static volatile long cloudAt;
     private static volatile String cloudPending;
     /** The model answer currently on screen, held steady so it is not overwritten frame by frame. */
     private static volatile String cloudGiven;
+    /** When {@link #cloudGiven} arrived, so a fresh reply survives the reopen it triggers itself. */
+    private static volatile long cloudGivenAt;
     /** The worker's live answer channel, kept here so the model reply has somewhere to land. */
     private static volatile Object rideCallback;
     /**
@@ -2747,6 +2893,7 @@ public final class RealsceneProbe {
         SubjectLocator.clearPin();
         SubjectLocator.dropHeld();
         cloudGiven = null;
+        cloudGivenAt = 0;
         cloudAnswered = null;
         cloudAt = 0;
         releaseLocal();
@@ -2790,6 +2937,7 @@ public final class RealsceneProbe {
      */
     private static void clearCloudSession() {
         cloudGiven = null;
+        cloudGivenAt = 0;
         cloudPending = null;
         cloudAnswered = null;
     }
@@ -2806,22 +2954,47 @@ public final class RealsceneProbe {
         if (cloudAt != 0 && now - cloudAt < CLOUD_GAP) return;
         cloudAt = now;
         cloudAnswered = callback;
+        waitLogged.set(false);
         android.graphics.Bitmap frame = SubjectLocator.snapshot((HardwareBuffer) buffer);
         if (frame == null) return;
         Log.i(TAG, "asking the vision model");
         try {
             CloudComposer.submit(frame, (json, summary) -> {
                 Log.i(TAG, "model answer: " + summary);
-                if (json == null) return;
-                cloudPending = json;
+                if (json == null) {
+                    // The model is out of the picture: offline, timed out, or it had nothing to say.
+                    // Nothing describing this scene is on screen -- the placeholder is a full-frame
+                    // crop that draws no box -- and the camera stopped asking for frames once that
+                    // placeholder came back, so nothing would ever fill the gap. Ask for one more
+                    // frame; it goes to the detector because the wait window has expired.
+                    // Without this the panel sat still until the user tapped again, which reads as
+                    // "构图没反应".
+                    reopenComposition();
+                    kick();
+                    return;
+                }
+                // Publish the answer and stamp it. The stamp is what lets it survive the reopen
+                // below: opening the stream calls refreshFraming(), which drops "the previous
+                // scene's answer" -- and the reply that just landed was being counted as exactly
+                // that, so every request ended up replaced by the on-device answer.
+                cloudGiven = json;
+                cloudGivenAt = android.os.SystemClock.uptimeMillis();
+                cloudPending = null;
+                if (holdingPass) {
+                    // A pass is sitting inside awaitingModelAnswer() right now. It will push this
+                    // answer itself the moment it sees cloudGiven, so reopening the composition
+                    // here would tear that pass down and start a second one -- which is the very
+                    // "构图两次" this wait exists to avoid.
+                    Log.i(TAG, "answer landed on the waiting pass, no reopen needed");
+                    return;
+                }
                 if (rideMode()) {
                     // The answer has to arrive on the camera's own callback, at the moment the camera
                     // asks for it. Pushing it into wb.p directly lands on a callback the worker has
                     // already closed, which is why the panel kept saying "no suggestion". Publishing
                     // the framing and asking for one more composition frame lets the camera deliver
                     // it through its normal path, where rideAnswer swaps the stock crop for this one.
-                    cloudGiven = json;
-                    cloudPending = null;
+                    //
                     // The answer belongs to the request that asked for it, and by the time a model
                     // reply lands the burst that started it may already have hit its cap. Open a
                     // fresh session for it, otherwise the answer would arrive with nobody to take
