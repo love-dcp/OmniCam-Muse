@@ -459,6 +459,7 @@ public final class RealsceneProbe {
         // to video and back used to "fix" a session that had stopped answering: the switch reset
         // state the module kept for itself, not anything the camera needed.
         resetForMode();
+        CompositionIconShift.applyModeVisibility();
         Log.i(TAG, "mode -> " + name
             + (compositionMode() ? " (composition on)" : " (composition off)"));
     }
@@ -471,6 +472,7 @@ public final class RealsceneProbe {
         lastPassAt = 0;
         armedAt = 0;
         entryDownAt = 0;
+        userTouchAt = 0;
         directDone = false;
         rectSince = 0;
         panelPrimed = false;
@@ -572,7 +574,15 @@ public final class RealsceneProbe {
                         // Modes whose entry is disabled keep the flag clear, otherwise this shortcut
                         // would reopen composition in exactly the modes the guard exists to protect.
                         if (!compositionBlocked("entry")) {
-                            entryDownAt = android.os.SystemClock.uptimeMillis();
+                            long at = android.os.SystemClock.uptimeMillis();
+                            // A finger just went down inside the camera window, or this touch was
+                            // dispatched to the button behind the user's back (start-up). Only the
+                            // former may start a composition.
+                            if (at - userTouchAt > 600L) {
+                                entryDownAt = 0;
+                                return;
+                            }
+                            entryDownAt = at;
                             // Arm here as well, on the button's own DOWN. The panel probe is the
                             // other place that arms, but it arms on a closed->open edge, and after a
                             // failed run the preview view can stay VISIBLE: the edge never arrives
@@ -596,6 +606,16 @@ public final class RealsceneProbe {
 
     /** When the composition entry last went down; the activity hook reads it to skip the pin. */
     private static volatile long entryDownAt;
+
+    /**
+     * Last finger-down anywhere in the camera window.
+     *
+     * <p>Needed because the camera dispatches touches to the entry button by itself while it is
+     * starting up -- those never pass through {@code Activity.dispatchTouchEvent}, so "a touch on
+     * the entry" alone is not proof that the user asked for anything. Arming on those opened a
+     * composition over the viewfinder on a camera that had just been launched.
+     */
+    private static volatile long userTouchAt;
 
     /** vb.c3 keeps itself reachable for the re-arm loop below. */
     private static volatile Object cameraHost;
@@ -789,7 +809,12 @@ public final class RealsceneProbe {
             armedAt = now;
             // A panel that has just appeared is the user opening composition. It also lifts the cap
             // a previous session set, so the second tap of the session works too.
-            if (now - lastPanelOpen > 1200L) {
+            //
+            // Only when a finger went down just before it appeared. The preview view is part of the
+            // camera's own tree and can be reported visible while the camera is still starting up,
+            // and arming on that edge drew a composition over the viewfinder of a camera nobody had
+            // asked anything of.
+            if (now - lastPanelOpen > 1200L && now - userTouchAt < 3000L) {
                 lastPanelOpen = now;
                 reopenComposition();
             }
@@ -969,6 +994,7 @@ public final class RealsceneProbe {
                             downX = rawX;
                             downY = rawY;
                             downAt = android.os.SystemClock.uptimeMillis();
+                            userTouchAt = downAt;
                             dumpTreeOnce((android.app.Activity) param.thisObject);
                             return;
                         }

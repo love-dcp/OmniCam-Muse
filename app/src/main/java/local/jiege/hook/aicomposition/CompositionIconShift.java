@@ -45,6 +45,42 @@ final class CompositionIconShift {
      */
     private static volatile View entry;
 
+    /** True while this module is the one keeping the icon hidden, so only that is undone again. */
+    private static volatile boolean hiddenByUs;
+    private static final java.util.concurrent.atomic.AtomicBoolean hideLogged =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Composition belongs to the stills mode; {@code persist.omnicam.compiconall=1} shows it everywhere. */
+    private static boolean allowed() {
+        if ("1".equals(prop("persist.omnicam.compiconall", "0"))) return true;
+        return RealsceneProbe.currentModeSupportsComposition();
+    }
+
+    /**
+     * Show or hide the entry icon for the mode the camera just switched into.
+     *
+     * <p>Only the hide direction is remembered: when the icon comes back to 照片 it is restored
+     * exclusively if this module was the one that hid it, so the camera keeps control of its own
+     * icon state everywhere else.
+     */
+    static void applyModeVisibility() {
+        View view = entry;
+        if (view == null) return;
+        try {
+            if (!allowed()) {
+                hiddenByUs = true;
+                view.setVisibility(View.GONE);
+                return;
+            }
+            if (hiddenByUs) {
+                hiddenByUs = false;
+                view.setVisibility(View.VISIBLE);
+            }
+        } catch (Throwable error) {
+            Log.i(TAG, "entry icon visibility failed: " + error);
+        }
+    }
+
     private CompositionIconShift() {}
 
     static void install(ClassLoader classLoader) {
@@ -71,7 +107,27 @@ final class CompositionIconShift {
                 view.post(() -> {
                     entry = view;
                     apply(view);
+                    applyModeVisibility();
                 });
+            }
+        });
+        // The camera shows this icon on its own schedule, and it does so in every mode that has
+        // the composition module loaded -- which is all of them, because the feature list is built
+        // once per process. Composition itself is a stills feature, so the icon is dropped while
+        // the camera is anywhere else (视频 / 人像 / POP / 哈苏超清 / 大师 ...). Done at the drawing
+        // layer rather than at the feature gates: gating those once took composition away from 照片.
+        XposedBridge.hookAllMethods(View.class, "setVisibility", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                View view = entry;
+                if (view == null || param.thisObject != view) return;
+                if (param.args.length != 1 || !(param.args[0] instanceof Integer)) return;
+                if ((Integer) param.args[0] != View.VISIBLE) return;
+                if (allowed()) return;
+                param.args[0] = View.GONE;
+                hiddenByUs = true;
+                if (hideLogged.compareAndSet(false, true)) {
+                    Log.i(TAG, "entry icon hidden in " + RealsceneProbe.currentMode() + " mode");
+                }
             }
         });
         Log.i(TAG, "entry icon shift installed");
