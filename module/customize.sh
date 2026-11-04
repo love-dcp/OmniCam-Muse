@@ -18,13 +18,27 @@ APK="$MODPATH/omnicam-muse-$VER.apk"
 STAGED=/data/local/tmp/omnicam-muse-module.apk
 HAVE=$(dumpsys package "$PACKAGE" 2>/dev/null | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -n 1)
 WANT=$(sed -n 's/^versionCode=//p' "$MODPATH/module.prop")
-if [ -n "$APK" ] && cp "$APK" "$STAGED" && chmod 0644 "$STAGED"; then
+# Reinstalling an identical APK changes its /data/app/<hash> path, and LSPosed remembers the old
+# one; it keeps pointing at the deleted open after a reinstall and then loads no module at all
+# (measured 2026-11-04: no hooks, POP crashed, 灵感构图 and 哈苏超清 gone). So if the installed
+# APK is byte-identical, leave it alone - the path, and with it the LSPosed record, stays valid.
+INSTALLED_APK=$(pm path "$PACKAGE" 2>/dev/null | sed -n 's/^package://p' | head -n 1)
+SAME=0
+if [ -n "$APK" ] && [ -n "$INSTALLED_APK" ] && [ -f "$INSTALLED_APK" ]; then
+    if [ "$(md5sum "$APK" 2>/dev/null | cut -d' ' -f1)" = \
+         "$(md5sum "$INSTALLED_APK" 2>/dev/null | cut -d' ' -f1)" ]; then
+        SAME=1
+    fi
+fi
+if [ "$SAME" = "1" ]; then
+    RESULT="identical build already installed, left in place (keeps the LSPosed record valid)"
+elif [ -n "$APK" ] && cp "$APK" "$STAGED" && chmod 0644 "$STAGED"; then
     RESULT=$(pm install -r -d "$STAGED" 2>&1)
     rm -f "$STAGED"
 else
     RESULT="APK missing or not staged"
 fi
-printf 'installed %s -> %s: %s\n' "${HAVE:-none}" "$WANT" "$RESULT" > "$MODPATH/install.log"
+printf 'installed %s -> module %s: %s\n' "${HAVE:-none}" "$WANT" "$RESULT" > "$MODPATH/install.log"
 ui_print "- Settings app: $RESULT"
 # The staged data and the binds above are what a reinstall used to need help with; they are now
 # done in the flash, so there is nothing to run afterwards. The one thing this cannot do for
