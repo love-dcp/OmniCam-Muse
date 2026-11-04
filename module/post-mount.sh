@@ -38,6 +38,19 @@ LOG=$MODDIR/mount.log
 : > "$LOG"
 log() { echo "$1" >> "$LOG"; }
 
+# Where the two X9U BasicTone backends ended up.
+#
+# Plain KernelSU leaves them at system/odm/lib64/, where metamount merges the module's system/
+# tree into /odm. mountify (the metamodule installed on this device) does not merge system/ at
+# all: its metainstall.sh runs `mountify_handle_partition odm`, which moves system/odm/* up to
+# <module>/odm/* and mounts that as a partition. Reading only the first path silently skipped
+# these two libraries after a reinstall through mountify, so resolve it once, here.
+ODM_LIB=""
+for D in "$MODDIR/system/odm/lib64" "$MODDIR/odm/lib64"; do
+    if [ -d "$D" ]; then ODM_LIB=$D; log "odm lib dir: $D"; break; fi
+done
+[ -n "$ODM_LIB" ] || ODM_LIB="$MODDIR/system/odm/lib64"
+
 getprop_safe() {
     getprop "$1" 2>/dev/null
 }
@@ -98,8 +111,8 @@ log "begin profile=$PROFILE"
 
 if [ "$PROFILE" = PMA110 ]; then
     # X9/X10 first: metamount.sh created both paths from system/odm/lib64/ a moment ago.
-    bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX9.so"  libBasicTonePhotoX9.so
-    bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhotoX10.so
+    bind_library "$ODM_LIB/libBasicTonePhotoX9.so"  libBasicTonePhotoX9.so
+    bind_library "$ODM_LIB/libBasicTonePhotoX10.so" libBasicTonePhotoX10.so
     # These three replace stock files that already exist on X9U, so each bind has a target.
     bind_library "$MODDIR/payload/lib64/libBasicTonePhoto.so" libBasicTonePhoto.so
     bind_library "$MODDIR/payload/lib64/libAlgoInterface.so"  libAlgoInterface.so
@@ -171,11 +184,11 @@ else
     #   The stock branch below detaches that bind because X10 also breaks master-colour captures.
     # Set persist.omnicam.aura.palettebt=1 to choose the palette backend; unset/0 keeps master colour.
     if [ "$(getprop_safe persist.omnicam.aura.palettebt)" = "1" ] \
-        && [ -f "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" ]; then
+        && [ -f "$ODM_LIB/libBasicTonePhotoX10.so" ]; then
         if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then
             umount /odm/lib64/libBasicTonePhoto.so 2>>"$LOG" || true
         fi
-        bind_library "$MODDIR/system/odm/lib64/libBasicTonePhotoX10.so" libBasicTonePhoto.so
+        bind_library "$ODM_LIB/libBasicTonePhotoX10.so" libBasicTonePhoto.so
         log "PKJ110: palette backend X10 bound (palette capture ON, master-colour capture trade-off)"
     else
         if grep -q " /odm/lib64/libBasicTonePhoto.so " /proc/self/mounts 2>/dev/null; then

@@ -18,6 +18,40 @@ Find X9 Ultra（PMA110，骁龙，KernelSU + LSPosed）上的设备操作与排�
 - 原厂库：想读被模块遮住的 `/odm` 原文件，用 `mount -o bind /odm <临时目录>`（非递归 bind，看不到上面那层文件级挂载），读完 `umount`。`nsenter -t 1 -m`、`unshare` 被拒，`mount -t erofs` 失败。
 - 别在手机上乱按唤醒键加启动相机（曾误触系统语音助手）。日志和截图里有用户的通知、聊天内容，不要引用也不要放进仓库。
 
+## 安装即生效（本机不能硬重启，r147 起）
+
+本机 root 来自 CVE 漏洞，硬重启就掉，所以「装完重启一下」这条路不存在。KernelSU 装模块的标准流程恰好依赖重启：解包到 `/data/adb/modules_update/<id>`、写 `update` 标志，开机时才替换进 `/data/adb/modules/<id>` 并跑 `post-fs-data.sh` / `service.sh`。不重启 = 装了等于没装。
+
+r147 把这条链在安装时自己走完，分三件事：
+
+1. **交换目录**（`customize.sh` → `/data/local/tmp/omnicam_finish.sh`，`setsid` 后台）
+   脚本不能搬自己（正在被 `sh` 逐行读），所以写到 tmp 再后台跑。**先 `umount -l` 掉模块自己的 8 条 bind**——否则 `rm -rf` 会卡在 `Device or resource busy`（`caflogicaldriver.so` 被厂商进程打开），目录删不干净，后面的 `mv` 会把新树**嵌套**进旧目录（`/data/adb/modules/<id>/<id>/`），这个坑实际踩过。`rm -rf` 后仍非空就 `mv` 到 `<id>.old.$$` 再删，最后 `mv modules_update -> modules` 并删 `update` 标志。
+2. **自愈**（`selfheal.sh`）：按开机真实顺序跑 `post-fs-data.sh` → `post-mount.sh` → `service.sh`，再删 `mode_data.db`、重启 camera provider。见下条。
+3. **模式表**：见「模式面板是库优先的」——重装后 `理光 GR / 移轴 / POP` 消失就是这张表在 prefs 还没写时被相机重建了。
+
+`selfheal.sh` 也挂在 `MODULE_HOT_RUN_SCRIPT` 上（mountify 会在它自己的目录交换**之后**执行该变量指定的脚本），并且 `action.sh` 第一下就是跑它（3 分钟内再点一次才是完全卸载）。三条路都幂等。
+
+**判断装完到底有没有生效**，看 `/data/adb/modules/<id>/selfheal.log`，末尾必须是 8 条 `ok`：
+
+```
+ok /odm/etc/camera/meishe_lut ... ok /odm/etc/camera/config/camera_unit_feature_config.protobuf
+ok /vendor/lib64/camera/components/com.qti.stats.caflogicaldriver.so
+pop_port=90  jiege=408  ricoh_gr=77  merged=470   /   9 keys staged
+```
+
+有一行 `MISSING` 就是没修好，别急着测功能。
+
+## 安装后必查的几项（重装会丢）
+
+| 项 | 谁重建 | 丢了的现象 |
+|---|---|---|
+| 9 个 prefs 开关（`override_config_data.xml`） | `service.sh` | 理光 GR / POP / 移轴 / 60fps 全没有 |
+| `databases/mode_data.db` 的 `retroCamera` / `tiltShift` 行 | 删表让相机重建 | 模式栏少 GR / 移轴，且**不会自己回来** |
+| `/odm/etc/camera/config/*` 三条 bind | `post-fs-data.sh` | POP 决策、25MP、retro 分支全失效 |
+| `files/{jiege,pop_port,ricoh_gr,mode_limit_watermark}` | `service.sh` | 大师色彩 / GR / POP 滤镜空 |
+| `/data/adb/omnicam_muse/merged`（470 文件） | `post-fs-data.sh` | 大师滤镜组、色彩卡、Retro ini 空 |
+| `system/odm` 或 `odm/` 下的 X9/X10 库 | `post-mount.sh` | `palettebt=1` 时参考不到；路径两处都要认（mountify 会把 `system/odm` 搬到 `odm/`）|
+
 ## 日志与崩溃现场
 
 - 相机调试日志：`setprop oplus.autotest.camera.debug.forcelog true`（必须字符串 `true`，重启后失效）再 `am force-stop com.oplus.camera`；日志在 `/data/vendor/cam_alog/`（root 读）。库的日志只输出 ERROR 级，所以 INFO 级的算法内部日志看不到，只能间接判断。

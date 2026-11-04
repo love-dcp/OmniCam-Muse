@@ -136,17 +136,23 @@ set_config com.oplus.flashlevel.configurable.support 1
 set_config com.oplus.feature.tilt.shift.photo.support 1
 # Tilt-shift: mode_data.db is built once from the feature flags. If it has no tiltShift row yet, drop it once
 # (the marker keeps this to a single time) so the camera recreates it with the tilt-shift flag on.
+#
+# The marker must NOT be written when the rebuild is skipped. It used to be touched unconditionally,
+# so a staging run with STAGE_ONLY=1 ("left for the next boot") still marked the reset as done and
+# the tilt-shift row then never came back - there is no second chance once the camera has written
+# the table without it. selfheal.sh drops the table itself after the keys are staged, which is the
+# path a flash uses; this block only matters for a real boot.
 TILT_MARK="$MODDIR/tilt_db_reset"
 TILT_DB="$APP/databases/mode_data.db"
-if [ ! -f "$TILT_MARK" ] && [ -f "$TILT_DB" ] && ! grep -aq tiltShift "$TILT_DB"; then
+if [ -f "$TILT_DB" ] && { ! grep -aq tiltShift "$TILT_DB" || ! grep -aq retroCamera "$TILT_DB"; }; then
     if [ "$STAGE_ONLY" = "1" ]; then
-        printf 'staging: tilt-shift db needs a rebuild, left for the next boot\n'
+        printf 'staging: mode table is missing feature rows, left for selfheal\n'
     else
         am force-stop com.oplus.camera
         rm -f "$TILT_DB" "$TILT_DB-journal" "$TILT_DB-wal" "$TILT_DB-shm"
+        touch "$TILT_MARK"
     fi
 fi
-touch "$TILT_MARK"
 chown "$APP_UID:$APP_UID" "$PREF_FILE"
 chmod 0660 "$PREF_FILE"
 restorecon "$PREF_FILE" 2>/dev/null || true
@@ -225,9 +231,18 @@ find "$FACE_DIR" -type f -exec chmod 0644 {} \;
 restorecon -R "$FACE_DIR" 2>/dev/null || true
 
 GALLERY=/data/user/0/com.coloros.gallery3d
-until [ -d "$GALLERY" ]; do
+# Bounded wait. During boot this directory is always there by late_start, but selfheal.sh runs
+# the same script right after a flash — and a `until` with no exit condition there would hang the
+# whole staging step on a device that has the gallery uninstalled or its data not yet decrypted.
+GALLERY_WAIT=120
+[ "$STAGE_ONLY" = "1" ] && GALLERY_WAIT=10
+while [ ! -d "$GALLERY" ] && [ "$GALLERY_WAIT" -gt 0 ]; do
     sleep 1
+    GALLERY_WAIT=$((GALLERY_WAIT - 1))
 done
+if [ ! -d "$GALLERY" ]; then
+    printf 'staging: %s is not there, gallery keys skipped\n' "$GALLERY"
+fi
 GALLERY_UID=$(stat -c %u "$GALLERY")
 GALLERY_PREF="$GALLERY/shared_prefs/business_featureSwitch_config.xml"
 WAIT_LIMIT=120

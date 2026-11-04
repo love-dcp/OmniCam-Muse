@@ -37,18 +37,20 @@ if [ -d /data/adb/modules/ricoh_pop_x9u ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Make the flash self-sufficient.
+# Make the flash self-sufficient: one script, one call.
 #
-# Uninstalling this module deletes the data it stages into the camera and the gallery
-# (files/jiege, ricoh_gr, pop_port, mode_limit_watermark, jiege_ipu, ricoh_gr_styles, plus
-# nine feature keys in override_config_data.xml) and only service.sh rebuilds it — at boot,
-# which never happens on this phone. That is why a reinstall used to come back half dead
-# until the staging was run by hand. Run it here instead, with service.sh told to skip the
-# boot-only waits.
+# Uninstalling this module removes everything it persists outside its own directory - staged
+# camera data (files/{jiege,pop_port,ricoh_gr,mode_limit_watermark,odm/...}), staged gallery data
+# (files/{ricoh_gr_styles,jiege_ipu}, the business_featureSwitch key), nine feature keys in
+# override_config_data.xml, the mode table, and every /odm bind. Only post-fs-data.sh and
+# service.sh rebuild that, and they run at BOOT - which never happens here (temporary root, so the
+# phone is never rebooted). Reinstalling used to come back half dead until the stages were run by
+# hand.
 #
-# The /odm config binds are rebuilt for the same reason: their source lives inside the module
-# directory, which the manager replaces on every flash, so an old mount keeps pointing at the
-# previous (now deleted) file and a changed payload would never reach the camera.
+# selfheal.sh runs both stages in boot order, then drops the mode table so the camera rebuilds it
+# with the feature rows in place. Order matters: the feature keys must exist BEFORE the table is
+# rebuilt, or 理光 GR / 移轴 / POP silently vanish from the mode bar and never come back on their
+# own (the mode table is library-first: once written it is read from the db, not from the keys).
 #
 # Gate on "the phone's storage is up", not on sys.boot_completed: a flash that lands while that
 # property is still unset used to skip this whole block silently, which put the reinstall back to
@@ -57,48 +59,106 @@ fi
 READY=0
 [ -d /data/user/0/com.oplus.camera ] && READY=1
 [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && READY=1
-if [ "$READY" = "1" ] && [ -d "$MODPATH/payload" ]; then
-    ui_print "- Staging camera and gallery data"
-    ( cd "$MODPATH" && OMNICAM_STAGE_ONLY=1 sh ./service.sh ) > "$MODPATH/stage.log" 2>&1
-    if [ $? -eq 0 ]; then
-        ui_print "  done"
-    else
-        ui_print "  staging reported an error; see stage.log in the module directory"
-    fi
 
-    PROFILE=PKJ110
-    CONFIG_SRC="$MODPATH/payload_pkj110"
-    CONFIG_FILES="oplus_camera_algo_switch_config camera_unit_config camera_unit_feature_config.protobuf"
-    if [ "$(getprop ro.product.model 2>/dev/null)" = PMA110 ]; then
-        PROFILE=PMA110
-        CONFIG_SRC="$MODPATH/payload"
-        CONFIG_FILES="oplus_camera_config oplus_camera_aps_config oplus_camera_preview_decision_config.json $CONFIG_FILES"
-    fi
-    NSENTER=/system/bin/nsenter
-    config_bound() {
-        $NSENTER -t 1 -m -- cat /proc/self/mountinfo 2>/dev/null | grep -q " $1 "
-    }
-    bind_config() {
-        SRC="$1"; TGT="$2"
-        [ -f "$SRC" ] && [ -f "$TGT" ] || return 1
-        chown root:root "$SRC" 2>/dev/null
-        chmod 0644 "$SRC" 2>/dev/null
-        chcon u:object_r:vendor_configs_file:s0 "$SRC" 2>/dev/null
-        N=0
-        while config_bound "$TGT" && [ "$N" -lt 6 ]; do
-            $NSENTER -t 1 -m -- umount -l "$TGT" 2>/dev/null || break
-            N=$((N + 1))
-        done
-        $NSENTER -t 1 -m -- mount --bind "$SRC" "$TGT" 2>/dev/null
-    }
-    ui_print "- Re-binding the camera config for $PROFILE"
-    for NAME in $CONFIG_FILES; do
-        if bind_config "$CONFIG_SRC/$NAME" "/odm/etc/camera/config/$NAME"; then
-            ui_print "  bound $NAME"
+# mountify (the metamodule on this device) MAY take over module installation: its metainstall.sh
+# runs this customize.sh, then does `rm -rf /data/adb/modules/<id>`, moves the freshly extracted
+# tree into place, and only THEN runs $MODULE_HOT_RUN_SCRIPT. A bind created here would point at
+# the old directory that rm just deleted - which is how the three /odm/etc/camera/config binds went
+# missing on the r146 reinstall. Exporting the hook covers that case.
+#
+# But do NOT make the hook the only path. Its presence on disk means nothing: mountify only acts as
+# the installer after it has been activated by a boot, and until then ksud uses its own path
+# (modules_update + an `update` flag, swapped in at the next boot). Gating on
+# /data/adb/modules/mountify/metainstall.sh made the flash skip the self-heal entirely in exactly
+# that state - the module looked installed and did nothing. Run it here, unconditionally, and let
+# the hook run it again after a swap if mountify really did take over. Both stages are idempotent.
+export MODULE_HOT_RUN_SCRIPT=selfheal.sh
+
+SELFHEAL="$MODPATH/selfheal.sh"
+case "$MODPATH" in *modules_update*) IN_UPDATE=1 ;; *) IN_UPDATE=0 ;; esac
+
+if [ "$READY" != "1" ] || [ ! -f "$SELFHEAL" ]; then
+    ui_print "- Storage not up yet: staging will happen on the next camera launch"
+elif [ "$IN_UPDATE" = "1" ]; then
+    # ksud put this build in /data/adb/modules_update and marked the installed module for
+    # replacement at the NEXT BOOT. This phone is never rebooted (temporary root), so that swap
+    # would never happen: the module would sit in modules_update forever while the old build kept
+    # running. Finish it here instead - swap the directory in, then run the self-heal against the
+    # real location so the binds point at a path that will not move again.
+    #
+    # A script cannot swap the directory it is currently being read from, so the work happens in a
+    # detached helper: written to /data/local/tmp, started with setsid so it survives the installer
+    # exiting, and it deletes itself when done.
+    ui_print "- Taking effect now (no reboot): swapping into place, then staging"
+    FINISH=/data/local/tmp/omnicam_finish.sh
+    cat > "$FINISH" <<'OMNICAM_FINISH_EOS'
+#!/system/bin/sh
+# Runs after the manager finished. Swaps modules_update -> modules, then heals.
+MOD=/data/adb/modules/ricoh_pop_x9u
+UPD=/data/adb/modules_update/ricoh_pop_x9u
+ID=ricoh_pop_x9u
+LOG=/data/local/tmp/omnicam_finish.log
+: > "$LOG"
+log() { echo "$1" >> "$LOG"; }
+
+# Let the manager finish writing (it still touches modules_update for a moment).
+sleep 5
+
+# The module's own binds keep files inside the old directory alive, and `rm -rf` then fails with
+# "Device or resource busy" - which leaves the directory non-empty and makes the following `mv`
+# nest the new tree INSIDE the old one. That happened once; drop the binds first, lazily so a
+# still-open library cannot block it.
+for T in /odm/etc/camera/meishe_lut /odm/etc/camera/filters_lut /odm/etc/camera/basictone \
+         /odm/etc/camera/oplus_eis_camera.vcfg \
+         /odm/etc/camera/config/oplus_camera_algo_switch_config \
+         /odm/etc/camera/config/camera_unit_config \
+         /odm/etc/camera/config/camera_unit_feature_config.protobuf \
+         /vendor/lib64/camera/components/com.qti.stats.caflogicaldriver.so ; do
+    umount -l "$T" 2>/dev/null && log "umount $T"
+done
+
+if [ -d "$UPD" ]; then
+    am force-stop com.oplus.camera 2>/dev/null
+    rm -rf "$MOD" 2>/dev/null
+    if [ -d "$MOD" ]; then
+        OLD="/data/adb/modules/${ID}.old.$$"
+        if mv "$MOD" "$OLD" 2>/dev/null; then
+            log "old tree parked at $OLD"
+            ( sleep 10; rm -rf "$OLD" ) >/dev/null 2>&1 &
         else
-            ui_print "  could not bind $NAME (run apply-now.sh with root)"
+            log "could not park the old tree; swap aborted"
         fi
-    done
+    fi
+    if [ ! -d "$MOD" ] && mv "$UPD" "$MOD" 2>/dev/null; then
+        rm -f "$MOD/update"
+        log "swapped modules_update -> modules"
+    else
+        log "SWAP FAILED - leaving modules_update for the next boot"
+    fi
+    rm -rf "/data/adb/modules_update/$ID" 2>/dev/null
+else
+    log "no modules_update; nothing to swap"
+fi
+
+if [ -f "$MOD/selfheal.sh" ]; then
+    sh "$MOD/selfheal.sh" >>"$LOG" 2>&1
+    log "selfheal rc=$?"
+else
+    log "selfheal.sh missing after swap"
+fi
+
+rm -f "$0"
+OMNICAM_FINISH_EOS
+    chmod 0755 "$FINISH"
+    setsid sh "$FINISH" >/dev/null 2>&1 &
+    ui_print "  runs in a few seconds; watch /data/local/tmp/omnicam_finish.log"
+else
+    ui_print "- Staging camera and gallery data, rebuilding /odm binds"
+    if sh "$SELFHEAL" >/dev/null 2>&1; then
+        ui_print "  done - nothing left to run"
+    else
+        ui_print "  selfheal reported an error; see selfheal.log in the module directory"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

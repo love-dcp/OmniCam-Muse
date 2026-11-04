@@ -145,17 +145,20 @@ MODULE_SCRIPTS = {
     #                              made the new build look broken, so a flash now puts them back
     #                              to shipped defaults. Nothing else in the file changed.
     "post-fs-data.sh": (29228, "e6a140df3b12c565e5d755922c3bd9b5"),
-    "post-mount.sh": (13203, "ef016e422316466a97dd7e4581ef8a56"),
+    "post-mount.sh": (13856, "6a24af1fbc6f660976ce8820465da041"),
     # r23: service.sh now clears the in-place update marker; uninstall.sh distinguishes
     # update (conservative) from removal (full cleanup via uninstall_full.sh); action.sh
     # is the explicit full-uninstall button; customize.sh writes the update marker and
     # installs the APK; apply-now.sh binds the native patches without a reboot.
-    "service.sh": (14263, "83691c08a350e95dd1fc51798df8b3c5"),
+    "service.sh": (15276, "b97af2b8915343d73dae03ce1713919b"),
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
     "uninstall_full.sh": (25600, "6a05587a77cb5184603021c39e4cea08"),
-    "action.sh": (1633, "de4aa3da4aaf0d33140da503a63eaa66"),
-    "customize.sh": (9852, "ea5098e134a1c160ed6501427b81abc0"),
+    "action.sh": (2741, "75ddeb3ab87ac843eea37eda70c7b73d"),
+    "customize.sh": (13104, "cbf435cb40b5c699faeae478df611161"),
     "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
+    # r147: the flash-time self-heal (staged data + /odm binds + mode table). customize.sh
+    # calls it directly, and mountify runs it through MODULE_HOT_RUN_SCRIPT after the swap.
+    "selfheal.sh": (8855, "c9eaa2d6a73f5cc137ff05f68a7c5e72"),
     "x8u-fix-pop.sh": (9181, "2964db9cccf9d7197ece95eab99af699"),
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),
     "x8u-fix-vibrant.sh": (8919, "c1592457cb521e1016a13c68c51bf513"),
