@@ -215,9 +215,20 @@ final class CompositionIconShift {
         // A finger's worth, not a hand's: this used to be 48px on every side, which grew the hit
         // area to ~190px tall and swallowed the zoom ladder's last two stops.
         float pad = 6f;
-        return x >= at[0] - pad && x <= at[0] + width + pad
+        boolean hit = x >= at[0] - pad && x <= at[0] + width + pad
             && y >= at[1] - pad && y <= at[1] + height + pad;
+        // One line per press: without it, a tap that lands next to the icon is indistinguishable
+        // from a tap that the icon never received, and the only visible symptom is a pinned
+        // subject and an answer from the device.
+        if (probes.incrementAndGet() <= 24) {
+            Log.i(TAG, "entry rect " + at[0] + "," + at[1] + " " + (int) width + "x" + (int) height
+                + " press " + (int) x + "," + (int) y + " -> " + (hit ? "on the icon" : "elsewhere"));
+        }
+        return hit;
     }
+
+    private static final java.util.concurrent.atomic.AtomicInteger probes =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     private static String name(View view) {
         int id = view.getId();

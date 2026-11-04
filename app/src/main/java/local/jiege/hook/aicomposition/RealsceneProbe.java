@@ -70,6 +70,7 @@ public final class RealsceneProbe {
         Log.guard(TAG, "effect", () -> hookEffectTexture(classLoader));
         Log.guard(TAG, "fail", () -> hookFailure(classLoader));
         Log.guard(TAG, "landing", () -> hookAnswerLanding(classLoader));
+        Log.guard(TAG, "antispam", () -> hookAntiSpam(classLoader));
         Log.guard(TAG, "aiunit", () -> hookAiunitAvailability(classLoader));
         Log.guard(TAG, "trackstatus", () -> hookTrackStatus(classLoader));
         Log.guard(TAG, "zoomskip", () -> hookZoomSkip(classLoader));
@@ -1711,6 +1712,60 @@ public final class RealsceneProbe {
             hooked++;
         }
         Log.i(TAG, "answer landing hook: " + hooked);
+    }
+
+    /**
+     * The photo mode runs every composition result through an image review first.
+     *
+     * <p>{@code com.oplus.camera.feature.aicomposition.util.AntiSpamUtil} hands the crop to AIUnit's
+     * antispam client and then blocks on {@code a(long)} until the verdict arrives. Only
+     * {@code PASS} lets the framing through; anything else is reported as
+     * {@code composition failed: image review failed} and the panel sits on "当前画面内容未发现构图
+     * 推荐". The professional mode never asks for a review, which is why the very same answer that
+     * works there is rejected here -- the report "照片模式构图不行，云端和本地都不行".
+     *
+     * <p>The review exists to keep violating images from leaving the phone. A composition crop is
+     * the camera's own on-screen hint and is never uploaded by us, so answering PASS locally costs
+     * nothing. {@code persist.omnicam.comp.antispam=0} restores the stock behaviour.
+     */
+    private static void hookAntiSpam(ClassLoader classLoader) {
+        if ("0".equals(prop("persist.omnicam.comp.antispam", "1"))) {
+            Log.i(TAG, "image review left to the camera (comp.antispam=0)");
+            return;
+        }
+        Class<?> util = XposedHelpers.findClassIfExists(
+            "com.oplus.camera.feature.aicomposition.util.AntiSpamUtil", classLoader);
+        Class<?> verdict = XposedHelpers.findClassIfExists(
+            "com.oplus.camera.feature.aicomposition.util.AntiSpamUtil$ReviewVerdict", classLoader);
+        if (util == null || verdict == null) {
+            Log.i(TAG, "antispam util not in this build");
+            return;
+        }
+        final Object pass;
+        try {
+            pass = XposedHelpers.getStaticObjectField(verdict, "PASS");
+        } catch (Throwable missing) {
+            Log.i(TAG, "review verdict has no PASS " + missing);
+            return;
+        }
+        int hooked = 0;
+        for (Method method : util.getDeclaredMethods()) {
+            // a(long) is the blocking "wait for the verdict" call. Matched by shape, not only by
+            // name: the obfuscator renumbers these freely.
+            Class<?>[] types = method.getParameterTypes();
+            if (!"a".equals(method.getName()) || types.length != 1 || types[0] != long.class) continue;
+            if (method.getReturnType() != verdict) continue;
+            method.setAccessible(true);
+            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.getResult() == pass) return;
+                    Log.i(TAG, "image review answered " + param.getResult() + ", passing it anyway");
+                    param.setResult(pass);
+                }
+            });
+            hooked++;
+        }
+        Log.i(TAG, "image review pass-through: " + hooked);
     }
 
     /**
