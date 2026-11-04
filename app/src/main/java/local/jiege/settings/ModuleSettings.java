@@ -209,7 +209,6 @@ public final class ModuleSettings {
             case VIDEO_FILTER_HIGH_SPEC:
             case POP_SDR_STYLE:
             case NATURAL_MODE:
-            case INSPIRATION_COMPOSITION:
             case DUMP_RAW:
             case DUMP_CCM:
             case DUMP_HDRT:
@@ -253,6 +252,16 @@ public final class ModuleSettings {
             case OPEN_GATE:
                 // On by default: it only adds one entry to the resolution list, so anyone who
                 // does not pick it keeps the stock 16:9 sizes.
+                return true;
+            case INSPIRATION_COMPOSITION:
+                // On by default since r148. It used to default off (an upload has to be asked for),
+                // but the switch is invisible unless the settings page is opened, and it is the only
+                // writer of persist.omnicam.comp.inspiration -- which CloudComposer.enabled() reads
+                // live, treating a missing property as "off". A full uninstall deletes every
+                // persist.omnicam.* property and pm-uninstalls the app, so both the property and the
+                // stored switch disappeared together and composition silently fell back to the
+                // on-device engine. Defaulting to on keeps "install and it works" true; the user can
+                // still turn it off, and turning it off writes 0 which is honoured from then on.
                 return true;
             case AI_COMPOSITION:
                 // On by default: the entry itself is useful even without the local engine.

@@ -15,7 +15,7 @@ if (-not (Test-Path -LiteralPath $sdkProperties)) {
 if ($LASTEXITCODE -ne 0) { throw 'Master colour catalog validation failed.' }
 & (Join-Path $project 'tools/offline_tests/run.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Offline tests failed.' }
-& 'C:/Program Files/Git/bin/bash.exe' -n (Join-Path $project 'module/post-fs-data.sh') (Join-Path $project 'module/post-mount.sh') (Join-Path $project 'module/service.sh') (Join-Path $project 'module/uninstall.sh')
+& 'C:/Program Files/Git/bin/bash.exe' -n (Join-Path $project 'module/post-fs-data.sh') (Join-Path $project 'module/post-mount.sh') (Join-Path $project 'module/service.sh') (Join-Path $project 'module/uninstall.sh') (Join-Path $project 'module/selfheal.sh') (Join-Path $project 'module/action.sh')
 if ($LASTEXITCODE -ne 0) { throw 'Module shell syntax validation failed.' }
 $drive = (70..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -Last 1)
 if (-not $drive) { throw 'No free drive letter for the Android build.' }

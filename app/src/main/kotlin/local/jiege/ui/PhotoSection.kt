@@ -99,16 +99,33 @@ internal fun PhotoSection(store: SettingsStore, cardModifier: Modifier) {
  * which is why the natural-mode card does the same thing. Read live by CloudComposer.enabled(),
  * so a flip applies to the next entry tap without restarting the camera.
  */
-private fun pushInspiration(store: SettingsStore) {
+internal fun pushInspiration(store: SettingsStore) {
     val on = store.get(ModuleSettings.INSPIRATION_COMPOSITION)
     rootCommand("setprop persist.omnicam.comp.inspiration ${if (on) 1 else 0}")
 }
 
 /** Mirrors the natural-mode switches and the soften percent into the properties the camera reads. */
-private fun pushNatural(store: SettingsStore) {
+internal fun pushNatural(store: SettingsStore) {
     val mask = (if (store.get(ModuleSettings.NATURAL_MODE)) 1 else 0) or
         (if (store.get(ModuleSettings.NATURAL_NO_AI_DETAIL)) 2 else 0) or
         (if (store.get(ModuleSettings.NATURAL_NO_LCE)) 4 else 0)
     rootCommand("setprop persist.omnicam.aura.natural $mask")
     rootCommand("setprop persist.omnicam.aura.naturalsoften ${store.getInt(ModuleSettings.NATURAL_SOFTEN)}")
+}
+
+/**
+ * Writes every mirrored property once, from the stored settings.
+ *
+ * Each page used to sync its own slice in a LaunchedEffect, which means a property was only ever
+ * written after the user happened to open that exact page. A full uninstall deletes all
+ * persist.omnicam.* properties and pm-uninstalls the app, so after a reinstall nothing restored
+ * them and features silently fell back to stock defaults -- composition fell back to the on-device
+ * engine because persist.omnicam.comp.inspiration was simply missing. Running the whole set at
+ * start-up makes "open the app once" enough. Call it off the main thread: every push shells out.
+ */
+internal fun syncMirroredProperties(store: SettingsStore) {
+    pushInspiration(store)
+    pushNatural(store)
+    pushLevels(store)
+    pushStrength(store)
 }

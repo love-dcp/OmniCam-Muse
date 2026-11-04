@@ -120,6 +120,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 4b. UI-mirrored properties.
+#
+#   The camera process cannot read the module's preferences (different uid and
+#   SELinux categories), so settings reach it as persist.omnicam.* properties.
+#   The ONLY writer is the settings page (PhotoSection.pushInspiration), and a
+#   full uninstall deletes every persist.omnicam.* property AND pm-uninstalls
+#   the app -- so after a reinstall neither side exists, nothing writes the
+#   property back, and composition silently runs on the on-device engine while
+#   the panel still looks normal. Seed the properties whose default is "on".
+#
+#   Only when absent: a deliberate "0" from the user survives a reinstall.
+# ---------------------------------------------------------------------------
+seed_prop() {
+    _k=$1
+    _v=$2
+    _cur=$(getprop "$_k" 2>/dev/null)
+    if [ -z "$_cur" ]; then
+        if setprop "$_k" "$_v" 2>/dev/null; then
+            log "  seeded $_k=$_v"
+        else
+            log "  could not seed $_k"
+        fi
+    else
+        log "  kept $_k=$_cur"
+    fi
+}
+log "--- mirrored properties ---"
+seed_prop persist.omnicam.comp.inspiration 1
+
+# ---------------------------------------------------------------------------
 # 5. Camera provider. It parses /odm/etc/camera/config/* once when it loads and
 #    caches the result, so a rebound config only reaches the HAL after the
 #    process is replaced. init respawns it immediately — this is a process

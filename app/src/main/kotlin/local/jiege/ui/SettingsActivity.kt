@@ -50,6 +50,11 @@ class SettingsActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val store = SettingsStore(this)
+        // The settings pages are the only writers of persist.omnicam.*, so a property used to be
+        // written only after the user opened that one page. A full uninstall clears all of them
+        // together with the app data, which left composition on the on-device engine until someone
+        // visited the composition card. Sync everything once at start-up instead.
+        Thread { syncMirroredProperties(store) }.start()
         setContent {
             MiuixTheme(colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 SettingsScreen(store)

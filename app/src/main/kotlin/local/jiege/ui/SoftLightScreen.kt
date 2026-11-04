@@ -124,7 +124,7 @@ internal fun SoftLightScreen(padding: PaddingValues, nestedScroll: NestedScrollC
 }
 
 /** Mirrors the three switches into persist.omnicam.aura.softlight as a bit mask. */
-private fun pushLevels(store: SettingsStore) {
+internal fun pushLevels(store: SettingsStore) {
     val mask = (if (store.get(ModuleSettings.SOFT_LIGHT_WEAK_HDF)) 1 shl 1 else 0) or
         (if (store.get(ModuleSettings.SOFT_LIGHT_MEDIUM_BLACK_MIST)) 1 shl 0 else 0) or
         (if (store.get(ModuleSettings.SOFT_LIGHT_STRONG_WHITE_MIST)) 1 shl 2 else 0)
@@ -132,7 +132,7 @@ private fun pushLevels(store: SettingsStore) {
 }
 
 /** Mirrors the strength slider into persist.omnicam.aura.slgain, which the capture reads. */
-private fun pushStrength(store: SettingsStore) {
+internal fun pushStrength(store: SettingsStore) {
     rootCommand("setprop persist.omnicam.aura.slgain ${store.getInt(ModuleSettings.SOFT_LIGHT_STRENGTH)}")
 }
 
