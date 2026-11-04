@@ -37,6 +37,8 @@ public final class AiComposition {
     private static final String INSPIRATION = "com.oplus.feature.aicomposition.inspiration.support";
 
     private static volatile boolean reportedFeature;
+    private static final java.util.concurrent.atomic.AtomicBoolean modeSkipLogged =
+        new java.util.concurrent.atomic.AtomicBoolean();
     private static volatile String lastQuery;
 
     private AiComposition() {}
@@ -57,6 +59,24 @@ public final class AiComposition {
         return REAL_SCENE.equals(key) || INSPIRATION.equals(key);
     }
 
+    /**
+     * Composition is a photo-mode feature and must stay one.
+     *
+     * <p>Every gate below is asked per mode, and this module used to answer yes unconditionally.
+     * That is what put the entry icon on 视频, 人像, POP and 哈苏超清: the module was injected into
+     * <em>every</em> opmode's feature list, so the camera built the composition panel there too and
+     * happily ran it -- a video screen with a stills framing box, and a shutter that then had to
+     * survive a composition it was never meant to run.
+     *
+     * <p>The mode name comes from the camera's own presenter ({@code FeaturePresenter.modeName},
+     * {@code common} for 照片). Unknown counts as yes: the gates are also queried during start-up,
+     * before any presenter exists, and answering no there would remove the feature from the one
+     * mode that supports it.
+     */
+    private static boolean compositionMode() {
+        return RealsceneProbe.currentModeSupportsComposition();
+    }
+
     private static void install(ClassLoader classLoader) throws Throwable {
         Class<?> adapter = XposedHelpers.findClass(FEATURE_ADAPTER, classLoader);
 
@@ -65,12 +85,21 @@ public final class AiComposition {
         XposedBridge.hookAllMethods(adapter, "getFeatureInfoList", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!enabled()) return;
+                if (!compositionMode()) {
+                    // Leave every other mode's list exactly as the build shipped it: no composition
+                    // module, no entry icon, no panel over a video preview.
+                    if (modeSkipLogged.compareAndSet(false, true)) {
+                        Log.i(TAG, "composition stays off in " + RealsceneProbe.currentMode() + " mode");
+                    }
+                    return;
+                }
                 Object result = param.getResult();
                 if (!(result instanceof java.util.Set)) return;
                 try {
                     @SuppressWarnings("unchecked")
                     java.util.Set<Object> names = (java.util.Set<Object>) result;
                     if (!names.add(FEATURE)) return;
+                    modeSkipLogged.set(false);
                     if (reportedFeature) return;
                     reportedFeature = true;
                     Log.i(TAG, "composition feature added (opmode " + (param.args.length > 0 ? param.args[0] : "?") + ")");
@@ -84,6 +113,7 @@ public final class AiComposition {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!enabled()) return;
                 if (param.args.length < 1 || !interesting(param.args[0])) return;
+                if (!compositionMode()) return;
                 if (Boolean.TRUE.equals(param.getResult())) return;
                 param.setResult(Boolean.TRUE);
                 logQuery("hasConfigFeature", param.args[0]);
@@ -96,6 +126,10 @@ public final class AiComposition {
                 if (!enabled()) return;
                 if (param.args.length < 3 || !interesting(param.args[0])) return;
                 if (!(param.args[1] instanceof Boolean) || !(param.args[2] instanceof Boolean)) return;
+                // Outside the stills mode the config answers as stock does. This is the same gate
+                // that used to be opened everywhere, which is how the panel ended up on screens
+                // that have no composition: 视频 / 人像 / POP / 哈苏超清.
+                if (!compositionMode()) return;
                 // Real-scene support must answer TRUE. vb.c3.k4(int) branches on it, and the two
                 // sides are NOT "draw / don't draw" -- they are two different features:
                 //

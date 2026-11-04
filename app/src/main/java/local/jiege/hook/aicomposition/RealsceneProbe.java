@@ -347,52 +347,50 @@ public final class RealsceneProbe {
     }
 
     /**
-     * True when this mode must not run composition at all.
+     * The only modes that run composition: the ordinary stills mode.
      *
-     * <p>GrSupport.isGrMode() is the camera's own "current mode is GR" answer, so it tracks mode
-     * switches without the module having to mirror the mode list itself. Everything else -- photo,
-     * portrait, night, video -- keeps whatever stock does.
-     */
-    /**
-     * Modes that must not run composition at all.
+     * <p>Composition is a photo-mode feature. The camera names its modes through
+     * {@code FeaturePresenter.modeName} ({@code local.jiege.settings.LaunchModes} carries the whole
+     * table: common/portrait/commonVideo/professional/gr/retroCamera/highPixel/...), so this is an
+     * allow-list, not a deny-list: 视频 (commonVideo), 人像 (portrait), POP (retroCamera),
+     * 哈苏超清 (highPixel), 大师 (professional), GR, 夜景, 全景 and every other mode answer as they
+     * do in stock. A deny-list is what let those four keep the entry: it named "video", "portrait"
+     * and friends, none of which is what this camera actually calls them.
      *
-     * The general photo modes ship the whole composition pipeline, and it works there: the
-     * suggestion is drawn, the zoom follows, and the shutter saves the photo. Master
-     * ("professional") and GR ("gr") do not ship it. Opening the feature gates there makes the
-     * camera draw a suggestion and drive the zoom anyway, and the shutter then dies in
-     * captureCompositionEffectTexture -> "invalid zoom result", dropping the photo with no
-     * message. Answering no to the apply and zoom gates keeps those two modes on the ordinary
-     * shutter path while every other mode is left exactly as stock.
+     * <p>Unknown (empty) counts as photo: the gates are queried during start-up, before a presenter
+     * exists, and answering no there would take composition away from the mode that does support it.
      */
-    private static final java.util.Set<String> NO_COMPOSITION = new java.util.HashSet<>(
-        java.util.Arrays.asList("professional", "gr"));
+    private static final java.util.Set<String> COMPOSITION_MODES =
+        java.util.Collections.singleton("common");
+
+    private static boolean compositionMode() {
+        String mode = modeName;
+        return mode == null || mode.isEmpty() || COMPOSITION_MODES.contains(mode);
+    }
 
     private static boolean compositionBlocked(String label) {
         if ("1".equals(prop("persist.omnicam.comp.gr", "0"))) return false;
+        if (compositionMode()) return false;
         String mode = modeName;
-        if (mode == null || mode.isEmpty() || !NO_COMPOSITION.contains(mode)) return false;
         if (gateBlockedLog.compareAndSet(false, true)) {
             Log.i(TAG, "composition blocked in " + mode + " mode (" + label + ")");
         }
         return true;
     }
 
-    /**
-     * Modes that ship no composition pipeline at all, beyond the two that are merely unsafe.
-     *
-     * <p>Only used to decide whether a tap may <em>open</em> composition; everything else about the
-     * feature keeps working as before. The list is a deny-list on purpose: mode names come from the
-     * feature presenter and a mode this build invents later must not silently lose the entry.
-     */
-    private static final java.util.Set<String> NOT_PHOTO = new java.util.HashSet<>(
-        java.util.Arrays.asList("professional", "gr", "video", "video_pro", "pro_video",
-            "portrait", "panorama", "time_lapse", "slow_shutter", "night", "super_night"));
-
-    /** Is the camera in one of the modes composition runs in? Unknown counts as yes. */
+    /** May a tap open composition here? Same answer as the gates, kept as its own name at call sites. */
     private static boolean photoMode() {
-        String mode = modeName;
-        if (mode == null || mode.isEmpty()) return true;
-        return !NOT_PHOTO.contains(mode);
+        return compositionMode();
+    }
+
+    /** The current mode name, for the feature gates in {@link AiComposition}. Null before start-up. */
+    static String currentMode() {
+        return modeName.isEmpty() ? null : modeName;
+    }
+
+    /** Is the mode one composition may run in? Also used by the gates, unknown counts as yes. */
+    static boolean currentModeSupportsComposition() {
+        return compositionMode();
     }
 
     /**
@@ -425,6 +423,14 @@ public final class RealsceneProbe {
                 || types[0] != int.class || types[1] != String.class) continue;
             method.setAccessible(true);
             XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    // Before the presenter is re-pointed, not after: R() itself reads the feature
+                    // configuration for the mode it is switching to, and the gates in AiComposition
+                    // answer from this name. Set afterwards, the first query of every mode switch
+                    // still answered for the mode the user had just left.
+                    setMode(param.args[1] == null ? null : String.valueOf(param.args[1]));
+                }
+
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     setMode(param.args[1] == null ? null : String.valueOf(param.args[1]));
                 }
@@ -446,7 +452,38 @@ public final class RealsceneProbe {
     private static void setMode(String name) {
         if (name == null || name.isEmpty() || name.equals(modeName)) return;
         modeName = name;
-        Log.i(TAG, "mode -> " + name);
+        // A mode switch rebuilds the composition presenter and its view tree. Everything this
+        // module latched about the old mode -- a capped session, a panel that the probe still
+        // reports as open, a frozen answer about the previous subject -- belongs to that dead
+        // presenter and must not follow the user into the next mode. This is also why switching
+        // to video and back used to "fix" a session that had stopped answering: the switch reset
+        // state the module kept for itself, not anything the camera needed.
+        resetForMode();
+        Log.i(TAG, "mode -> " + name
+            + (compositionMode() ? " (composition on)" : " (composition off)"));
+    }
+
+    /** Drops every per-session latch, answer and panel probe result. Safe on the main thread. */
+    private static void resetForMode() {
+        blockReopen = false;
+        sessionAt = 0;
+        sessionPasses = 0;
+        lastPassAt = 0;
+        armedAt = 0;
+        entryDownAt = 0;
+        directDone = false;
+        rectSince = 0;
+        panelPrimed = false;
+        panelWasOpen = false;
+        panelVisible = false;
+        panelCheckedAt = 0;
+        try {
+            clearCloudSession();
+            SubjectLocator.dropHeld();
+            local.jiege.hook.mastercolor.MasterColor.compositionStop();
+        } catch (Throwable error) {
+            Log.e(TAG, "mode reset incomplete", error);
+        }
     }
 
     private static final java.util.concurrent.atomic.AtomicBoolean gateBlockedLog =
@@ -536,6 +573,14 @@ public final class RealsceneProbe {
                         // would reopen composition in exactly the modes the guard exists to protect.
                         if (!compositionBlocked("entry")) {
                             entryDownAt = android.os.SystemClock.uptimeMillis();
+                            // Arm here as well, on the button's own DOWN. The panel probe is the
+                            // other place that arms, but it arms on a closed->open edge, and after a
+                            // failed run the preview view can stay VISIBLE: the edge never arrives
+                            // again, so taps on the entry kept working the camera's own panel while
+                            // this module answered nothing ("照片模式构图3次后再点几次都不能构图").
+                            // A touch on the entry is the user's request; it does not need a view
+                            // tree to confirm it.
+                            reopenComposition();
                         }
                         return;
                     }
@@ -595,7 +640,7 @@ public final class RealsceneProbe {
      * restarting itself a moment after it was cut.
      */
     private static volatile boolean blockReopen;
-    private static final long SESSION_TTL = 8000L;
+    private static final long SESSION_TTL = 15000L;
     private static final int PASS_MAX = 400;
     /**
      * A quieter gap than this between two passes means a new request, not a continuation.
@@ -620,11 +665,20 @@ public final class RealsceneProbe {
         if (now - startedAt < STARTUP_GRACE) return false;
         long at = sessionAt;
         if (at == 0) return false;
-        if (now - at > SESSION_TTL || sessionPasses >= PASS_MAX) {
+        // Idle time, not session age: the pipeline asks every couple of seconds while the panel is
+        // open, and measuring from the session start tore down sessions that were working fine
+        // ("构图三次之后就不行了"). The shutter between two sessions is handled by noteStream().
+        long live = Math.max(at, lastPassAt);
+        if (now - live > SESSION_TTL || sessionPasses >= PASS_MAX) {
             sessionAt = 0;
-            blockReopen = true;
+            // Only the pass cap latches reopen off. A plain timeout used to latch it too, and since
+            // the latch is cleared by the panel's closed->open edge -- an edge that stops arriving
+            // when the panel view stays VISIBLE after a failed run -- one timeout was enough to
+            // make every later tap on the entry do nothing until the camera was restarted.
+            if (sessionPasses >= PASS_MAX) blockReopen = true;
             local.jiege.hook.mastercolor.MasterColor.compositionStop();
-            Log.i(TAG, "composition session closed after " + sessionPasses + " passes");
+            Log.i(TAG, "composition session closed after " + sessionPasses + " passes"
+                + (blockReopen ? ", waiting for a fresh tap" : ", idle"));
             return false;
         }
         return true;
@@ -677,10 +731,14 @@ public final class RealsceneProbe {
 
     /** A gesture that means "do it again"; the cap is lifted until the next session closes. */
     static void reopenComposition() {
+        boolean lifted = blockReopen;
         blockReopen = false;
         sessionAt = android.os.SystemClock.uptimeMillis();
         sessionPasses = 0;
         local.jiege.hook.mastercolor.MasterColor.compositionStart();
+        if (lifted) {
+            Log.i(TAG, "composition re-armed after a capped session (" + modeName + ")");
+        }
     }
 
     private static final long STARTUP_GRACE = 8000L;
