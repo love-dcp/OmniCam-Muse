@@ -347,15 +347,15 @@ public final class RealsceneProbe {
     }
 
     /**
-     * The only modes that run composition: the ordinary stills mode.
+     * The modes that run composition: the ordinary stills mode, plus 大师 (professional) on request.
      *
      * <p>Composition is a photo-mode feature. The camera names its modes through
      * {@code FeaturePresenter.modeName} ({@code local.jiege.settings.LaunchModes} carries the whole
      * table: common/portrait/commonVideo/professional/gr/retroCamera/highPixel/...), so this is an
      * allow-list, not a deny-list: 视频 (commonVideo), 人像 (portrait), POP (retroCamera),
-     * 哈苏超清 (highPixel), 大师 (professional), GR, 夜景, 全景 and every other mode answer as they
-     * do in stock. A deny-list is what let those four keep the entry: it named "video", "portrait"
-     * and friends, none of which is what this camera actually calls them.
+     * 哈苏超清 (highPixel), GR, 夜景, 全景 and every other mode answer as they do in stock. A
+     * deny-list is what let those four keep the entry: it named "video", "portrait" and friends,
+     * none of which is what this camera actually calls them.
      *
      * <p>Unknown (empty) counts as photo: the gates are queried during start-up, before a presenter
      * exists, and answering no there would take composition away from the mode that does support it.
@@ -365,7 +365,13 @@ public final class RealsceneProbe {
 
     private static boolean compositionMode() {
         String mode = modeName;
-        return mode == null || mode.isEmpty() || COMPOSITION_MODES.contains(mode);
+        if (mode == null || mode.isEmpty() || COMPOSITION_MODES.contains(mode)) return true;
+        // 大师 (professional) runs the same stills pipeline as 照片 -- one capture, one JPEG, no
+        // video encode -- so composition has a fair chance of working there. It is opened on
+        // request (persist.omnicam.comp.master defaults to 1) and can be closed again with
+        // persist.omnicam.comp.master=0 if its shutter turns out to reject the zoom result.
+        return "professional".equals(mode)
+            && !"0".equals(prop("persist.omnicam.comp.master", "1"));
     }
 
     private static boolean compositionBlocked(String label) {
@@ -2336,7 +2342,13 @@ public final class RealsceneProbe {
                         ? SubjectLocator.follow((HardwareBuffer) param.args[0]) : null;
                     if (json != null && json.isEmpty()) json = SubjectLocator.current();
                     if (json != null) {
-                        if (freeze) {
+                        // A fallback answer is not worth freezing. Freezing exists so the align
+                        // guide can converge on one target, but freezing "nothing was found" is
+                        // what made a session that opened on an unsettled frame stay framed on a
+                        // crop with no subject in it until the user pressed the button again --
+                        // the "sometimes it takes several presses" report. The fallback keeps
+                        // being re-decided, and the first real subject is frozen instead.
+                        if (freeze && !SubjectLocator.ambientAnswer()) {
                             frozenAnswer = json;
                             frozenFor = sessionAt;
                         }

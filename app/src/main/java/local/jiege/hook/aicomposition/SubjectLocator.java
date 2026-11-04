@@ -130,6 +130,14 @@ final class SubjectLocator {
     /** How far the subject is pushed towards its own third, per unit of off-centre distance. */
     private static final float SIDE_BIAS = 0.45f;
 
+    /**
+     * How far off the middle a subject may sit and still count as "what the phone is pointed at".
+     *
+     * <p>Two tenths of the frame is about the width of the centre third; a face or a plant further
+     * out than this is in the shot beside the subject, not the subject itself.
+     */
+    private static final float CENTRE_X = 0.22f;
+
     /** Crop width ladder step; 12 keeps both sides on the 3:4 grid so srcCrop stays exact. */
     private static final int CROP_STEP = 12;
     private static final int MIN_CROP_W = 132;
@@ -187,6 +195,21 @@ final class SubjectLocator {
     /** Which kind of scene {@link #sceneIn} just decided on; that method returns a finished crop. */
     private static volatile int sceneKind = KIND_LANDSCAPE;
 
+    /**
+     * True while the answer on screen is the last-resort centre crop rather than a found subject.
+     *
+     * <p>The caller freezes one answer per session so the camera's align guide can converge, and a
+     * frozen fallback is a session that can never improve: the first press, taken a moment before
+     * the frame settled, locked in "nothing found" until the user pressed the button again. A
+     * fallback is explicitly not worth freezing -- it is the answer that has to be replaced as soon
+     * as any frame does find something.
+     */
+    private static volatile boolean ambientAnswer;
+
+    static boolean ambientAnswer() {
+        return ambientAnswer;
+    }
+
     /** Reused sampling scratch; the detection thread and the one inline call both come through here. */
     private static int[] pixels;
     private static int sampleW;
@@ -238,6 +261,14 @@ final class SubjectLocator {
             json = null;
             dirty = true;
             lastGrab = 0;
+            // The remembered crop has to go too. Keeping it made the next pass compare its answer
+            // with the old one, decide "nothing moved" and return without ever writing a new json
+            // -- and a pass with no json is answered with the demo/plain fallback, so the button
+            // looked like it needed pressing again to take effect.
+            crop = null;
+            lastRaw = null;
+            subject = null;
+            ambientAnswer = false;
         }
     }
 
@@ -388,6 +419,7 @@ final class SubjectLocator {
             float[] raw = null;
             int[] framed = null;
             int kind = KIND_FACE;
+            boolean ambient = false;
             if (pin != null) {
                 // A lock outranks every detector. A Red Bull can is red enough to pass the skin-tone
                 // test, and the skin fallback then framed a patch of desk near it -- which is
@@ -399,6 +431,39 @@ final class SubjectLocator {
                 kind = KIND_PINNED;
             } else {
                 raw = faceIn(frame);
+                boolean centrefirst = !"0".equals(prop("persist.omnicam.centrefirst", "1"));
+                // A face on the edge of the frame is a bystander, not the shot. The camera is a
+                // pointing device: whatever sits in the middle is what the user aimed at, and the
+                // detector order used to hand the frame to any face anywhere -- which is the
+                // "I centred on the object and composition picked the person beside it" report.
+                // So a face that is not near the middle no longer wins by itself; the middle gets
+                // first refusal, and the face is kept only when the middle has nothing to offer.
+                boolean centredFace = raw != null && Math.abs(raw[0] - 0.5f) <= CENTRE_X;
+                if (centrefirst && raw != null && !centredFace) {
+                    float[] centre = null;
+                    int centreKind = KIND_OBJECT;
+                    if (!"0".equals(prop("persist.omnicam.plantdetect", "1"))) {
+                        float[] plant = plantIn(frame);
+                        if (plant != null && Math.abs(plant[0] - 0.5f) <= CENTRE_X) {
+                            centre = plant;
+                            centreKind = KIND_PLANT;
+                        }
+                    }
+                    if (centre == null) {
+                        centre = centredIn(frame);
+                        centreKind = KIND_OBJECT;
+                    }
+                    if (centre != null) {
+                        raw = centre;
+                        kind = centreKind;
+                        if (detections < 3) {
+                            Log.i(TAG, String.format(Locale.US,
+                                "centre outranks the edge face (%.2f)", centre[0]));
+                        }
+                    }
+                    // centre == null keeps the edge face: a person is still a better subject than
+                    // a full-frame answer.
+                }
                 // Foliage outranks the object scorer. A flowering plant is a mass of one soft-edged
                 // colour, so the object scorer's "compact high-contrast blob" test hands the shot to
                 // the pot or to whatever rectangle is behind it -- which is why pointing at flowers
@@ -450,6 +515,7 @@ final class SubjectLocator {
                 // it is the widest suggestion the ladder allows, so it cannot ruin the shot.
                 framed = fallbackBox();
                 kind = KIND_AMBIENT;
+                ambient = true;
                 int calls;
                 synchronized (LOCK) {
                     calls = ++fallbackCalls;
@@ -501,8 +567,14 @@ final class SubjectLocator {
             int[] next = sceneBox != null || first
                 ? base : refineByAesthetic(frame, smoothed, base);
             synchronized (LOCK) {
-                if (crop != null && !moved(crop, next)) return;
+                // A real subject always replaces a fallback, even when the two crops look alike:
+                // the fallback is a placeholder, and the callers freeze whatever arrives first.
+                // Without this the placeholder stayed for the whole session because `moved` saw a
+                // centre crop and a centre crop and called it "unchanged".
+                boolean upgrade = ambientAnswer && !ambient;
+                if (crop != null && !upgrade && !moved(crop, next)) return;
                 crop = next;
+                ambientAnswer = ambient;
                 movedAt = SystemClock.uptimeMillis();
                 json = jsonOf(next, decided);
                 dirty = true;
@@ -610,13 +682,25 @@ final class SubjectLocator {
             if (count <= 0) return null;
             FaceDetector.Face best = null;
             float eyes = 0f;
+            float bestRank = 0f;
+            PointF probe = new PointF();
             for (int i = 0; i < count; i++) {
                 FaceDetector.Face face = faces[i];
                 if (face == null) continue;
                 float distance = face.eyesDistance();
                 if (distance < MIN_EYES) continue;
-                // The largest face is the one being photographed; bystanders are noise here.
-                if (distance > eyes) {
+                // The largest face is the one being photographed; bystanders are noise here. But
+                // size alone loses the case this feature kept getting wrong: a big face at the edge
+                // of a group shot beat the person standing where the phone was pointed. Position
+                // carries half the vote now, so the face in the middle wins unless the edge one is
+                // more than about twice as large.
+                face.getMidPoint(probe);
+                float dx = probe.x / width - 0.5f;
+                float dy = probe.y / height - 0.5f;
+                float dist = (float) Math.sqrt(dx * dx + dy * dy);
+                float rank = distance * (1f - 0.50f * Math.min(1f, dist / 0.55f));
+                if (rank > bestRank) {
+                    bestRank = rank;
                     eyes = distance;
                     best = face;
                 }
@@ -774,6 +858,24 @@ final class SubjectLocator {
      * wins.
      */
     private static float[] objectIn(Bitmap frame) {
+        return objectIn(frame, false);
+    }
+
+    /**
+     * Only the middle of the frame: what the phone is pointed at, with no fallback to the best
+     * scoring blob anywhere else.
+     *
+     * <p>Used to arbitrate between detectors. A face at the edge of the frame is a bystander, and
+     * an object in the corner is in the shot by accident -- when the middle holds something, that
+     * is the subject, whichever detector happened to find something first.
+     *
+     * @return the centre blob as a subject triple, or null when the middle is a surface
+     */
+    private static float[] centredIn(Bitmap frame) {
+        return objectIn(frame, true);
+    }
+
+    private static float[] objectIn(Bitmap frame, boolean centreOnly) {
         final int width = frame.getWidth();
         final int height = frame.getHeight();
         final int[] data = new int[width * height];
@@ -966,6 +1068,7 @@ final class SubjectLocator {
                 width, height);
             if (centred != null) return centred;
         }
+        if (centreOnly) return null;
 
         // peak * 0.55 only ever captured the loudest patch -- the logo on a can, not the can. A
         // third of the peak still excludes flat backdrop but lets a blob reach the whole object.
@@ -1140,6 +1243,7 @@ final class SubjectLocator {
         int[] stack = new int[gw * gh];
         boolean[] seen = new boolean[gw * gh];
         int bestCount = 0, bestLeft = 0, bestRight = 0, bestUpper = 0, bestLower = 0;
+        float bestRank = 0f;
         for (int seed = 0; seed < leaf.length; seed++) {
             if (!leaf[seed] || seen[seed]) continue;
             int top = 0;
@@ -1165,7 +1269,16 @@ final class SubjectLocator {
                     }
                 }
             }
-            if (count > bestCount) {
+            // Largest wins only among plants the phone is actually pointed at. A windowsill of
+            // pots beside a single flower filled more of the frame and took the shot; position now
+            // weighs in, so the mass in the middle outranks the bigger mass at the edge.
+            float cx = (left + right + 1) * 0.5f / gw;
+            float cy = (upper + lower + 1) * 0.5f / gh;
+            float dx = cx - 0.5f, dy = cy - 0.5f;
+            float dist = (float) Math.sqrt(dx * dx + dy * dy);
+            float rank = count * (1f - 0.45f * Math.min(1f, dist / 0.60f));
+            if (rank > bestRank) {
+                bestRank = rank;
                 bestCount = count;
                 bestLeft = left;
                 bestRight = right;
@@ -1233,8 +1346,11 @@ final class SubjectLocator {
         int cgx = gw / 2;
         int cgy = gh / 2;
         // A subject framed roughly on the thirds is still "aimed at", so the search window is wide
-        // enough to reach it: a tenth of the frame either side covers a can held off centre.
-        int radius = Math.max(2, Math.round(gw * 0.10f));
+        // enough to reach it: a seventh of the frame either side covers a can held off centre, or a
+        // subject the user put on a third line. It used to be a tenth, and anything the user aimed
+        // slightly off -- the usual case when the phone is held one-handed -- fell through to the
+        // whole-frame scorer, which then picked whatever large thing sat beside it.
+        int radius = Math.max(2, Math.round(gw * 0.14f));
         int seed = -1;
         float best = 0f;
         for (int y = Math.max(0, cgy - radius); y <= Math.min(gh - 1, cgy + radius); y++) {
@@ -1246,9 +1362,12 @@ final class SubjectLocator {
             }
         }
         // Nothing in the middle stands out from the frame at all: treat the shot as subject-less.
-        if (seed < 0 || best < mean * 1.05f) return null;
+        // The margin over the mean is deliberately thin. At 1.05 a subject lit softer than its
+        // background -- a pale object against a bright wall, which is most of what gets shot
+        // indoors -- read as "nothing here", and the pass fell through to the corner picker.
+        if (seed < 0 || best < mean * 1.02f) return null;
 
-        float floor = Math.max(mean * 1.05f, best * 0.30f);
+        float floor = Math.max(mean * 1.02f, best * 0.28f);
         float[] blob = growBlob(score, tone, satMap, used, stack, seed, floor, gw, gh, cellLimit,
             0, gw - 1, 0, gh - 1);
         if (blob == null || blob[0] < 4) {
@@ -1265,9 +1384,12 @@ final class SubjectLocator {
             + (upper <= 0 ? 1 : 0) + (lower >= gh - 1 ? 1 : 0);
         // The middle of the frame cannot be mostly backdrop, mostly speck, or a band across an
         // edge; any of those means the centre happened to land on a surface, not on a thing.
+        // The lower bounds are loose on purpose: a small subject held at arm's length sits near
+        // 2-3% of the frame, and the old 8% / 1.2% pair rejected exactly those, which is why the
+        // first press so often framed a neighbour instead.
         boolean usable = boxW <= 0.88f && boxH <= 0.88f
-            && boxW >= 0.08f && boxH >= 0.08f
-            && area >= score.length * 0.012f
+            && boxW >= 0.06f && boxH >= 0.06f
+            && area >= score.length * 0.009f
             && edges < 3;
         if (!usable) {
             java.util.Arrays.fill(used, false);

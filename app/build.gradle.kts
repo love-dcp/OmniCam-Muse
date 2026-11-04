@@ -12,8 +12,8 @@ android {
         applicationId = "local.jiege.camera"
         minSdk = 28
         targetSdk = 35
-        versionCode = 575
-        versionName = "Muse 4.4.4-r132"
+        versionCode = 576
+        versionName = "Muse 4.4.4-r133"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }
