@@ -3,6 +3,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// The version the settings APK reports has to equal the one the module reports, and keeping the
+// two in separate files meant they silently drifted: module/module.prop went to r149 while this
+// block still said r147, so an APK built from r149 sources still announced "Muse 4.4.4-r147".
+// build.ps1 now reads module.prop and passes both values in, which makes module.prop the single
+// source of truth. The literals below are only a fallback for a bare `gradlew assembleRelease`.
+val moduleVersionCode = (findProperty("omnicamVersionCode") as String?)?.toIntOrNull() ?: 590
+val moduleVersionName = (findProperty("omnicamVersionName") as String?) ?: "Muse 4.4.4-r147"
+
 android {
     namespace = "local.jiege.camera"
     compileSdk = 37
@@ -12,8 +20,8 @@ android {
         applicationId = "local.jiege.camera"
         minSdk = 28
         targetSdk = 35
-        versionCode = 590
-        versionName = "Muse 4.4.4-r147"
+        versionCode = moduleVersionCode
+        versionName = moduleVersionName
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }

@@ -88,6 +88,31 @@ seed_prop() {
     fi
 }
 log "--- mirrored properties ---"
+# The settings app's own store is the source of truth for every switch; the properties below are
+# only its projection, rewritten by the app at start-up. Put the store back FIRST, or the first
+# launch resets whatever these properties just restored (soft-light strength 7 came back as 0).
+PREFS_SRC=/sdcard/OmniCam-Muse/app-prefs/module_settings.xml
+PREFS_DST=/data/data/local.jiege.camera/shared_prefs/module_settings.xml
+if [ -f "$PREFS_SRC" ]; then
+    if [ ! -d /data/data/local.jiege.camera ]; then
+        log "  settings app not installed yet, preferences left for the next run"
+    elif [ -f "$PREFS_DST" ]; then
+        log "  settings-app preferences already present, left alone"
+    else
+        mkdir -p "${PREFS_DST%/*}" 2>/dev/null
+        if cp -f "$PREFS_SRC" "$PREFS_DST" 2>/dev/null; then
+            _uid=$(stat -c %u /data/data/local.jiege.camera 2>/dev/null)
+            [ -n "$_uid" ] && chown "$_uid:$_uid" "$PREFS_DST" 2>/dev/null
+            chmod 0660 "$PREFS_DST" 2>/dev/null
+            restorecon "$PREFS_DST" 2>/dev/null || true
+            log "  restored settings-app preferences from $PREFS_SRC"
+        else
+            log "  could not restore $PREFS_DST"
+        fi
+    fi
+else
+    log "  no settings-app preference backup (clean install)"
+fi
 # Replay the backup the full uninstaller leaves behind before seeding defaults: those properties
 # were the user's actual settings, and they are the only copy that survives a pm-uninstall.
 # Only properties that are currently absent are written, so anything the user changed after the
@@ -210,21 +235,40 @@ fi
 # ---------------------------------------------------------------------------
 # 6. Report what is actually mounted, so a failure is visible without logcat.
 # ---------------------------------------------------------------------------
+BIND_TARGETS="/odm/etc/camera/meishe_lut
+/odm/etc/camera/filters_lut
+/odm/etc/camera/basictone
+/odm/etc/camera/oplus_eis_camera.vcfg
+/odm/etc/camera/config/oplus_camera_algo_switch_config
+/odm/etc/camera/config/camera_unit_config
+/odm/etc/camera/config/camera_unit_feature_config.protobuf
+/vendor/lib64/camera/components/com.qti.stats.caflogicaldriver.so"
+
+report_binds() {
+    BIND_MISSING=
+    for T in $BIND_TARGETS; do
+        if grep -q " $T " /proc/self/mounts 2>/dev/null; then
+            log "  ok      $T"
+        else
+            log "  MISSING $T"
+            BIND_MISSING="$BIND_MISSING $T"
+        fi
+    done
+}
+
 log "--- resulting binds ---"
-for T in /odm/etc/camera/meishe_lut \
-         /odm/etc/camera/filters_lut \
-         /odm/etc/camera/basictone \
-         /odm/etc/camera/oplus_eis_camera.vcfg \
-         /odm/etc/camera/config/oplus_camera_algo_switch_config \
-         /odm/etc/camera/config/camera_unit_config \
-         /odm/etc/camera/config/camera_unit_feature_config.protobuf \
-         /vendor/lib64/camera/components/com.qti.stats.caflogicaldriver.so ; do
-    if grep -q " $T " /proc/self/mounts 2>/dev/null; then
-        log "  ok      $T"
-    else
-        log "  MISSING $T"
-    fi
-done
+report_binds
+# A bind can disappear between the mount phase and this report. post-mount.sh tears the /odm/lib64
+# overlay down and rebuilds it, and a directory whose source it recreates loses its mount; on the
+# first fresh install meishe_lut was reported MISSING here while bind.log, written minutes earlier
+# by the same run, said "dir bind ok /odm/etc/camera/meishe_lut". Replaying the mount phase brought
+# all eight back. Do that automatically instead of leaving the user without the master-colour LUTs.
+if [ -n "$BIND_MISSING" ]; then
+    log "repair: replaying the mount phase for:$BIND_MISSING"
+    sh "$MODDIR/post-fs-data.sh" >>"$LOG" 2>&1
+    log "--- resulting binds (after replay) ---"
+    report_binds
+fi
 
 log "--- staged data ---"
 log "  pop_port=$(find "$CAM/files/pop_port" -type f 2>/dev/null | wc -l) files"
@@ -237,6 +281,42 @@ if [ -f "$CAM/shared_prefs/override_config_data.xml" ]; then
     log "  $(grep -c '<string' "$CAM/shared_prefs/override_config_data.xml") keys staged"
 else
     log "  MISSING override_config_data.xml"
+fi
+
+log "--- LSPosed module record ---"
+# LSPosed loads the hooks from the APK path it stored in its own database, and a `pm uninstall` +
+# reinstall gives the package a new /data/app/<hash> path. When the recorded path no longer exists
+# the hooks do not load at all, with no error anywhere in logcat: POP crashes on its first preview
+# frame and the inspiration-composition and 哈苏超清 entries never appear. LSPosed does re-scan
+# after a plain install (measured on PKJ110 2026-11-04: the record was still stale while CompReal
+# was already logging), so this reports the mismatch and how to confirm, and never edits the
+# database - rewriting it while lspd runs is what produced "system framework injection failed".
+LSPD_DB=/data/adb/lspd/config/modules_config.db
+if [ -f "$LSPD_DB" ]; then
+    # /system/bin/pm explicitly: under the setsid'd finish script the shell PATH is short enough
+    # that a bare `pm` resolved to nothing and this check reported "not installed" right after a
+    # successful install.
+    PM_BIN=/system/bin/pm
+    [ -x "$PM_BIN" ] || PM_BIN=pm
+    REAL_APK=$("$PM_BIN" path local.jiege.camera 2>/dev/null | sed -n 's/^package://p' | head -n 1)
+    REC_APK=$(grep -a -o "/data/app/[^/]*/local\.jiege\.camera-[^/]*/base\.apk" "$LSPD_DB" 2>/dev/null | head -n 1)
+    if [ -z "$REAL_APK" ]; then
+        log "  settings app not installed, nothing to check"
+    elif [ -z "$REC_APK" ]; then
+        log "  LSPosed has no record yet - enable the module in LSPosed once"
+    elif [ "$REC_APK" = "$REAL_APK" ]; then
+        log "  ok      record matches the installed APK"
+    else
+        log "  WARN    LSPosed recorded a different APK path than the installed one:"
+        log "            recorded: $REC_APK"
+        log "            actual  : $REAL_APK"
+        log "            Measured on PKJ110: LSPosed re-scans after a plain install and the hooks do"
+        log "            load, so this is often already fine. Confirm with"
+        log "            logcat -d | grep CompReal - a line means the hooks are live."
+        log "            If that prints nothing, toggle this module off/on in LSPosed once."
+    fi
+else
+    log "  no LSPosed database, skipped"
 fi
 
 log "selfheal done: $(date '+%Y-%m-%d %H:%M:%S')"

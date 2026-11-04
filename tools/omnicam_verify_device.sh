@@ -28,6 +28,19 @@ fi
 [ -f "$MDIR/update" ] && warn "update 标志还在（下次开机会被覆盖）" || ok "无 update 标志"
 [ -f "$MDIR/remove" ] && bad "存在 remove 标志（重启即卸载）" || true
 
+# 模块版本和设置 APK 的版本必须一致。r149 曾经把 r149 的模块配上 r147 的 APK：
+# build.gradle.kts 里另有一份 versionName，改 module.prop 时漏改，装完设置页显示旧版本号。
+# 现在 build.ps1 从 module.prop 传参并用 aapt2 回读校验，这里再加一道设备端守卫。
+MV=$(sed -n 's/^version=//p' "$MDIR/module.prop" 2>/dev/null | head -1 | tr -d '\r')
+AV=$(dumpsys package local.jiege.camera 2>/dev/null | sed -n 's/.*versionName=//p' | head -1 | tr -d '\r')
+if [ -z "$AV" ]; then
+  bad "设置 APK 未安装"
+elif [ "$MV" = "$AV" ]; then
+  ok "APK 版本与模块一致：$AV"
+else
+  bad "APK 版本不一致：模块=$MV / APK=$AV"
+fi
+
 echo "=== 2. /odm bind（8 条逐项）==="
 NB=0
 for p in \

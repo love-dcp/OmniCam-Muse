@@ -368,6 +368,26 @@ remove_mountify_workspace() {
     done
 }
 
+# The settings app keeps every switch in one SharedPreferences file, and the
+# persist.omnicam.* properties are only a projection of it: at start-up the app rewrites them from
+# its own store. Backing up the properties alone therefore loses the setting again on the first
+# launch after a reinstall (measured 2026-11-04: soft-light strength 7 came back as 0).
+# Copy the store out as well; selfheal.sh puts it back before the app starts.
+PREFS_BACKUP_DIR=/sdcard/OmniCam-Muse/app-prefs
+backup_app_prefs() {
+    _src=/data/data/$APP_PKG/shared_prefs/module_settings.xml
+    if [ ! -f "$_src" ]; then
+        say "  设置应用暂无偏好文件，跳过备份"
+        return 0
+    fi
+    if mkdir -p "$PREFS_BACKUP_DIR" 2>/dev/null \
+        && cp -f "$_src" "$PREFS_BACKUP_DIR/module_settings.xml" 2>/dev/null; then
+        say "  已备份设置应用到 $PREFS_BACKUP_DIR"
+    else
+        warn "设置应用偏好备份失败"
+    fi
+}
+
 # Deletes every persist.omnicam.* property. `resetprop` ships with KernelSU (and Magisk);
 # without it the properties cannot be removed cleanly, so report that instead of leaving an
 # empty value behind.
@@ -519,21 +539,38 @@ clean_prefs() {
     done
 }
 
-# Removes the settings app and everything the package manager may leave behind if the
-# normal uninstall path fails.
+# The settings app carries the LSPosed registration: LSPosed stores the module's APK path in
+# its own database, and a `pm uninstall` + reinstall gives the package a new /data/app/<hash>
+# path. Measured on PKJ110 (2026-11-04): after a full uninstall + reinstall, LSPosed still had
+# the deleted path, so it loaded no module at all - no hooks, POP crashed on the first frame
+# (PopInverseMaskProgram never injected), the inspiration-composition entry and the 哈苏超清
+# button were gone. Nothing in the module can repair that without writing LSPosed's SQLite
+# database, so by default a full uninstall keeps the APK and only wipes its data; the next
+# reinstall is an in-place update and LSPosed keeps working.
+# Set OMNICAM_PURGE_APP=1 for a real removal (then LSPosed must be told about the module again).
 uninstall_settings_app() {
     APP_STILL_INSTALLED=0
     if ! command -v pm >/dev/null 2>&1; then
         APP_STILL_INSTALLED=1
-        warn "找不到 pm，未卸载设置应用：$APP_PKG"
+        warn "找不到 pm，设置应用保持原样：$APP_PKG"
         return 0
     fi
-    if pm path "$APP_PKG" >/dev/null 2>&1; then
-        say "  卸载设置应用 $APP_PKG"
-        am force-stop "$APP_PKG" >/dev/null 2>&1 || true
-        pm uninstall "$APP_PKG" >/dev/null 2>&1 || \
-            pm uninstall --user 0 "$APP_PKG" >/dev/null 2>&1 || true
+    if ! pm path "$APP_PKG" >/dev/null 2>&1; then
+        say "  设置应用未安装，跳过"
+        return 0
     fi
+    if [ "${OMNICAM_PURGE_APP:-0}" != "1" ]; then
+        say "  保留设置应用（保住 LSPosed 登记），只清空它的数据"
+        am force-stop "$APP_PKG" >/dev/null 2>&1 || true
+        pm clear "$APP_PKG" >/dev/null 2>&1 || warn "清空 $APP_PKG 数据失败"
+        # Data cleared, package kept: LSPosed must keep its record for this package.
+        APP_STILL_INSTALLED=1
+        return 0
+    fi
+    say "  卸载设置应用 $APP_PKG（OMNICAM_PURGE_APP=1）"
+    am force-stop "$APP_PKG" >/dev/null 2>&1 || true
+    pm uninstall "$APP_PKG" >/dev/null 2>&1 || \
+        pm uninstall --user 0 "$APP_PKG" >/dev/null 2>&1 || true
     if pm path "$APP_PKG" >/dev/null 2>&1; then
         # Do not delete the package directory behind the package manager's back: a half
         # uninstalled app is worse than a retry on the next boot.
@@ -605,6 +642,7 @@ cleanup_module_full() {
     unmount_ours
 
     say "- 卸载设置应用"
+    backup_app_prefs
     uninstall_settings_app
     [ "$APP_STILL_INSTALLED" = "0" ] && clean_lsposed_module_data
 

@@ -6,10 +6,23 @@ $ErrorActionPreference = 'SilentlyContinue'
 $project = $PSScriptRoot
 $python = if ($env:OMNICAM_PYTHON) { $env:OMNICAM_PYTHON } else { 'python' }
 $version = ((Get-Content (Join-Path $project 'module/module.prop') | Where-Object { $_ -like 'version=*' }) -replace '^version=(Muse )?', '').Trim()
+# module.prop is the single source of truth for the version. app/build.gradle.kts used to carry its
+# own copy, so bumping module.prop alone produced an APK that still announced the old release
+# (r149 shipped an APK reporting "Muse 4.4.4-r147"). Both values are passed to Gradle below and the
+# built APK is read back afterwards, so this cannot drift again without failing the build.
+$versionName = ((Get-Content (Join-Path $project 'module/module.prop') | Where-Object { $_ -like 'version=*' }) -replace '^version=', '').Trim()
+$versionCode = ((Get-Content (Join-Path $project 'module/module.prop') | Where-Object { $_ -like 'versionCode=*' }) -replace '^versionCode=', '').Trim()
+if (-not $versionName -or -not $versionCode) { throw 'module/module.prop is missing version= or versionCode=.' }
 $sdkProperties = Join-Path $project 'local.properties'
 if (-not (Test-Path -LiteralPath $sdkProperties)) {
     if (-not $env:ANDROID_HOME) { throw 'Set ANDROID_HOME or create local.properties with sdk.dir.' }
     Set-Content -LiteralPath $sdkProperties -Encoding utf8NoBOM -Value ('sdk.dir=' + $env:ANDROID_HOME.Replace('\', '/'))
+}
+$sdkDir = ((Get-Content -LiteralPath $sdkProperties | Where-Object { $_ -like 'sdk.dir=*' }) -replace '^sdk.dir=', '').Trim()
+$buildToolsDir = $null
+$btPath = Join-Path $sdkDir.Replace('/', '\') 'build-tools'
+if (Test-Path -LiteralPath $btPath) {
+    $buildToolsDir = Get-ChildItem -Path $btPath -Directory | Sort-Object Name | Select-Object -Last 1
 }
 & $python (Join-Path $project 'tools/mastercolor/check_catalog.py')
 if ($LASTEXITCODE -ne 0) { throw 'Master colour catalog validation failed.' }
@@ -25,7 +38,7 @@ $buildStart = Get-Date
 try {
     Push-Location "$($drive):\"
     try {
-        & .\gradlew.bat :app:assembleRelease --console=plain
+        & .\gradlew.bat :app:assembleRelease --console=plain "-PomnicamVersionCode=$versionCode" "-PomnicamVersionName=$versionName"
         if ($LASTEXITCODE -ne 0) { throw 'Gradle build failed.' }
     } finally { Pop-Location }
 } finally { subst "$($drive):" /D }
@@ -61,6 +74,22 @@ if (-not (Test-Path -LiteralPath $built)) { throw "Missing output: $built" }
 # artifact has to have been written by this run.
 if ((Get-Item -LiteralPath $built).LastWriteTime -lt $buildStart) {
     throw "Stale output: $built was not rebuilt by this run (Gradle failed silently)."
+}
+# Read the version back out of the APK instead of trusting the Gradle call. A wrong versionName is
+# invisible until the user opens the settings page, and it already shipped once (r149 announced
+# r147). aapt2 ships with the build tools, so this costs nothing.
+if ($buildToolsDir) {
+    $aapt2 = Join-Path $buildToolsDir.FullName 'aapt2.exe'
+    if (Test-Path -LiteralPath $aapt2) {
+        $badging = (& $aapt2 dump badging $built 2>$null) -join "`n"
+        if ($badging -notmatch [regex]::Escape("versionName='$versionName'")) {
+            throw "APK version name mismatch: expected '$versionName', aapt2 reports: $($badging -split "`n" | Where-Object { $_ -like 'package:*' })"
+        }
+        if ($badging -notmatch [regex]::Escape("versionCode='$versionCode'")) {
+            throw "APK version code mismatch: expected '$versionCode', aapt2 reports: $($badging -split "`n" | Where-Object { $_ -like 'package:*' })"
+        }
+        Write-Output "APK version verified: $versionName (code $versionCode)"
+    }
 }
 if ($signed) {
     # Remove-Item by pipeline input fails silently under a profile that wraps it with a

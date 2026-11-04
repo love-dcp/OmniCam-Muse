@@ -163,13 +163,13 @@ MODULE_SCRIPTS = {
     # installs the APK; apply-now.sh binds the native patches without a reboot.
     "service.sh": (15276, "b97af2b8915343d73dae03ce1713919b"),
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
-    "uninstall_full.sh": (26621, "1fad4868a0dac11b23d8c9c0bc9dc302"),
+    "uninstall_full.sh": (28772, "ac8ddb66cece6c162ff78959ce9afdb4"),
     "action.sh": (2741, "75ddeb3ab87ac843eea37eda70c7b73d"),
-    "customize.sh": (13614, "283c64281623bb012fcb79b505ba9f58"),
+    "customize.sh": (14467, "93c32c4a337a5a396b7641ba8c3079cf"),
     "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
     # r147: the flash-time self-heal (staged data + /odm binds + mode table). customize.sh
     # calls it directly, and mountify runs it through MODULE_HOT_RUN_SCRIPT after the swap.
-    "selfheal.sh": (12077, "3bf43471fe9f3f52c489cafac951a618"),
+    "selfheal.sh": (16333, "49750312a6e83b682e5e3077ff8347f4"),
     "x8u-fix-pop.sh": (9181, "2964db9cccf9d7197ece95eab99af699"),
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),
     "x8u-fix-vibrant.sh": (8919, "c1592457cb521e1016a13c68c51bf513"),
