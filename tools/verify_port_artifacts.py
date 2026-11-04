@@ -139,6 +139,11 @@ MODULE_SCRIPTS = {
     #   customize.sh      7 785  - the r31 flash-time property cleanup, plus r32 dropping a
     #                              `gallery` hook skip left over from the removed
     #                              GalleryReturnRecovery
+    #   customize.sh      9 852  - r136 adds the composition-switch reset below the property
+    #                              cleanup: a `persist.omnicam.*` left in its debug position
+    #                              (realfollow=0, aesthetic=1, compdump=1) survived the flash and
+    #                              made the new build look broken, so a flash now puts them back
+    #                              to shipped defaults. Nothing else in the file changed.
     "post-fs-data.sh": (29228, "e6a140df3b12c565e5d755922c3bd9b5"),
     "post-mount.sh": (13203, "ef016e422316466a97dd7e4581ef8a56"),
     # r23: service.sh now clears the in-place update marker; uninstall.sh distinguishes
@@ -149,7 +154,7 @@ MODULE_SCRIPTS = {
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
     "uninstall_full.sh": (25600, "6a05587a77cb5184603021c39e4cea08"),
     "action.sh": (1633, "de4aa3da4aaf0d33140da503a63eaa66"),
-    "customize.sh": (7785, "e55f761c68a3c141133a877b86711b01"),
+    "customize.sh": (9852, "ea5098e134a1c160ed6501427b81abc0"),
     "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
     "x8u-fix-pop.sh": (9181, "2964db9cccf9d7197ece95eab99af699"),
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),

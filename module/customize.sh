@@ -148,4 +148,38 @@ case "$SKIP" in
         ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Composition tuning switches: back to shipped defaults at flash time.
+#
+# The composition hooks (灵感构图 / 实景构图) read a set of `persist.omnicam.*` properties that
+# nothing in the settings app writes -- they exist so a behaviour can be A/B tested without a
+# rebuild, and every reader passes a default, so empty means "as shipped". They survive a flash,
+# a reboot, and "clear camera data", which makes a switch left in its debug position look like a
+# broken build on the very next install: realfollow=0 turns the subject detector off entirely,
+# aesthetic=1 brings back the 276 MB the AIU iqa model costs, compdump=1 writes a 3 MB PNG per
+# pass, comp.master=0 hides the entry in 大师, compiconall=1 puts it back in every other mode.
+#
+# Reset here and only here. Doing it on every boot would also be defensible, but it would quietly
+# undo a value someone set on purpose (comp.master=0, objectdetect=0) at the next restart; a flash
+# is the one moment "shipped defaults" is what was asked for.
+COMP_PROPS="aesthetic memgate rearm gateopen realfollow realforce realprobe realself realtrack
+realtrack2 croptrace viewdump cloudcomp demoinject compforce compclear compdump compshot
+compiconall compiconlift comppref comppush compguard objectdetect objectfirst plantdetect
+scenedetect centrefirst centreanchor
+comp.directzoom comp.fallback comp.fixzoom comp.freeze comp.gr comp.hold comp.k4invert comp.keep
+comp.landing comp.master comp.noaiunit comp.refresh comp.ride comp.skipalign comp.skipzoom
+comp.trackok comp.twice comp.zoom"
+RESET=""
+for P in $COMP_PROPS; do
+    V=$(getprop "persist.omnicam.$P" 2>/dev/null)
+    [ -n "$V" ] || continue
+    setprop "persist.omnicam.$P" "" 2>/dev/null && RESET="$RESET $P=$V"
+done
+if [ -n "$RESET" ]; then
+    ui_print "- Composition switches back to defaults (were:$RESET)"
+    printf 'composition switches reset to defaults:%s\n' "$RESET" >> "$MODPATH/install.log"
+else
+    ui_print "- Composition switches already at defaults"
+fi
+
 true
