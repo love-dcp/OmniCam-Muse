@@ -160,43 +160,85 @@ libQnnHtp.so（Hexagon NPU，shared_buffer + weight sharing）
 
 ## 五、能不能改进我们的灵感构图
 
-### 5.1 不可行：把端侧模型搬到 X8U
+### 5.1 那个 so 能不能直接拿过来用：装得进去，跑不起来
 
-1. 模型是 **QNN context binary**，绑 Hexagon v85 + `soc_model 103`，MTK 天玑平台
-   的 NPU（APU/VPU）无法执行；
-2. `libai_camera_composition_lite2.so` 依赖 `libQnnHtp.so` / `libQnnSystem.so` /
-   `libQnnHtpV85Stub.so`，MTK 上没有；
-3. 权重只有 `.bin`，没有原始 FastViT/Qwen 训练格式，无法重新导出成 MTK 后端；
-4. X8U 的相机 APK 里连调用方（`CompositionProcessor` / `AICameraCompositionLite2`）
-   都没有，补 so 也没人调。
+先修正一句前面写得含糊的话：`libai_camera_composition_lite2.so` **并不链接** QNN 库。
+用 `tools/elf_deps.py deps` 读它自己的动态段，NEEDED 只有五个：
 
-结论：端侧这条路对我们**不可移植**，云端方案是唯一可行路径，这一点之前的判断是对的。
+```
+NEEDED  liblog.so
+NEEDED  libm.so
+NEEDED  libc++_shared.so
+NEEDED  libdl.so
+NEEDED  libc.so
+SONAME  libai_camera_composition_lite2_q.so
+```
 
-### 5.2 可借鉴（能实际落地的部分）
+全是任何 Android 都有的库，所以 `dlopen` 在 X8U 上**不会因为缺库失败**。SONAME 带 `_q`
+后缀，说明 OPPO 是「一个引擎 + 按厂商出变体」的构建方式。
 
-1. **输出协议对齐**
-   我们现在 push 给 `onEvent(1/2, json)` 的 JSON 如果与上面的
-   `outputNum/crops[]/zoom/srcCrop/confidenceLevel/compositionDesc` 完全一致，
-   就能白拿 UI 侧的全部能力（多候选、标题+描述、置信度）。建议把我们的云端返回
-   规范化成这个 schema，字段名不改。
+真正拦住它的是三处硬约束，都能在二进制里读到：
 
-2. **prompt 与预算**
-   一加16 用的是一句话 prompt + `max_new_tokens = 96`：
-   「请从摄影美学角度分析该图像，给出构图更优的裁剪框并解释构图思路。」
-   云端插件可以用同样的措辞与输出长度约束，减少无效文本、降低延迟。
+| 约束 | 证据 |
+|---|---|
+| **SoC 白名单** | `runllm::socguard` 内嵌表只有 `SM8975 / SM8850 / SM8950` 三项，`configSocModel` 先查表 |
+| **后端按路径 dlopen** | `QcomLite2Impl::init()` → `qnn_runtime_preflight::check<DynamicLoader>`，从 yaml 的 `backend_library` 取 `/odm/lib64/libQnnHtp.so`，MTK 上不存在 |
+| **没有非高通后端** | 符号里只有 `QcomLite2Impl`，没有任何 CPU / SNPE / TFLite 回退路径 |
 
-3. **多候选**
-   一加16 会同时给 1~2 个候选（不同 zoom 对应不同取景意图）。我们目前若只回一个，
-   可以让云端按 2 个候选返回，UI 侧本来就有 `mCompositionResults` 列表。
+也就是说：so 装进去、`dlopen` 成功，但 `init()` 会先被 socguard 拒，再被 QNN dlopen 拒，
+拿到后端也读不了权重——`vision.bin` 等是 HTP context binary，与 Hexagon v85 绑定。
 
-4. **前置过滤顺序**
-   端侧是「AntiSpam 审核 → 推理 → 状态机」。我们 hook 的
-   `runCompositionStreaming` 里，先把审核判 PASS 再等云端，能减少一次无效往返。
+另外两条有用的线索：
 
-5. **异步不阻塞**
-   一加16 把推理放 `AICompositionThread`，主线程只收回调。我们的
-   `comp.block` 原地等待 2200 ms 属于「伪端侧」，可以保留，但要注意
-   `holdingPass` 的窗口不要被 `reopenComposition()` 打断（现有实现已处理）。
+- `libApsAICompositionJni.so` 里有 `nativeInitComposition_dlopen` 和
+  `nativeRunCompositionStreaming, streaming not supported by loaded so`，证明 JNI 层是
+  **按名字 dlopen 后端**、再 `dlsym` 出 `Lite2_RunStreamingFunc` / `Lite2_RunFromRgbaFunc`。
+  换句话说上层完全不在乎后端是谁——如果哪天有 MTK 变体，接口是现成的。
+- 同一个 so 里还有 `TrackerAPI_trackFrameFunc` / `TrackerAPI_setTargetPointInfoFunc`，
+  这就是我们之前判定「本机缺 tracker」的那个东西，它和构图引擎是同一个包发出来的。
+
+补充：`libApsAICompositionJni.so` 本次提取到 0x54000–0x57FFF 是空洞（动态段正在其中），
+所以它的 NEEDED 表只能从字符串区反推（`libvndksupport/libdl/libc/liblog/libandroid/
+libnativewindow/libm`，同样全是平台库）。如果需要完整文件，得先补 EROFS 跨 pcluster 回引。
+
+结论：**这条路走不通**，而且不是「改个配置」能通的——socguard 是写死的表，QNN 是别家的 NPU。
+
+### 5.2 可借鉴（已落地的部分）
+
+1. **输出协议对齐** — *原本就一致，未改动*
+   `CloudComposer.jsonOf()` 吐的就是
+   `outputNum/crops[]/zoom/srcCrop/version/confidenceLevel/compositionDesc`，字段名一个不差。
+
+2. **多候选用模型自己的框** — *已改*
+   原实现把云端返回的多余 box 全部丢弃，只取第一个，然后**伪造**一个同中心的 tighter
+   候选凑两张卡（注释里也写着「相机每次事件只收一个建议」）。一加16 的采样证明
+   `outputNum:2` 且每个 crop 自带独立 `zoom` 与 `compositionDesc` 是完全合法的，
+   所以现在改成：最多收 2 个真框，各自算 zoom、各自写描述；只有模型确实只给一个框
+   （或两个框被 zoom 下限挤到同一档）时，才用 `tighter()` 合成第二张。
+
+3. **候选间距与三段式文案** — *已改*
+   注释写「stock 是 3.0x 和 4.76x，比例 1.59，卡片行按那个形状排」，代码里却写的
+   `TIGHT_RATIO = 1.15`——两张卡几乎重合。已改回 `1.59`。
+   同时照一加16 的 `title + desc1..3` 结构：宽候选 `AI 灵感构图`、紧凑候选
+   `AI 灵感特写`，`desc1` 用模型给的 ratio 解读，`desc2` 由裁剪框中心算出
+   「取景中心偏左、居中高度」，不再是一句万能套话。
+
+4. **审核先于请求** — *已改*
+   端侧顺序是「AntiSpam 审核 → 推理」。我们原来是「先发云端请求 → 相机再拿裁好的图
+   去 AIUnit 审核 → 超时/失败才被我们改成 PASS」，等于每张照片白跑一次上传。
+   现在 hook `AntiSpamUtil.e(Bitmap)`（发起审核那个方法）**在发出去之前**就写好
+   `PASS` 并回收帧：帧不出设备，条件变量不被关闭，`a(long)` 立刻返回，整个往返消失。
+   `a(long)` 原本超时也返回 PASS，所以裁决从来不是决定性因素，短路没有损失。
+
+5. **prompt + 96 token** — *无法落地*
+   这条只对「自己做生成」的路径有效。我们的云端客户端是
+   `AICompositionClient.process(Bitmap, AICompositionCallback)`，签名里没有 prompt，
+   也不回自然语言，只回 box + ratio 标签；文案是我们自己拼的。所以照抄 prompt 无处可放，
+   能借的只是「96 token 够用」这个预算感——已体现在 `desc1/desc2` 的长度控制上。
+
+6. **异步不阻塞** — *保持现状*
+   一加16 把推理放 `AICompositionThread`。我们的 `comp.block` 原地等 2200 ms 是刻意的
+   「伪端侧」，`holdingPass` 窗口已处理 `reopenComposition()` 打断，不动。
 
 ### 5.3 想要端侧能力时的替代思路（成本高，仅供参考）
 
@@ -227,6 +269,7 @@ adb shell 'grep -c AICameraCompositionLite2 /data/app/*/com.oplus.camera*/base.a
 |---|---|
 | `tools/erofs_extract.py` | 纯 Python EROFS 读取器（Windows 无 erofs-utils 也能用），支持 FLAT_PLAIN / FLAT_INLINE / COMPRESSED_COMPACT（4B 与 COMPACTED_2B）/ LZ4 与 LZMA，`list/tree/find/grep/cat/dump/info` |
 | `tools/dex_classes.py` | 不依赖 jadx 的 dex 类名/字符串检索（`list/grep/strings`） |
+| `tools/elf_deps.py` | 无 binutils 时读 so 的 DT_NEEDED / SONAME / 未定义符号（`deps/syms/undef`），5.1 那张表就是它出的 |
 | `tools/z_erofs_selftest.py` | COMPRESSED_COMPACT 索引探针 |
 
 已知限制：OPPO 的 mkfs 会给部分 pcluster 使用「跨 pcluster 回引 + 前导 0 填充」的

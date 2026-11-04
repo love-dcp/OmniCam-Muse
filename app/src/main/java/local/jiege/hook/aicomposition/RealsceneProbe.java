@@ -1726,7 +1726,9 @@ public final class RealsceneProbe {
      *
      * <p>The review exists to keep violating images from leaving the phone. A composition crop is
      * the camera's own on-screen hint and is never uploaded by us, so answering PASS locally costs
-     * nothing. {@code persist.omnicam.comp.antispam=0} restores the stock behaviour.
+     * nothing -- and answering it <em>before</em> the frame is handed to AIUnit also removes one
+     * upload and one round trip per photo-mode composition. {@code persist.omnicam.comp.antispam=0}
+     * restores the stock behaviour.
      */
     private static void hookAntiSpam(ClassLoader classLoader) {
         if ("0".equals(prop("persist.omnicam.comp.antispam", "1"))) {
@@ -1748,6 +1750,56 @@ public final class RealsceneProbe {
             Log.i(TAG, "review verdict has no PASS " + missing);
             return;
         }
+        // The obfuscator renames fields freely, but AntiSpamUtil declares exactly one of the
+        // verdict type, and that is the one the await returns.
+        Field verdictField = null;
+        for (Field field : util.getDeclaredFields()) {
+            if (field.getType() == verdict) {
+                field.setAccessible(true);
+                verdictField = field;
+                break;
+            }
+        }
+        final Field sink = verdictField;
+        final java.util.concurrent.atomic.AtomicInteger local = new java.util.concurrent.atomic.AtomicInteger();
+        int shorted = 0;
+        if (sink != null) {
+            for (Method method : util.getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
+                // e(Bitmap) is "start review": it closes the latch, hands the frame to AIUnit's
+                // antispam client and only opens the latch again from that client's callback.
+                // Answering it here is strictly better than letting it run and overriding the
+                // result afterwards -- the frame never leaves the device, the latch is never
+                // closed so a(long) returns without blocking, and the round trip disappears from
+                // every photo-mode composition. Nothing is lost: the stock await already falls
+                // back to PASS on timeout, so the verdict was never the deciding factor.
+                if (types.length != 1 || types[0] != android.graphics.Bitmap.class) continue;
+                if (method.getReturnType() != boolean.class) continue;
+                method.setAccessible(true);
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            sink.set(param.thisObject, pass);
+                        } catch (Throwable error) {
+                            // Let the real review run; the await hook below still has the last word.
+                            Log.i(TAG, "review pre-answer not possible: " + error);
+                            return;
+                        }
+                        // The review owns the frame once handed over -- its callback recycles it.
+                        Object frame = param.args[0];
+                        if (frame instanceof android.graphics.Bitmap) {
+                            android.graphics.Bitmap bitmap = (android.graphics.Bitmap) frame;
+                            if (!bitmap.isRecycled()) bitmap.recycle();
+                        }
+                        if (local.incrementAndGet() <= 3) {
+                            Log.i(TAG, "image review answered locally, frame stays on the device");
+                        }
+                        param.setResult(Boolean.TRUE);
+                    }
+                });
+                shorted++;
+            }
+        }
         int hooked = 0;
         for (Method method : util.getDeclaredMethods()) {
             // a(long) is the blocking "wait for the verdict" call. Matched by shape, not only by
@@ -1765,7 +1817,7 @@ public final class RealsceneProbe {
             });
             hooked++;
         }
-        Log.i(TAG, "image review pass-through: " + hooked);
+        Log.i(TAG, "image review: " + shorted + " upload short-circuited, " + hooked + " awaits passed through");
     }
 
     /**
