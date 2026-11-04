@@ -1202,6 +1202,15 @@ public final class RealsceneProbe {
                                           android.view.View preview) {
         android.view.View hit = hitTest(decor, x, y, 0);
         if (hit == null || hit == preview) return false;
+        // Before anything else, and regardless of what is drawn on top: the zoom ladder owns its
+        // whole rectangle. In 大师 that rectangle is 1080x949 -- it covers the pills, the shutter
+        // and the mode strip -- and the view takes the touch in onTouchEvent, so neither
+        // clickability nor size tells it apart from the viewfinder. Resolving it by id is the only
+        // z-order-independent answer, and a point inside it is a control by definition.
+        if (overZoomLadder(decor, x, y)) {
+            noteControl("zoom band", "zoom_seek_bar @" + Math.round(x) + "," + Math.round(y));
+            return true;
+        }
         int screenW = decor.getWidth();
         int screenH = decor.getHeight();
         // Large enough to be the viewfinder rather than a button on it.
@@ -1218,7 +1227,116 @@ public final class RealsceneProbe {
         }
         boolean fullScreen = hit.getWidth() >= screenW * 0.9f && hit.getHeight() >= screenH * 0.9f;
         if (fullScreen) return false;
+        if (namedControl(hit, preview, decor)) return true;
         return hit.isClickable() || hit instanceof android.widget.ImageView;
+    }
+
+    /**
+     * Is this view a camera control, judged by name rather than by size or clickability?
+     *
+     * <p>The zoom ladder is the one control that made this necessary, and only in 大师: there the
+     * whole bottom half is a single custom view ({@code zoom_seek_bar}, 1080x949 on a 1080x2376
+     * screen) that paints the 0.6/1x/2/3/6 pills itself and takes the touch in
+     * {@code onTouchEvent}. So {@code isClickable()} is false and the size tests call it neither
+     * a layer nor a full-screen surface, and a tap on a pill fell straight through to the
+     * viewfinder branch: that pinned the point under the pill, forced the on-device channel and
+     * reopened composition -- "构图之后点 1X/2X 会触发构图". 3x/6x looked healthy only because
+     * they switch sensor and the panel is gone before the box can come back.
+     *
+     * <p>Names are the one thing about these views that is not obfuscated: every control carries
+     * either a descriptive resource id (zoom_seek_bar, main_shutter_button,
+     * camera_menu_left_enter_button) or an unobfuscated class (MainShutterButton,
+     * AICompositionEnterButton), while the preview and the gesture layer carry neither. The walk
+     * stops at the preview and at anything the size of the screen, so the viewfinder itself can
+     * never be swallowed by an ancestor's name.
+     */
+    private static boolean namedControl(android.view.View hit, android.view.View preview,
+                                        android.view.View decor) {
+        int screenW = decor.getWidth();
+        int screenH = decor.getHeight();
+        android.view.View node = hit;
+        for (int depth = 0; node != null && depth < 5; depth++) {
+            if (node == preview || node == decor) return false;
+            if (node != hit
+                && node.getWidth() >= screenW * 0.9f && node.getHeight() >= screenH * 0.9f) {
+                return false;
+            }
+            String name = viewName(node);
+            for (String word : CONTROL_WORDS) {
+                if (name.contains(word)) {
+                    noteControl(word, name);
+                    return true;
+                }
+            }
+            android.view.ViewParent parent = node.getParent();
+            node = parent instanceof android.view.View ? (android.view.View) parent : null;
+        }
+        return false;
+    }
+
+    /**
+     * Words that only ever appear on a camera control, never on the viewfinder.
+     *
+     * <p>Kept short on purpose: "surface", "preview" and "layer" are absent because they are the
+     * viewfinder's own vocabulary, and a false positive here silently kills tap-to-pick.
+     */
+    private static final String[] CONTROL_WORDS = {
+        "zoom", "seek_bar", "seekbar", "shutter", "thumb", "menu", "filter", "palette",
+        "switch", "button", "entry", "strip", "beauty", "flash", "timer",
+    };
+
+    /** Lower-cased class + resource id, e.g. {@code ...view.e zoom_seek_bar}. */
+    private static String viewName(android.view.View view) {
+        StringBuilder name = new StringBuilder(view.getClass().getName());
+        int id = view.getId();
+        if (id != android.view.View.NO_ID) {
+            try {
+                name.append(' ').append(view.getResources().getResourceEntryName(id));
+            } catch (Throwable ignored) {
+                // Not a resource id, or the table is gone: the class name alone will do.
+            }
+        }
+        return name.toString().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** One line per distinct control, so a tap on the ladder leaves a usable trail. */
+    private static void noteControl(String word, String name) {
+        if (name.equals(lastControl)) return;
+        lastControl = name;
+        Log.i(TAG, "tap on a control, not the viewfinder (" + word + "): " + name);
+    }
+
+    private static String lastControl;
+
+    /** Resolved lazily: the id table is per-process and the view is recreated per mode. */
+    private static java.lang.ref.WeakReference<android.view.View> zoomLadder;
+    private static int zoomLadderId;
+
+    private static boolean overZoomLadder(android.view.View decor, float x, float y) {
+        android.view.View ladder = zoomLadder(decor);
+        if (ladder == null) return false;
+        int[] at = new int[2];
+        ladder.getLocationOnScreen(at);
+        return x >= at[0] && x < at[0] + ladder.getWidth()
+            && y >= at[1] && y < at[1] + ladder.getHeight();
+    }
+
+    private static android.view.View zoomLadder(android.view.View decor) {
+        android.view.View cached = zoomLadder == null ? null : zoomLadder.get();
+        if (cached != null && cached.isAttachedToWindow() && cached.getWidth() > 0) return cached;
+        if (zoomLadderId == 0) {
+            try {
+                zoomLadderId = decor.getResources().getIdentifier(
+                    "zoom_seek_bar", "id", decor.getContext().getPackageName());
+            } catch (Throwable ignored) {
+                zoomLadderId = -1;
+            }
+            if (zoomLadderId == 0) zoomLadderId = -1;
+        }
+        if (zoomLadderId < 0) return null;
+        android.view.View found = decor.findViewById(zoomLadderId);
+        zoomLadder = found == null ? null : new java.lang.ref.WeakReference<>(found);
+        return found;
     }
 
     /** Topmost visible view under a screen point; later children draw on top, so walk backwards. */
