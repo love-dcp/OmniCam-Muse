@@ -40,8 +40,19 @@ final class AestheticScorer {
 
     private AestheticScorer() {}
 
+    /**
+     * Off by default: measured on the PKJ110 it costs the camera process ~276 MB of native heap.
+     *
+     * <p>{@code process()} loads the iqa model into the calling process and keeps it there -- with
+     * the scorer running, {@code dumpsys meminfo} shows native heap climbing 264 MB -> 390 MB in
+     * three steps and staying there; with this switch off it holds at 114 MB, the same figure as
+     * with the whole follow loop disabled. What it buys is a choice between three tightness
+     * variants of a crop the detector already decided, which is a refinement, not a subject.
+     * {@code persist.omnicam.aesthetic=1} turns it back on; the pass is also capped per session
+     * (see {@code SubjectLocator.AESTHETIC_BUDGET}) so the cost cannot repeat.
+     */
     static boolean enabled() {
-        return "1".equals(prop("persist.omnicam.aesthetic", "1"));
+        return "1".equals(prop("persist.omnicam.aesthetic", "0"));
     }
 
     static String status() {

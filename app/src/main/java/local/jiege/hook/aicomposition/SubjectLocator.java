@@ -269,6 +269,13 @@ final class SubjectLocator {
             lastRaw = null;
             subject = null;
             ambientAnswer = false;
+            // A new session gets a new opinion from the model, including a fresh budget: holding
+            // the old scored box would answer the new scene with the previous subject's framing.
+            lastVariant = 1;
+            lastVariantScore = Float.NaN;
+            lastScoredSubject = null;
+            lastScoredBox = null;
+            aestheticCalls = 0;
         }
     }
 
@@ -334,6 +341,7 @@ final class SubjectLocator {
             lastVariantScore = Float.NaN;
             lastScoredSubject = null;
             lastScoredBox = null;
+            aestheticCalls = 0;
             // A fresh lock counts as movement, so tracking starts at full rate before backing off.
             movedAt = SystemClock.uptimeMillis();
         }
@@ -379,19 +387,34 @@ final class SubjectLocator {
         }
     }
 
+    /**
+     * One detection thread for the life of the process.
+     *
+     * <p>This used to start a fresh thread for every pass -- every 220ms while the panel is open,
+     * which is a thread stack plus its own copy of the per-thread pixel scratch below, forever
+     * recycled through libc. {@code busy} already guarantees one pass at a time, so a single
+     * queued executor expresses the same thing without the churn.
+     */
+    private static final java.util.concurrent.ExecutorService DETECT =
+        java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "comp-follow");
+            thread.setDaemon(true);
+            return thread;
+        });
+
     private static void submit(final HardwareBuffer buffer) {
-        Thread thread = new Thread(() -> {
-            try {
-                update(buffer);
-            } finally {
-                synchronized (LOCK) {
-                    busy = false;
-                }
-            }
-        }, "comp-follow");
-        thread.setDaemon(true);
         try {
-            thread.start();
+            DETECT.execute(() -> {
+                try {
+                    update(buffer);
+                } catch (Throwable error) {
+                    Log.e(TAG, "detect pass failed", error);
+                } finally {
+                    synchronized (LOCK) {
+                        busy = false;
+                    }
+                }
+            });
         } catch (Throwable error) {
             synchronized (LOCK) {
                 busy = false;
@@ -596,6 +619,40 @@ final class SubjectLocator {
 
     /* ---------------------------------------------------------------- sampling */
 
+    /**
+     * Whole-frame ARGB buffer, reused for the life of the calling thread.
+     *
+     * <p>Every detector used to allocate its own {@code int[width * height]} -- 786 KB at 384x512
+     * -- and one pass can run the object scorer, the plant mask and the scene mask in a row. At
+     * three passes a second that is roughly 10 MB/s handed to libc and freed again; glibc keeps
+     * those pages in its arenas instead of returning them to the kernel (the same reason
+     * {@link #sampleFrame} exists), and the camera's native heap grew into the hundreds of
+     * megabytes with a third of it swapped out. One buffer per thread, grown on demand, allocates
+     * nothing after the first frame.
+     *
+     * <p>Per-thread rather than one shared array: the frame thread can take the inline first pass
+     * while the follow thread is still finishing the previous one.
+     */
+    private static final ThreadLocal<int[]> SCRATCH = new ThreadLocal<>();
+
+    private static int[] scratch(int size) {
+        int[] buffer = SCRATCH.get();
+        if (buffer == null || buffer.length < size) {
+            buffer = new int[size];
+            SCRATCH.set(buffer);
+        }
+        return buffer;
+    }
+
+    /** Reads the whole of {@code frame} into the shared scratch buffer; valid until the next call. */
+    private static int[] pixelsOf(Bitmap frame) {
+        int width = frame.getWidth();
+        int height = frame.getHeight();
+        int[] data = scratch(width * height);
+        frame.getPixels(data, 0, width, 0, 0, width, height);
+        return data;
+    }
+
     /** Locks the preview buffer into an ARGB bitmap at roughly 384x512. */
     private static Bitmap sample(HardwareBuffer buffer) {
         int width = buffer.getWidth();
@@ -764,13 +821,16 @@ final class SubjectLocator {
         int w = right - left + 1;
         int h = bottom - top + 1;
         if (w <= 0 || h <= 0) return false;
-        int[] data = new int[w * h];
+        int[] data = scratch(w * h);
         frame.getPixels(data, 0, w, left, top, w, h);
         int hits = 0;
-        for (int pixel : data) {
-            if (isSkin(pixel)) hits++;
+        // Bounded by the face box, not by the buffer: the scratch array is shared and usually
+        // longer than this patch, and an unbounded loop would count the previous frame's pixels.
+        int total = w * h;
+        for (int i = 0; i < total; i++) {
+            if (isSkin(data[i])) hits++;
         }
-        return hits > data.length * 0.25f;
+        return hits > total * 0.25f;
     }
 
     /**
@@ -781,8 +841,7 @@ final class SubjectLocator {
     private static float[] skinIn(Bitmap frame) {
         final int width = frame.getWidth();
         final int height = frame.getHeight();
-        final int[] data = new int[width * height];
-        frame.getPixels(data, 0, width, 0, 0, width, height);
+        final int[] data = pixelsOf(frame);
 
         final int step = 2;
         final int gw = width / step;
@@ -878,8 +937,7 @@ final class SubjectLocator {
     private static float[] objectIn(Bitmap frame, boolean centreOnly) {
         final int width = frame.getWidth();
         final int height = frame.getHeight();
-        final int[] data = new int[width * height];
-        frame.getPixels(data, 0, width, 0, 0, width, height);
+        final int[] data = pixelsOf(frame);
 
         final int step = 8;
         final int gw = width / step;
@@ -1214,8 +1272,7 @@ final class SubjectLocator {
         final int gw = width / step;
         final int gh = height / step;
         if (gw < 4 || gh < 4) return null;
-        final int[] data = new int[width * height];
-        frame.getPixels(data, 0, width, 0, 0, width, height);
+        final int[] data = pixelsOf(frame);
 
         final boolean[] leaf = new boolean[gw * gh];
         int cells = 0;
@@ -1524,8 +1581,7 @@ final class SubjectLocator {
         final int gh = height / step;
         if (width < step * 8 || gh < 12) return null;
 
-        final int[] data = new int[width * height];
-        frame.getPixels(data, 0, width, 0, 0, width, height);
+        final int[] data = pixelsOf(frame);
 
         final float[] luma = new float[gh];
         final float[] sat = new float[gh];
@@ -1748,6 +1804,17 @@ final class SubjectLocator {
     private static final float RESCORE_DEADBAND = 0.04f;
 
     /**
+     * How many times one session may run the aesthetics model.
+     *
+     * <p>One pass is enough to pick a tightness, and the model has no memory of its own: every
+     * call re-enters AIUnit, whose native heap the camera keeps. Measured on the phone, each extra
+     * round of scoring added a step to the process (264 -> 328 -> 390 MB) and never gave it back.
+     * Two is the ceiling -- the first framing, plus one correction if the subject moved a long way.
+     */
+    private static final int AESTHETIC_BUDGET = 2;
+    private static int aestheticCalls;
+
+    /**
      * Offers the model three framings of the same subject and keeps the best-scoring one.
      *
      * <p>Only the tightness varies: the centre still comes from the detector, so a model that
@@ -1780,6 +1847,14 @@ final class SubjectLocator {
         int frameW = frame.getWidth();
         int frameH = frame.getHeight();
         if (frameW < 32 || frameH < 32) return fallback;
+        // Hard cap per session, on top of the drift cache above. Without it a subject that keeps
+        // moving keeps re-entering the model, and each entry leaves native memory behind.
+        synchronized (LOCK) {
+            if (aestheticCalls >= AESTHETIC_BUDGET) {
+                return lastScoredBox != null ? lastScoredBox : fallback;
+            }
+            aestheticCalls++;
+        }
         int[][] crops = new int[TIGHTNESS.length][];
         Rect[] boxes = new Rect[TIGHTNESS.length];
         for (int i = 0; i < TIGHTNESS.length; i++) {

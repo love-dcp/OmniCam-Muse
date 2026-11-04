@@ -51,8 +51,13 @@ final class CompositionFrameProbe {
     private CompositionFrameProbe() {}
 
     static void install(ClassLoader classLoader) {
-        if ("0".equals(prop(PROP_SWITCH, ""))) {
-            Log.i(TAG, "probe disabled by " + PROP_SWITCH);
+        // Off unless asked for. This is a diagnostic, and an expensive one: every pass reads a
+        // 768x1024 frame into a 3 MB int[], copies it, encodes a PNG and writes it to the app's
+        // files dir -- 40 times per camera process, ~45 MB on disk. It answered its question (the
+        // readback the stock uploader sends is transparent black), so it now has to be switched on
+        // deliberately with persist.omnicam.compdump=1.
+        if (!"1".equals(prop(PROP_SWITCH, "0"))) {
+            Log.i(TAG, "probe disabled (" + PROP_SWITCH + " is not 1)");
             return;
         }
         Class<?> target;
@@ -476,7 +481,11 @@ final class CompositionFrameProbe {
             // The readback carries a valid luma but scrambled chroma (the renderer samples the
             // preview as a plain 2D texture), so the service cannot find a subject in it. Hand it
             // the screen instead: same moment, correct colour, no renderer involved.
-            if (!"0".equals(prop("persist.omnicam.compshot", "1"))) {
+            //
+            // Off by default: the grab copies a full-screen surface (1080x2376, ~10 MB) and
+            // rescales it for every upload, and our own cloud path already sends the preview
+            // frame. persist.omnicam.compshot=1 re-enables it for a stock-path experiment.
+            if ("1".equals(prop("persist.omnicam.compshot", "0"))) {
                 Bitmap shot = grab(param.thisObject, frame.getWidth(), frame.getHeight());
                 if (shot != null) {
                     param.args[0] = shot;
