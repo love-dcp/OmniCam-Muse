@@ -250,9 +250,20 @@ class Erofs:
         cache = {}
 
         def decode_bits(pack_base, i, vcnt, shift):
+            # Entries are packed back to back at encodebits each (14 bits for the
+            # 2-byte region, 16 for the 4-byte one), so an entry routinely starts
+            # mid-byte and runs past the third byte. Reading only 32 bits and
+            # shifting silently drops the high half -- that is what made every
+            # lcluster after the first few decode to the wrong type and sent
+            # plain (uncompressed) pclusters down the lz4 path.
             encodebits = (((vcnt << shift) - 4) * 8) // vcnt
-            at = pack_base + (encodebits * i) // 8
-            v = struct.unpack_from("<I", self.mm, at)[0] >> ((encodebits * i) & 7)
+            bitoff = encodebits * i
+            at = pack_base + (bitoff >> 3)
+            if at + 8 <= len(self.mm):
+                v = struct.unpack_from("<Q", self.mm, at)[0]
+            else:
+                v = struct.unpack_from("<I", self.mm, at)[0]
+            v >>= (bitoff & 7)
             return v & ((1 << lobits) - 1), (v >> lobits) & 3
 
         def lcluster(lcn):
@@ -268,7 +279,7 @@ class Erofs:
                     res = (typ, lcsize, None, d0, d1)
                 else:
                     (blkaddr,) = struct.unpack_from("<I", self.mm, pos + 4)
-                    res = (typ, di_cofs, blkaddr, 0, 0)
+                    res = (typ, di_cofs, blkaddr, None, 0)
                 cache[lcn] = res
                 return res
 
@@ -315,7 +326,7 @@ class Erofs:
                     nblk += 1
             (packpblk,) = struct.unpack_from("<I", self.mm,
                                              pack_base + packsz - 4)
-            res = (typ, lo, packpblk + nblk, 0, 0)
+            res = (typ, lo, packpblk, pack_base, nblk)
             cache[lcn] = res
             return res
 
@@ -341,12 +352,61 @@ class Erofs:
             start = (lcn << lclusterbits) + cofs
             if start >= inode.size:
                 continue
-            heads.append((lcn, typ, start, pblk))
+            heads.append((lcn, typ, start, pblk, _d0))
 
         out = bytearray(inode.size)
         filled = 0
         misses = 0
-        for idx, (lcn, typ, start, pblk) in enumerate(heads):
+
+        def try_decode(pblk, typ, start, span):
+            """Decode one pcluster; return (bytes, blocks_consumed) or (None, 0)."""
+            if typ == T_PLAIN:
+                return (self.mm[pblk * self.blksz:pblk * self.blksz + span],
+                        max(1, (span + self.blksz - 1) // self.blksz))
+            want = min(span, 12 << 20)
+            prev = -1
+            dec = None
+            blocks = 0
+            fails = 0
+            for attempt in range(1, 1024):
+                raw = self.mm[pblk * self.blksz:(pblk + attempt) * self.blksz]
+                try:
+                    if alg == 0:
+                        cur = lz4.block.decompress(
+                            raw, uncompressed_size=min(inode.size - start,
+                                                       12 << 20))
+                    elif alg == 1:
+                        cur = lzma.LZMADecompressor(
+                            lzma.FORMAT_RAW,
+                            filters=[{"id": lzma.FILTER_LZMA1,
+                                      "dict_size": 1 << 23}]).decompress(raw)
+                    else:
+                        raise ErofsError(
+                            f"compression algorithm {alg} unsupported")
+                except Exception:
+                    # A multi-block pcluster fails outright until the whole run
+                    # is handed over, so a failure means "add a block", not
+                    # "give up". Bail only after a long dead streak.
+                    fails += 1
+                    if fails > 64:
+                        break
+                    continue
+                fails = 0
+                if len(cur) <= prev:
+                    break
+                dec, prev = cur, len(cur)
+                blocks = attempt
+                if len(cur) >= want:
+                    break
+            return dec, blocks
+
+        # The base_blkaddr stored per pack is not the block address of the run
+        # (it advances by one per pack while pclusters occupy several blocks),
+        # so the pack base is only a seed. Pclusters are laid out back to back,
+        # so each one starts where the previous one ended -- that is what the
+        # cursor tracks, and the pack base is kept as a second opinion.
+        cursor = heads[0][3] if heads else 0
+        for idx, (lcn, typ, start, packpblk, packbase) in enumerate(heads):
             cofs = start - (lcn << lclusterbits)
             if idx + 1 < len(heads):
                 span = heads[idx + 1][2] - start
@@ -354,37 +414,22 @@ class Erofs:
                 span = inode.size - start
             if span <= 0:
                 continue
+            candidates = [cursor]
+            if packpblk not in candidates:
+                candidates.append(packpblk)
             dec = None
-            if typ == T_PLAIN:
-                dec = self.mm[pblk * self.blksz:pblk * self.blksz + span]
-            else:
-                # Keep growing the input window until the decoded run covers the
-                # whole pcluster: one block usually decodes to < span bytes and
-                # lz4 happily returns the short result instead of failing.
-                want = min(span, 12 << 20)
-                prev = -1
-                for attempt in range(1, 1024):
-                    raw = self.mm[pblk * self.blksz:(pblk + attempt) * self.blksz]
-                    try:
-                        if alg == 0:
-                            cur = lz4.block.decompress(
-                                raw, uncompressed_size=min(inode.size - start,
-                                                           12 << 20))
-                        elif alg == 1:
-                            cur = lzma.LZMADecompressor(
-                                lzma.FORMAT_RAW,
-                                filters=[{"id": lzma.FILTER_LZMA1,
-                                          "dict_size": 1 << 23}]).decompress(raw)
-                        else:
-                            raise ErofsError(
-                                f"compression algorithm {alg} unsupported")
-                    except Exception:
-                        break
-                    if len(cur) <= prev:
-                        break
-                    dec, prev = cur, len(cur)
-                    if len(cur) >= want:
-                        break
+            blocks_used = 0
+            pblk = cursor
+            for cand in candidates:
+                dec, blocks_used = try_decode(cand, typ, start, span)
+                if dec:
+                    pblk = cand
+                    break
+            if not dec and typ != T_PLAIN and alg == 0 and \
+                    not any(self.mm[pblk * self.blksz:(pblk + 1) * self.blksz]):
+                # z_erofs lets a pcluster point at the shared zero block; the
+                # run it covers is a hole, not a decode failure.
+                dec = bytes(min(span, inode.size - start))
             if not dec and typ != T_PLAIN and alg == 0:
                 # partial reference: the stream starts with a back-reference
                 # (token 0x00, offset up to 65535) into data produced by the
@@ -421,6 +466,7 @@ class Erofs:
             end = min(inode.size, start + len(dec))
             out[start:end] = dec[:end - start]
             filled += end - start
+            cursor = pblk + max(1, blocks_used)
         if misses:
             print(f"[warn] {misses} pcluster(s) failed to decode", file=sys.stderr)
         if filled < inode.size:
