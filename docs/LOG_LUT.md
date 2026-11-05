@@ -153,6 +153,62 @@ static float[] i(int index, boolean hdr) { return nativeLoadBinaryLutFile(T.get(
 
 要交付带 LUT 的成片，只能后期套（或用 §5.1 的 LUT 在剪辑里还原）。
 
+### 6.1 「X9U 能直出，能不能补给 X8U」——两条路都验死了（r153 / r154）
+
+用户反馈 X9U 的那个开关是真直出，于是按 X9U 反编译出两条可能的落差逐条补，都在设备上实测：
+
+**路一：答案 `func_master_video_log_custom_lut` = true（r153，`LogLutDirect`）**
+
+`rm.e.getSupportFunction(String)` 是 33 项「名字 → 索引」表，末尾统一 `invoke-super`。
+这个功能名在整份 APK 里**只出现两次**：一次在表里，一次在
+`rm.e.jk(EventRecordDataBuilder)`——那是埋点构建器，只用来填 `setLutType` /
+`setPreviewLut` 两个统计字段。所以答案改成 true 也只能改统计，不改录制。
+
+实测（1080·30·Log，同一机位，只差开关）：
+
+| 段 | LUT | 直出 | meanRGB | sat |
+|---|---|---|---|---|
+| A | SDR | 开 | 94.8 / 82.8 / 55.0 | 39.8 |
+| B | SDR | 关 | 95.2 / 82.9 / 55.1 | 40.1 |
+
+逐像素 `mean|diff| = 3.61`，Y 分位两段同为 `15 / 96 / 201`（同一分布）。
+日志坐实唯一调用方：`custom lut feature queried by rm.e (stock false), answering true`。
+
+**顺带纠正一条老结论**：这个槽位背后的配置行
+`com.oplus.camera.preview.hdr.transform.lut.video.support` **原厂就是 1**
+（`oplus_camera_config` 解密后 585 条里有它，值 `1`；日志也报 `stock true`）。
+所以 X8U 不是「配置没开」，配置从来就是开的。
+
+**路二：把 X9U 的 LUT 文件补进来（r154）**
+
+`Lut3dDataManager` 的路径表（`d()`）里索引 **9 = `filters_lut/log_video_sdr_3dlut.cube`**、
+**10 = HDR 那个**，`i(index, hdr)` 走 `nativeLoadBinaryLutFile(path, hdr)`。
+把官方 O-Log v1 → Rec.709（17³，132,720 B）放进 payload 的 `filters_lut/`，
+确认已挂到 `/odm/etc/camera/filters_lut/log_video_sdr_3dlut.cube`，再录 A/B：
+Δsat **0.2**、ΔRGB ≤ 0.9，仍是同一分布。
+
+日志给了原因——`Lut3dDataManager.i(int,boolean)` 全索引观测（不只 9/10）：
+
+```
+lut table 1 loaded: null (no file)      ← 相机启动时唯一一次，之后再无调用
+```
+
+**索引 9 / 10 / 15 一次都没被加载。** 也就是说 Log 预览与录制都不走这张表：
+面板选档时 `LogLutMenuView.setSelectedLutPositionAndApply` 确实调了
+`Lut3dDataManager.n(name)`（写索引 15），但没有任何代码再去取索引 15 的数据。
+
+**⇒ 结论：X8U 的落差在 HAL/编码管线，不在 Java 侧，也不在数据文件。**
+
+支撑证据（两台 app 逐项对照，dex 在 `work/x9u_cam/`）：`feature.logvideo` 包 28 个类一致、
+`LogLutMenuView` 方法数 90 vs 89、`libCombineLut.so` md5 相同、`LogVideoSDRBt709` 字符串
+两边都有（X8U 是 `classes9/27.dex`）。**同一份代码、同一个库、同一份配置，只有平台不同**
+（X9U = 高通 SM8850，X8U = MTK）。这和「6X 预览」「片门全开」那种只差一个开关的情形不同：
+这次差的是实现。
+
+留档代码：`app/src/main/java/local/jiege/hook/video/LogLutDirect.java`（路一的答案 + 两条观测）。
+cube 已从 payload 移除，避免留死数据。
+
+
 ## 7. 复现
 
 ```bash
