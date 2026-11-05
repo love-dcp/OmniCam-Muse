@@ -48,6 +48,7 @@ import local.jiege.hook.watermark.VideoWatermarkGuard;
 import local.jiege.hook.watermark.XpanWatermarkIsolation;
 import local.jiege.hook.xpan.XpanLivePhoto;
 import local.jiege.hook.xpan.XpanViewfinderClean;
+import local.jiege.hook.video.LogLut;
 import local.jiege.hook.video.OpenGate;
 import local.jiege.hook.video.VideoFilterHighSpec;
 import local.jiege.hook.x10.PaletteFeatureSwitch;
@@ -168,6 +169,8 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("video")) VideoFilterHighSpec.installCamera(classLoader);
             // Pro video open gate: adds the resolution entry stock ships but never shows.
             if (!Skip.off("video")) OpenGate.installCamera(classLoader);
+            // Pro video Log LUT: opens the three gates that keep the LUT panel unbuilt.
+            if (!Skip.off("video")) LogLut.installCamera(classLoader);
             // AI composition: open the three feature-table gates the build keeps closed.
             if (!Skip.off("aicomp")) {
                 Log.guard("AiComposition", "install", () -> AiComposition.installCamera(classLoader));

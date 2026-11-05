@@ -69,6 +69,19 @@ public final class ModuleSettings {
     public static final String VIDEO_FILTER_HIGH_SPEC = "video_filter_high_spec";
 
     /**
+     * Pro video: let the build's own "Log LUT" panel appear while recording Log, so a LUT can be
+     * previewed (and optionally baked) instead of watching the flat grey Log image.
+     *
+     * <p>The panel, the preset list, the "apply while recording" switch and the 3D LUT loader are
+     * all shipped; three feature-table answers keep them unreachable on PKJ110:
+     * {@code o9.h.m()} = feature[4] (Log preview), {@code o9.h.i()} = feature[8] (custom LUT), and
+     * {@code pref_log_video_key} which defaults to "off" and is never written here. The switch makes
+     * those three answer the way the newer builds do. It changes nothing unless a Log recording is
+     * active, and the panel still needs a LUT table on disk to show a picture.
+     */
+    public static final String LOG_LUT = "log_lut";
+
+    /**
      * Pro video: add 片门全开 (open gate) to the resolution list, after 4K and 2K. The build ships
      * the whole feature but hides the entry behind MasterVideoDecision.p(); letting that answer
      * true restores it, and stock then records the sensor's full 4:3 area (4096x3072). Measured
@@ -252,6 +265,10 @@ public final class ModuleSettings {
             case OPEN_GATE:
                 // On by default: it only adds one entry to the resolution list, so anyone who
                 // does not pick it keeps the stock 16:9 sizes.
+                return true;
+            case LOG_LUT:
+                // On by default: it only answers three "is this supported" questions that stock
+                // already answers 0 for, and nothing happens outside a Log recording.
                 return true;
             case INSPIRATION_COMPOSITION:
                 // On by default since r148. It used to default off (an upload has to be asked for),
