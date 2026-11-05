@@ -1,0 +1,6 @@
+id=omnicam_haptics_fix
+name=OmniCam 冲突修复（振动增强）
+version=1.0
+versionCode=1
+author=love-dcp
+description=把被整块卸载的 /odm/lib64 overlay 里、别的模块自己的库逐文件补回来。用于 OmniCam Muse 旧版本把「欧加真马达振动增强」的 liboplusvibratoreffect.so 一起卸掉、导致它报「挂载失败」的情况。装上即修，不需要重启；也可以在 KernelSU 里点「操作」重新执行一次。本模块不往系统里放任何文件，只做 bind 挂载，重启后自动失效；万一没用，删掉它即可。

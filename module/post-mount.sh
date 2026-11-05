@@ -119,29 +119,8 @@ if [ "$PROFILE" = PMA110 ]; then
     bind_library "$MODDIR/payload/lib64/libmsnativefilter.so" libmsnativefilter.so
 else
     log "PKJ110: X8U keeps AlgoInterface + msnativefilter, and its own BasicTone backend"
-    # metamount.sh has ALREADY overlaid /odm/lib64 from /mnt/vendor/mountify/odm/lib64, and that
-    # workspace copy is where the X9U backends come from. No module script can stop the overlay
-    # from being created -- but this phase runs immediately afterwards as root, so it can be
-    # detached again here, and the workspace purged.
-    #
-    # This is not cosmetic. The device only supports a SOFT reboot: root comes from a CVE exploit
-    # (com.pkj110.rootapp) that dies on a hard reboot. A soft reboot restarts userspace but NOT
-    # the kernel, so these scripts run again while metamount leaves the existing overlay alone --
-    # it stays frozen on whatever /mnt/vendor/mountify/odm/lib64 held the first time it was built,
-    # long before the module dropped the X9U libraries from system/. Detaching it here is what
-    # makes the fix reach the device at all, with no hard reboot.
-    n=0
-    while grep -q " /odm/lib64 " /proc/self/mounts 2>/dev/null; do
-        umount -l /odm/lib64 2>>"$LOG" || umount /odm/lib64 2>>"$LOG" || break
-        n=$((n + 1))
-        [ "$n" -ge 4 ] && break
-    done
-    log "PKJ110: detached $n /odm/lib64 overlay(s)"
-    for L in libBasicTonePhoto.so libAlgoInterface.so libmsnativefilter.so; do
-        if [ -f "/mnt/vendor/mountify/odm/lib64/$L" ]; then
-            rm -f "/mnt/vendor/mountify/odm/lib64/$L" 2>>"$LOG" && log "purge workspace $L"
-        fi
-    done
+    # metamount.sh has ALREADY overlaid /odm/lib64 out of every module's system/odm/lib64/.
+    # Do NOT detach that overlay (see "Do not detach /odm/lib64" below).
     for L in libBasicTonePhoto.so libAlgoInterface.so libmsnativefilter.so; do
         log "  $L = $(stat -c %s "/odm/lib64/$L" 2>/dev/null) B  (X8U stock 538400 / 60867488 / 7992584)"
     done
@@ -233,5 +212,67 @@ else
         log "PKJ110: algo-interface left stock $(sha256sum /odm/lib64/libAlgoInterface.so 2>/dev/null | cut -c1-8) (sdrbt opt-in off)"
     fi
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Do not detach /odm/lib64, and put back what other modules need.
+#
+# Until r155 the PKJ110 branch lazily unmounted /odm/lib64 on every run, to keep the X9U
+# BasicTone / AlgoInterface pair from landing on X8U under stock names. It worked, and it broke
+# OPlusHapticsEnhancer (欧加真马达振动增强) in the process:
+#
+#   * mountify builds ONE overlay per partition directory, merged from *all* modules at once, so
+#     "unmount /odm/lib64" is not "unmount my files" -- it is "unmount everybody's".
+#   * That overlay is the only thing that put the vibration module's patched
+#     liboplusvibratoreffect.so into /odm/lib64. After the detach the module's own web UI
+#     reported 挂载失败 (md5 of /odm/lib64/liboplusvibratoreffect.so != the module's copy) and the
+#     enhanced vibration was gone.
+#   * metamount.sh unmounts its own tmpfs workspace at the end of its run (`umount -l /mnt/vendor`),
+#     so /mnt/vendor/mountify is unreachable afterwards and neither mounting nor purging from
+#     there can be redone. Detaching the overlay is therefore permanent until the next boot --
+#     and this device only ever gets soft reboots, so it stayed broken.
+#
+# The leak that motivated the detach no longer exists at the source: system/odm/lib64/ now holds
+# only libBasicTonePhotoX9.so and libBasicTonePhotoX10.so, under their own names. An overlay can
+# add files but cannot rename one, so it cannot shadow libBasicTonePhoto.so or anything else
+# stock. Nothing needs detaching any more.
+#
+# What remains is the opposite risk: if metamount did not run, or its overlay was lost, third
+# party libraries are missing outright. Put them back by hand -- a per-file bind is exactly what
+# the overlay would have produced, and it survives anything this module does to /odm/lib64.
+restore_foreign_lib64() {
+    for SYSDIR in /data/adb/modules/*/system/odm/lib64; do
+        [ -d "$SYSDIR" ] || continue
+        OTHER=${SYSDIR%/system/odm/lib64}
+        [ "$OTHER" = "$MODDIR" ] && continue
+        if [ -f "$OTHER/disable" ] || [ -f "$OTHER/remove" ]; then
+            log "foreign lib64 skipped (module disabled): ${OTHER##*/}"
+            continue
+        fi
+        for SRC in "$SYSDIR"/*; do
+            [ -f "$SRC" ] || continue
+            NAME=${SRC##*/}
+            TARGET=/odm/lib64/$NAME
+            [ -f "$TARGET" ] || continue
+            LIVE_MD5=$(md5sum "$TARGET" 2>/dev/null | cut -d' ' -f1)
+            SRC_MD5=$(md5sum "$SRC" 2>/dev/null | cut -d' ' -f1)
+            if [ -n "$LIVE_MD5" ] && [ "$LIVE_MD5" = "$SRC_MD5" ]; then
+                log "foreign lib64 already active: $NAME (${OTHER##*/})"
+                continue
+            fi
+            chown root:root "$SRC"
+            chmod 0644 "$SRC"
+            # Mirror the label of the stock file being replaced: that context is the one the HAL
+            # opening it is known to accept.
+            chcon --reference="$TARGET" "$SRC" 2>>"$LOG" \
+                || chcon u:object_r:vendor_file:s0 "$SRC" 2>>"$LOG" || true
+            if mount --bind "$SRC" "$TARGET" >>"$LOG" 2>&1; then
+                log "foreign lib64 restored: $TARGET (${OTHER##*/})"
+            else
+                log "foreign lib64 bind FAIL: $TARGET (${OTHER##*/})"
+            fi
+        done
+    done
+}
+restore_foreign_lib64
 
 log "end profile=$PROFILE"

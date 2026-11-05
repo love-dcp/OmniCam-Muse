@@ -154,6 +154,41 @@ say "期望 538400 / 60867488 / 7992584"
 
 echo
 echo "=============================================================="
+echo " B2. 把别的模块放在 /odm/lib64 的库补回来"
+echo "=============================================================="
+# mountify 的 /odm/lib64 overlay 是所有模块合并出来的同一块，上面 B 段一拆，
+# 别人的库（最典型：欧加真马达振动增强的 liboplusvibratoreffect.so）也一起没了。
+# 拆完立刻逐文件补回来，免得"修好相机、弄坏振动"。
+for D in /data/adb/modules/*/system/odm/lib64; do
+    [ -d "$D" ] || continue
+    OTHER=${D%/system/odm/lib64}
+    [ "$OTHER" = "$MOD" ] && continue
+    if [ -f "$OTHER/disable" ] || [ -f "$OTHER/remove" ]; then
+        say "跳过 ${OTHER##*/}（已禁用/待删）"
+        continue
+    fi
+    for SRC in "$D"/*; do
+        [ -f "$SRC" ] || continue
+        NAME=${SRC##*/}
+        T=/odm/lib64/$NAME
+        [ -f "$T" ] || continue
+        if [ "$(md5sum "$T" 2>/dev/null | cut -d' ' -f1)" = "$(md5sum "$SRC" 2>/dev/null | cut -d' ' -f1)" ]; then
+            say "已生效 $NAME（${OTHER##*/}）"
+            continue
+        fi
+        chown root:root "$SRC" 2>/dev/null
+        chmod 0644 "$SRC" 2>/dev/null
+        chcon --reference="$T" "$SRC" 2>/dev/null || chcon u:object_r:vendor_file:s0 "$SRC" 2>/dev/null
+        if mount --bind "$SRC" "$T" 2>&1; then
+            say "已补回 $T（${OTHER##*/}）"
+        else
+            say "!! 补回失败 $T"
+        fi
+    done
+done
+
+echo
+echo "=============================================================="
 echo " C. 清掉工作区里残留的 X9U 后端库（防止下次开机又盖回来）"
 echo "=============================================================="
 if [ -d "$WS" ]; then
