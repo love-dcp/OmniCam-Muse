@@ -64,3 +64,7 @@ const char *masterColorRemapPath(const char *path, char *buf, size_t n);
 
 // POP fish-eye at capture (pop_fisheye.cpp): sets the renderer's fish-eye byte while the POP lens is on.
 void onLibraryLoadedForPopFisheye(HookFunction hook, const char *name, void *handle);
+
+// MONOPAN 50 / 迫冲 (monopan.cpp): the M3 grain, tone and vignette on the finished capture YUV.
+// Called from the capture hook in soft_light.cpp; true when the shot was rewritten.
+bool monopanApplyCapture(const void *hostBuffer, int matrix, int range);

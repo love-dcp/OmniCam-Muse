@@ -127,6 +127,30 @@ chown -R "$APP_UID:$APP_UID" "$APP/files/jiege"
 chmod 0771 "$APP/files/jiege" "$MASTER_COLOR" "$MASTER_COLOR/live"
 restorecon -R "$APP/files/jiege"
 
+# Monopan (Leica M3 port): the M3 vignette table for the capture pass (monopan.cpp), and the grain
+# helper, a process of its own that loads the M3 grain library from the payload. The camera hands it
+# jobs through files/jiege/monopan/job (in.y + req in, out.y + done out); the helper chowns what it
+# writes to the job directory's owner. See docs/MONOPAN.md.
+MONOPAN=$APP/files/jiege/monopan
+mkdir -p "$MONOPAN/job"
+cmp -s "$MODDIR/payload/monopan/leica_filter_param_m3.bin" "$MONOPAN/leica_filter_param_m3.bin" || cp "$MODDIR/payload/monopan/leica_filter_param_m3.bin" "$MONOPAN/leica_filter_param_m3.bin"
+chown -R "$APP_UID:$APP_UID" "$MONOPAN"
+chmod 0771 "$MONOPAN"
+chmod 0770 "$MONOPAN/job"
+restorecon -R "$MONOPAN"
+# The vendor library dlopen()s the vendor OpenCL, which the linker resolves only for programs
+# outside /data/adb, so the helper and its libraries run from a copy in /data/local/tmp.
+MPHELP=/data/local/tmp/monopan
+mkdir -p "$MPHELP"
+for F in monopan_helper libmialgo_monopan.so libmpancxx_sh.so mialgo_monopan_cl.bin; do
+    cmp -s "$MODDIR/payload/monopan/$F" "$MPHELP/$F" || cp "$MODDIR/payload/monopan/$F" "$MPHELP/$F"
+done
+chmod 0755 "$MPHELP" "$MPHELP/monopan_helper"
+chmod 0644 "$MPHELP"/lib*.so "$MPHELP/mialgo_monopan_cl.bin" 2>/dev/null
+pkill -f monopan_helper 2>/dev/null
+rm -f "$MONOPAN/job/req" "$MONOPAN/job/done" "$MONOPAN/job/in.y" "$MONOPAN/job/out.y"
+LD_LIBRARY_PATH="$MPHELP" nohup "$MPHELP/monopan_helper" "$MPHELP" "$MONOPAN/job" > /dev/null 2>&1 &
+
 # Stage POP before the gallery wait so camera resources are ready at startup.
 ASSET_DIR="$APP/files/pop_port"
 PLD_APP="$APP/files/odm/etc/camera/pld_watermark"

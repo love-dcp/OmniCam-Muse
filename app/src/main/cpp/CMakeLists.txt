@@ -22,6 +22,7 @@ add_library(jiege_native SHARED
     master_dt.cpp
     master_canon.cpp
     soft_light.cpp
+    monopan.cpp
     master_lut_slots.cpp
     pop_fisheye.cpp
     hardware_buffer_read.cpp)

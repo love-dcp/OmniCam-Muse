@@ -40,6 +40,10 @@ final class MasterFilterDefaults {
         classic(list, "vivid-lut.cube.rgb.bin", "灰调", false);
 
         module(list, "LeicaM9.cube.rgb.bin", "徕卡M9", FilterEntry.Category.LEICA);
+        // MONOPAN 50 / 迫冲 (Leica M3 port): the tables here only make the frame monochrome, the M3
+        // tone, grain and vignette are added on the capture by monopan.cpp (docs/MONOPAN.md).
+        module(list, "JG_MONOPAN50.cube.rgb.bin", "MONOPAN 50", FilterEntry.Category.LEICA);
+        module(list, "JG_MONOPAN50PRO.cube.rgb.bin", "MONOPAN 50 迫冲", FilterEntry.Category.LEICA);
 
         String[] fuji = {"ACROS", "ASTIA", "Classic Chrome", "ETERNA", "ETERNA BB", "Classic Neg.",
             "PRO Neg. Std", "PROVIA", "REALA ACE", "Velvia"};

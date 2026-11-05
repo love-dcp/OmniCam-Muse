@@ -190,6 +190,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("softlight")) SoftLight.installCamera(classLoader);
             if (!Skip.off("master")) MasterLutSlots.installCamera(classLoader);
             if (!Skip.off("master")) MasterContrast.installCamera(classLoader);
+            // MONOPAN 50 / 迫冲: the variant marker the capture pass reads (monopan.cpp).
+            if (!Skip.off("monopan")) {
+                Log.guard("MonoPan", "install", () -> local.jiege.hook.masterfilter.MonoPan.installCamera(classLoader));
+            }
             // X8U port: the GR page's own parameter dial (drives the camera's GR rows), plus the
             // read-only probes left over from the port work. The probes are off unless their
             // persist.omnicam.aura.* property names one; none of them rides a hot path.

@@ -1458,7 +1458,11 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
     const SoftFilter *filter = filterFor(param);
     Transfer tr;
     if (!filter || !transferOf(out->transfer, tr)) {
-        return origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
+        // Not a soft light shot. MONOPAN is a filter of its own, so it still gets this frame -
+        // it does nothing unless the app wrote a variant for the shot (monopan.cpp).
+        const int plain = origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
+        if (plain & 1) monopanApplyCapture(out, int(out->matrix), int(out->range));
+        return plain;
     }
     int ret;
     if (keepStock()) {
@@ -1468,6 +1472,9 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
         ret = origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
     }
     if (!(ret & 1)) return ret;
+    // MONOPAN 50 / 迫冲: the M3 grain, tone and vignette on the same finished frame (monopan.cpp).
+    // It consumes the variant the app wrote for this shot, so it does nothing for other filters.
+    monopanApplyCapture(out, int(out->matrix), int(out->range));
     if (sameFrameAgain(out->width, out->height, out->plane[0])) {
         __android_log_print(ANDROID_LOG_WARN, TAG, "capture: %ux%u scattered already, skipping", out->width, out->height);
         return ret;
