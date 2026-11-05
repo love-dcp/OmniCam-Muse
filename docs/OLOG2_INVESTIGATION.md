@@ -183,35 +183,75 @@ offset 8   N³ × 16B 条目     每条目 4 × float32 (v0,v1,v2,alpha)，alpha
 
 ---
 
-## 6. 对 X8U 到底意味着什么
+## 6. 对 X8U 到底意味着什么（V3：已全部上机实测）
 
-### 6.1 仍然搬不了 O-Log2 录制
+### 6.1 平台更正（V2 写错了）
 
-| 拦住它的东西 | 证据级别 |
-|---|---|
-| 官方把 X8U 定为 O-Log v1 | 白皮书机型表（硬证据） |
-| 曲线在 ISP/HAL tuning 层，按 sensor 单独标定 | O-Log2 在 X8U 的 `/odm/lib64`、`/vendor/lib64`、`camera.oemlayer.so` 里零标识 |
-| 官方 LUT 只是「Log → 显示」的转换表 | 它改的是**看**，改不了**录进文件里的曲线** |
-| 平台不同 | X8U=SM8750(QCOM)，X9U=Dimensity(MTK)，tuning 二进制不可互换 |
+| 机型 | 代号 | 平台 |
+|---|---|---|
+| Find X8 Ultra | PKJ110 | **SM8750** 骁龙 8 Elite（Hexagon v79） |
+| Find X9 Ultra | PMA110 | **SM8850** 骁龙 8 Elite Gen 5（`_family=OPSM8850`） |
+| Find X10 Pro Max | PMX110 | 天玑 9600 Pro（mt6995） |
 
-### 6.2 可用 `.cube` 改善的只有「预览/后期」，不是录制
+V2 写成「X9U 是 MTK、所以 tuning 不能互换」是错的 —— X8U 与 X9U **同为高通**、
+相邻代。所以「平台不同搬不了」这条理由作废；真正拦住它的只剩下面这条。
 
-如果有人把官方 O-Log2 LUT 塞给 X8U 的 Log 预览，会得到 §2.2 里 **暗 10 IRE**
-的错误画面（X8U 拍的是 v1）。所以适配时必须用 v1 的 LUT。
+### 6.2 决定性证据：X8U 录的就是 O-Log v1（实机录制 + 码值反解）
 
-### 6.3 X8U 的两个真实缺口（可动手，数据层面）
+做法：X8U 专业视频 1080p30 Log 实拍一段，`tools/hevc_vui.py` 读 HEVC SPS：
 
-1. **缺整个 `/odm/etc/camera/LUTData/` 目录**
-   —— odm / product / my_product 三个分区全扫，没有任何 `LogVideo*.bin`。
-   相机代码却在按名字加载。补上正确的 v1 LUT 后，Log LUT 菜单有可能被点亮。
-   难点：`/odm` 只读且目录不存在，需要目录级 bind 或 overlay，
-   不是现在模块那种「单文件 bind」能覆盖的。**先确认设备上目录是否真的不存在。**
-2. **黑位判据测试（一句话定案 X8U 到底是哪代）**
-   遮住镜头拍 1 秒 Log 视频，取一帧，读最暗处的码值（10bit）：
-   - **约 65** → O-Log v1
-   - **约 123** → O-Log2
+```
+Log 视频：10-bit, video_full_range=1（全范围 0..1023）, BT.2020（primaries 9 / matrix 9）
+SDR 视频： 8-bit, video_full_range=0（有限范围）, BT.709
+```
 
-   这条判据比 grep 字符串硬，比看直方图直观。已按 §2 的公式算好期望值。
+全范围意味着 10-bit 码值线性映射到 8-bit 时 `out = v10/1023*255`，可以直接当
+Log 码 `P` 用。实测该帧最暗的真实画面码值是 **24**（另有 3 像素宽纯黑边列属编码
+边界，不是画面内容）：
+
+- `P = 24/255 = 0.0941`，**低于 O-Log2 的黑位 0.1199** —— O-Log2 物理上不可能产生这个码值；
+- 按 v1 反解，该处反射率 0.48%，是正常深阴影；按 O-Log2 反解得到负反射率（无意义）；
+- 24~30 这段共 825 个像素，全部落在 O-Log2 的「不可达区」内。
+
+⇒ **X8U 录的是 O-Log v1**，不再只是白皮书推测，而是实测。V2 里那条「遮镜头读黑位」
+的判据已经用不着了。
+
+顺带一条：Log 是全范围 `yuv420p10le`，**cv2 会把它当 8UC1 截断**（会打印
+`Unknown/unsupported picture format: yuv420p10le`），读原始 Y 通道拿到的是垃圾。
+要么只看 BGR 输出，要么另装真 10-bit 解码器。
+
+### 6.3 设备实测：Log 预览**不**依赖外部 LUT 文件（V2 的「缺 LUTData」结论作废）
+
+这一轮把所有相关假设都上机验了，全部推翻：
+
+1. **设备上根本没有 `LUTData` 目录**：`/odm/etc/camera` 下只有 `filters_lut`（161 个
+   `.bin` 滤镜表）和 `meishe_lut`；全盘 `find` 无任何 `LogVideo*`。
+2. **相机 APK 里也没有 `LUTData` 这个字符串**（33 个 dex 全扫）。
+   `LogVideoSDRBt709` / `LogVideoHDRBt2020` 确实是普通字符串（不是类描述符、
+   也没有 `.bin` 后缀），它出现在 `LogEnum` / `LogLutMenuView` 旁边，是**枚举名**，
+   不是文件名。
+3. **Log 预览本身是有解码的**：取景器截图最暗码值 6，远低于 v1 黑位 16（8bit）
+   —— 若「原始 Log 码直接显示」则不可能低于 16。说明预览链在管线内已做显示转换。
+4. **右上那个眼睛图标不是 LUT 开关**，是「隐藏界面/调节参数」的沉浸模式。
+   同一场景前后两张截图相减，取景器 MAD 仅 **2.46**、平均饱和度完全一致
+   （23.4 vs 23.4），差异只出现在 UI 覆盖层。
+
+⇒ **X8U 没有「缺一行 LUT」这回事**，也没有可以 bind 进去补的洞。
+之前设想的「目录级 bind 补 LUTData」是伪需求，不要做。
+
+### 6.4 结论
+
+O-Log2 是 ISP/HAL tuning 里按 sensor 标定的传输曲线，官方 LUT 只决定「你看到什么」，
+改不了「录进文件的曲线」。X8U 的机器上既没有 O-Log2 的曲线，也没有它的 LUT 依赖链，
+**没有任何数据层面的缺口可以补**。想要 O-Log2 只能等 OPPO 出 X8U 固件。
+
+另外发现一个**真·可动手项**（非 O-Log2）：X8U 的相机 APK 里带着完整的
+「Log LUT」功能代码 —— `LogLutMenuView`、`pref_log_lut_video_key`、
+预设名 `log_lut_title_pro_video_cloudy_amber / cloudy_azure / ethereal_glow`、
+「自定义 LUT + 录制时套 LUT」(`menu_log_lut_rec_on/off`)，但专业视频 UI 只暴露
+分辨率 / 帧率 / 格式三项，没有 LUT 入口。若将来要做「Log 录制套 LUT」，
+这是比 O-Log2 现实得多的方向；但 dex 里没有 `isSupportLogLut` 这类开关字符串，
+门控在配置侧，还没定位。
 
 ---
 
@@ -236,6 +276,11 @@ MSYS_NO_PATHCONV=1 python tools/erofs_extract.py "G:/ColorOS17/x9u_extract/odm.i
 
 # 5. cube -> 手机 bin，并与原生文件比对
 python tools/olog_cube_to_bin.py "O-Log2-to-Rec709_Gamma24-D65_65.cube" gen_olog2_sdr.bin 33
+
+# 6. 实机定代际：专业视频录一段 Log（1080p30 即可），拉回来读码值
+adb shell "su -c 'ls -lt /storage/emulated/0/DCIM/Camera/*.mp4 | head -3'"
+MSYS_NO_PATHCONV=1 adb pull /storage/emulated/0/DCIM/Camera/VID*.mp4 log.mp4
+python tools/hevc_vui.py log.mp4          # 先看 video_full_range_flag
 ```
 
 ---
@@ -246,6 +291,7 @@ python tools/olog_cube_to_bin.py "O-Log2-to-Rec709_Gamma24-D65_65.cube" gen_olog
 |---|---|
 | `tools/olog_lut_analyze.py` | `probe` 中性轴取样 / `compare` 两 LUT 差值统计 / `shrink` 降采样 / `synth` 按公式合成 |
 | `tools/olog_cube_to_bin.py` | `.cube` → OPPO `LUTData/*.bin`（33³ RGBA float32 + 8B 头），已验证与原生文件 93.3% 逐字节一致 |
+| `tools/hevc_vui.py` | 从 MP4 的 `hvcC` 取 HEVC SPS，打印 `video_full_range_flag` / 位深 / 原色 / 传输 / 矩阵（判定码值范围用，避免 10-bit 被当 8-bit 截断） |
 
 已知坑：
 - `erofs_extract.py` 的参数顺序是 **`<img> <action>`**（内存里写反过），
