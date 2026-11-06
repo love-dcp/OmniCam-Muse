@@ -13,17 +13,19 @@
 //         job/out.y  the processed luma, same size
 //         job/done   written by the helper once out.y is complete
 //     The variant picks the parameter set inside the helper (see docs/MONOPAN.md).
-//   * the vignetting, here in this file (see applyVignette below).
+//   * the vignetting, here in this file (see vignetteAt below).
 //
-// Which variant a shot uses comes from the app: MonoPan.java writes
-// files/jiege/monopan/active just before the capture metadata is built, and this pass consumes
-// that file (it deletes it, so a stale one can never leak into another filter's shot).
+// Which variant a shot uses comes from the app: MonoPan.java rewrites
+// files/jiege/monopan/active just before the capture metadata is built, and this pass reads it.
 //
-// The pass runs on the capture's host buffer, the same render soft_light.cpp works on
-// (MsRenderHDRHostBuffer on this device), so it sees the finished YUV frame: it takes the luma as
-// the helper's input and writes the result back with neutral chroma, which is what makes the
-// shot monochrome. Failures are silent by design - a missing helper or a timeout leaves the shot
-// exactly as the camera rendered it.
+// The pass runs on whichever capture route the frame takes (soft_light.cpp hands it a MonoPanFrame
+// for each of them, see native_hooks.h). Meishe renders the same shot through different entries -
+// a P010 host buffer, an 8-bit host buffer, an AHardwareBuffer - depending on how the camera
+// decided to run the effect, and the shot only looks right if every one of them is covered.
+// The frame arrives as the finished YUV, so this takes the luma as the helper's input and writes
+// the result back with neutral chroma, which is what makes the shot monochrome. Failures are
+// silent by design - a missing helper or a timeout leaves the shot exactly as the camera rendered
+// it.
 #include <android/log.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -34,9 +36,11 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -46,9 +50,11 @@
 namespace {
 
 constexpr char TAG[] = "MonoPan";
-constexpr char kDir[] = "/data/user/0/com.oplus.camera/files/jiege/monopan";
 constexpr char kActive[] = "/data/user/0/com.oplus.camera/files/jiege/monopan/active";
 constexpr char kJobDir[] = "/data/user/0/com.oplus.camera/files/jiege/monopan/job";
+// Shared with the shot trace in soft_light.cpp: one file per shot says which entry the frames came
+// in on and whether this pass took them.
+constexpr char kTraceFile[] = "/data/user/0/com.oplus.camera/files/jiege/monopan/trace.txt";
 
 // The two filters. The vendor helper keys its parameter set on this number: variant 1 is density 20 /
 // grain 0.8 / kernel 3 / sigma 0.2 / mode 0, variant 2 is density 4 / grain 1.8 / kernel 7 / sigma
@@ -61,23 +67,18 @@ constexpr int kVariantPush = 2;
 // A shot's frame is dispatched right after the shutter, so the wait has to be short: past this
 // the picture is left alone rather than held back. Override with persist.omnicam.monopan.timeout.
 constexpr int kDefaultTimeoutMs = 4000;
-// The app writes the variant file a moment before the render; anything older than this is a
-// leftover from a filter the user has since left.
-constexpr int kActiveMaxAgeSec = 120;
 
-// Mirrors SMsHostBufferInfo in soft_light.cpp (plane[4], stride[4], width, height, ...). Only the
-// plane descriptors and the geometry are read here, so a layout copy is enough.
-struct HostBufferInfo {
-    void *plane[4];
-    uint32_t stride[4];
-    uint32_t width;
-    uint32_t height;
-    uint32_t pixFmt;
-    uint32_t primaries;
-    uint32_t transfer;
-    uint32_t matrix;
-    uint32_t range;  // 1 = full
-};
+// One shot hands several frames through the hooks: the 1280x960 thumbnail first, the full frame
+// after it. A marker is good for that many frames, and only while it is fresh - the grain pass
+// costs a few hundred milliseconds and would stall the viewfinder if a later preview frame picked
+// a marker up. The app rewrites the marker for every shot, so its timestamp starts each count.
+//
+// The window has to cover the slowest main image: the full frame arrives a second or two after the
+// thumbnail on a quick shot, but a 哈苏超清 shot builds its 12.6MP render from a burst and can take
+// much longer, and a main image that misses the window silently keeps the stock look. The frame
+// count is what keeps the viewfinder safe, so the time limit can be generous.
+constexpr int kMaxFramesPerShot = 16;
+constexpr int kShotWindowSec = 120;
 
 int property(const char *name, int fallback) {
     char value[PROP_VALUE_MAX] = {};
@@ -109,60 +110,117 @@ bool writeWholeFile(const std::string &path, const void *data, size_t size) {
     return put == size;
 }
 
-// The app's current selection. The file is left in place on purpose: one shot hands several buffers
-// through this hook (the 1280x960 thumbnail first, the full frame after it), and consuming the
-// marker on the first of them would leave the picture itself untouched. The app clears the file when
-// the user leaves the filter, and the age check covers a camera that died holding one.
-int takeVariant() {
+// Which frame of which shot is being handled. The marker's nanosecond timestamp is the shot's
+// identity: MonoPan.java rewrites it for every shot, so a new timestamp means a new count.
+struct Shot {
+    int64_t stamp = 0;
+    int frames = 0;
+    struct Seen {
+        const void *luma;
+        int w, h;
+    } seen[kMaxFramesPerShot] = {};
+    int seenCount = 0;
+};
+Shot gShot;
+std::mutex gShotLock;
+
+// A frame that is left alone looks exactly like a frame the camera never handed over, and telling
+// those two apart was the whole cost of tracking down a missing main image. Every refusal says why.
+void noteSkip(const char *why, int w, int h) {
+    static int64_t gLastMs = 0;
+    static const char *gLastWhy = nullptr;
+    const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
+    if (gLastWhy == why && ms - gLastMs < 200) return;
+    gLastWhy = why;
+    gLastMs = ms;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "skip %s %dx%d", why, w, h);
+    if (FILE *f = std::fopen(kTraceFile, "a")) {
+        std::fprintf(f, "   skip %s %dx%d\n", why, w, h);
+        std::fclose(f);
+    }
+}
+
+// The variant this frame uses, or 0 for every other filter and for a frame already handled. Reading
+// the marker on every frame is what makes a frame that was skipped by one route still get its
+// grain when it comes back through another; the seen list keeps that from happening twice.
+int takeVariant(const void *luma, int w, int h) {
     struct stat st {};
     if (stat(kActive, &st) != 0) return 0;
+    const int64_t stamp = int64_t(st.st_mtim.tv_sec) * 1000000000LL + int64_t(st.st_mtim.tv_nsec);
     const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    if (now - st.st_mtime > kActiveMaxAgeSec) return 0;
+    std::lock_guard<std::mutex> guard(gShotLock);
+    if (stamp != gShot.stamp) {
+        gShot.stamp = stamp;
+        gShot.frames = 0;
+        gShot.seenCount = 0;
+    }
+    int budget = property("persist.omnicam.monopan.frames", kMaxFramesPerShot);
+    if (budget < 1 || budget > kMaxFramesPerShot) budget = kMaxFramesPerShot;
+    if (now - st.st_mtime > kShotWindowSec) {
+        noteSkip("stale", w, h);
+        return 0;
+    }
+    if (gShot.frames >= budget) {
+        noteSkip("budget", w, h);
+        return 0;
+    }
+    for (int i = 0; i < gShot.seenCount; i++) {
+        if (gShot.seen[i].luma == luma && gShot.seen[i].w == w && gShot.seen[i].h == h) {
+            noteSkip("dup", w, h);
+            return 0;
+        }
+    }
     std::vector<uint8_t> raw;
     if (!readWholeFile(kActive, raw) || raw.empty()) return 0;
     const int variant = std::atoi(reinterpret_cast<const char *>(raw.data()));
-    return (variant == kVariantPlain || variant == kVariantPush) ? variant : 0;
+    if (variant != kVariantPlain && variant != kVariantPush) return 0;
+    if (gShot.seenCount < kMaxFramesPerShot) gShot.seen[gShot.seenCount++] = {luma, w, h};
+    gShot.frames++;
+    return variant;
 }
 
-// 10-bit codes -> 8-bit values, and back. The mode (top of the word or low ten bits) is detected
-// from the plane itself, as the scatter in soft_light.cpp does.
+// Codes <-> 8-bit values for both sample sizes the routes carry: P010 (10 bits at the top of or in
+// the low ten of a 16-bit word) and 8-bit NV12/NV21.
 struct Coding {
-    bool full = true;
+    int bits = 16;
     bool msb = false;
+    bool full = true;
 
+    float maxCode() const { return bits == 8 ? 255.0f : 1023.0f; }
+    float offCode() const { return bits == 8 ? 16.0f : 64.0f; }
+    float spanCode() const { return bits == 8 ? 219.0f : 876.0f; }
+    // The chroma midpoint: 128 for 8 bit, 512 for both P010 ranges.
+    int neutral() const { return bits == 8 ? 128 : 512; }
+
+    // One sample -> its code value.
+    float codeOf(uint8_t raw) const { return float(raw); }
     float codeOf(uint16_t raw) const { return float(msb ? raw >> 6 : raw & 0x3ff); }
-    uint16_t rawOf(float code) const {
-        const int q = int(std::lround(std::clamp(code, 0.0f, 1023.0f)));
-        return uint16_t(msb ? q << 6 : q);
-    }
-    // 8-bit luma the helper works on: the encoded signal the camera would have stored.
+    // The encoded signal the camera would have stored, 0..255.
     int toByte(float code) const {
-        const float unit = full ? code / 1023.0f : (code - 64.0f) / 876.0f;
-        return std::clamp(int(std::lround(unit * 255.0f)), 0, 255);
+        const float unit = full ? code / maxCode() : (code - offCode()) / spanCode();
+        return int(std::lround(std::clamp(unit, 0.0f, 1.0f) * 255.0f));
     }
     float fromByte(int value) const {
         const float unit = value / 255.0f;
-        return full ? unit * 1023.0f : unit * 876.0f + 64.0f;
+        return full ? unit * maxCode() : unit * spanCode() + offCode();
+    }
+    void store(uint8_t &slot, float code) const { slot = uint8_t(std::lround(std::clamp(code, 0.0f, 255.0f))); }
+    void store(uint16_t &slot, float code) const {
+        const int q = int(std::lround(std::clamp(code, 0.0f, 1023.0f)));
+        slot = uint16_t(msb ? q << 6 : q);
     }
 };
 
-// The vignette: the M3 look darkens the corners by about a stop. The camera's own table for it
-// (payload/monopan/leica_filter_param_m3.bin, per lux and colour temperature) is a vendor tuning
-// blob that is not decoded yet - what is applied here is the same radial falloff with a fixed
-// shape, tunable through persist.omnicam.monopan.vig (0 disables it, 1 is about -1 EV in the
-// corner) until the table lands (docs/MONOPAN.md).
-void applyVignette(uint16_t *row, int w, int y, int h, const Coding &coding, float strength) {
-    const float cy = (h - 1) * 0.5f;
-    const float half = 0.5f * std::sqrt(float(w) * w + float(h) * h) * 0.5f;  // half diagonal, centred
-    const float dy = (y - cy) / half;
-    for (int x = 0; x < w; x++) {
-        const float dx = (x - (w - 1) * 0.5f) / half;
-        const float r = std::sqrt(dx * dx + dy * dy);  // 0 centre, ~1 corner
-        // Flat in the middle, falling from 0.45 to 1.0 of the way out.
-        const float t = std::clamp((r - 0.45f) / 0.55f, 0.0f, 1.0f);
-        const float gain = 1.0f - strength * t * t;
-        row[x] = coding.rawOf(coding.codeOf(row[x]) * gain);
-    }
+// 0 centre, ~1 at the corners, flat until 45% of the way out.
+float vignetteAt(int x, int y, int w, int h) {
+    const float half = 0.5f * std::sqrt(float(w) * w + float(h) * h) * 0.5f;
+    const float dx = (x - (w - 1) * 0.5f) / half;
+    const float dy = (y - (h - 1) * 0.5f) / half;
+    const float r = std::sqrt(dx * dx + dy * dy);
+    const float t = std::clamp((r - 0.45f) / 0.55f, 0.0f, 1.0f);
+    return t * t;
 }
 
 // One job: hand the helper the luma, wait for the processed one. Returns false when the helper is
@@ -213,63 +271,100 @@ bool runJob(int w, int h, int variant, const std::vector<uint8_t> &in, std::vect
     return ok;
 }
 
-}  // namespace
+template <typename Sample>
+Sample *rowAt(void *base, size_t stride, int y) {
+    return reinterpret_cast<Sample *>(static_cast<uint8_t *>(base) + size_t(y) * stride);
+}
 
-// Called from the capture hook in soft_light.cpp after the camera has rendered the frame.
-// Returns true when the shot was rewritten.
-bool monopanApplyCapture(const void *buffer, int matrix, int range) {
-    if (!buffer) return false;
-    const int variant = takeVariant();
-    if (!variant) return false;
-    const auto *b = static_cast<const HostBufferInfo *>(buffer);
-    const int w = int(b->width) & ~1, h = int(b->height) & ~1;
-    if (!b->plane[0] || w < 64 || h < 64 || w > 8192 || h > 8192 || b->stride[0] < uint32_t(w) * 2) {
-        __android_log_print(ANDROID_LOG_ERROR, TAG, "buffer rejected %p %ux%u stride %u", b->plane[0], b->width, b->height, b->stride[0]);
-        return false;
-    }
-    Coding coding;
-    coding.full = (range == 1);
-    auto *y0 = reinterpret_cast<uint16_t *>(b->plane[0]);
-    // 10 bits at the top of each word leave the low six empty; a stray low bit means the other mode.
-    bool lowBits = false;
-    for (int r = 0; r < h && !lowBits; r += 97) {
-        const uint16_t *row = reinterpret_cast<const uint16_t *>(reinterpret_cast<uint8_t *>(b->plane[0]) + size_t(r) * b->stride[0]);
-        for (int x = 0; x < w; x += 13) lowBits |= (row[x] & 0x3f) != 0;
-    }
-    coding.msb = !lowBits;
-
-    const auto start = std::chrono::steady_clock::now();
+// The whole pass for one frame: luma out to the helper and back, vignetting and neutral chroma on
+// the way in.
+template <typename Sample>
+bool process(const MonoPanFrame &frame, int variant, const Coding &coding, int vigPercent, int w, int h) {
+    const float strength = std::clamp(vigPercent, 0, 100) / 100.0f;
     std::vector<uint8_t> in(size_t(w) * h), out;
     for (int y = 0; y < h; y++) {
-        const uint16_t *row = reinterpret_cast<const uint16_t *>(reinterpret_cast<uint8_t *>(y0) + size_t(y) * b->stride[0]);
+        const Sample *row = rowAt<Sample>(frame.luma, frame.lumaStride, y);
         uint8_t *dst = &in[size_t(y) * w];
         for (int x = 0; x < w; x++) dst[x] = uint8_t(coding.toByte(coding.codeOf(row[x])));
     }
     const int timeout = property("persist.omnicam.monopan.timeout", kDefaultTimeoutMs);
     if (!runJob(w, h, variant, in, out, timeout)) return false;
 
-    // 35% measured -1.3 stops in the corners once the scene's own falloff is taken out, which read
-    // as a heavy filter rather than the lens; 22% lands at about -0.4 stops, the M3 look.
-    const int vigPercent = property("persist.omnicam.monopan.vig", 22);
-    const float vig = std::clamp(vigPercent, 0, 100) / 100.0f;
-    uint32_t neutral = coding.rawOf(512.0f);
-    if (!b->plane[1]) neutral = 0;  // single plane buffers: nothing to neutralise
     for (int y = 0; y < h; y++) {
-        uint16_t *row = reinterpret_cast<uint16_t *>(reinterpret_cast<uint8_t *>(y0) + size_t(y) * b->stride[0]);
+        Sample *row = rowAt<Sample>(frame.luma, frame.lumaStride, y);
         const uint8_t *src = &out[size_t(y) * w];
-        for (int x = 0; x < w; x++) row[x] = coding.rawOf(coding.fromByte(src[x]));
-        if (vig > 0.0f) applyVignette(row, w, y, h, coding, vig);
-        if (b->plane[1] && (y & 1) == 0) {
-            // Neutral chroma for a half resolution plane: both U and V sit at the midpoint.
-            auto *uv = reinterpret_cast<uint16_t *>(reinterpret_cast<uint8_t *>(b->plane[1]) + size_t(y / 2) * b->stride[1]);
-            for (int x = 0; x < w / 2; x++) {
-                uv[2 * x] = uint16_t(neutral);
-                uv[2 * x + 1] = uint16_t(neutral);
+        for (int x = 0; x < w; x++) {
+            float code = coding.fromByte(src[x]);
+            if (strength > 0.0f) code *= 1.0f - strength * vignetteAt(x, y, w, h);
+            coding.store(row[x], code);
+        }
+        if (frame.chroma && (y & 1) == 0) {
+            // Neutral chroma: one U and one V per luma pair, interleaved.
+            auto *uv = static_cast<uint8_t *>(frame.chroma) + size_t(y / 2) * frame.chromaStride;
+            if (frame.chromaPixelStride == 1) {
+                std::memset(uv, coding.neutral(), size_t(w));
+            } else {
+                auto *samples = reinterpret_cast<uint16_t *>(uv);
+                for (int i = 0; i < w; i++) samples[i] = uint16_t(coding.neutral());
             }
         }
     }
-    __android_log_print(ANDROID_LOG_INFO, TAG, "capture %ux%u variant %d, vignette %d%%, %lld ms", w, h, variant, vigPercent,
-                        (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
-    (void)matrix;
     return true;
+}
+
+}  // namespace
+
+// Called from the capture hooks in soft_light.cpp once the camera has rendered the frame.
+// Returns true when the shot was rewritten.
+bool monopanApplyFrame(const MonoPanFrame &frame) {
+    if (!frame.luma || (frame.bits != 8 && frame.bits != 16)) return false;
+    const int w = frame.width & ~1, h = frame.height & ~1;
+    const size_t bytes = frame.bits == 8 ? 1 : 2;
+    if (w < 64 || h < 64 || w > 8192 || h > 8192 || frame.lumaStride < size_t(w) * bytes) return false;
+    const int variant = takeVariant(frame.luma, w, h);
+    if (!variant) return false;
+
+    Coding coding;
+    coding.bits = frame.bits;
+    coding.full = frame.fullRange;
+    if (frame.bits == 16) {
+        // 10 bits at the top of each word leave the low six empty; a stray low bit means the other
+        // mode. Sampling the plane costs nothing next to the helper job.
+        bool lowBits = false;
+        for (int r = 0; r < h && !lowBits; r += 97) {
+            const auto *row = reinterpret_cast<const uint16_t *>(static_cast<const uint8_t *>(frame.luma) + size_t(r) * frame.lumaStride);
+            for (int x = 0; x < w; x += 13) lowBits |= (row[x] & 0x3f) != 0;
+        }
+        coding.msb = !lowBits;
+    }
+    // The table is applied at full strength: 22% measured about -0.4 stops in the corners, the M3
+    // look. 35% read as -1.3 stops and looked like a lens fault rather than a filter.
+    const int vigPercent = property("persist.omnicam.monopan.vig", 22);
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = frame.bits == 8 ? process<uint8_t>(frame, variant, coding, vigPercent, w, h)
+                                    : process<uint16_t>(frame, variant, coding, vigPercent, w, h);
+    if (ok) {
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        __android_log_print(ANDROID_LOG_INFO, TAG, "capture %ux%u %d bit variant %d via %s, vignette %d%%, %lld ms", w, h, frame.bits,
+                            variant, frame.route ? frame.route : "?", vigPercent, ms);
+        // The same line goes into the shot trace so one file says both where the frame came in and
+        // whether the pass took it (soft_light.cpp).
+        if (FILE *f = std::fopen(kTraceFile, "a")) {
+            std::fprintf(f, "   applied %ux%u %d bit variant %d via %s vig %d%% %lldms\n", w, h, frame.bits, variant,
+                         frame.route ? frame.route : "?", vigPercent, ms);
+            std::fclose(f);
+        }
+    }
+    // A frame that was taken but not processed is the one case that has to speak up: the shot keeps
+    // the stock look, which is indistinguishable from the pass never being offered the frame.
+    if (!ok) {
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "fail %ux%u %d bit via %s after %lld ms", w, h, frame.bits,
+                            frame.route ? frame.route : "?", ms);
+        if (FILE *f = std::fopen(kTraceFile, "a")) {
+            std::fprintf(f, "   fail %ux%u %d bit via %s %lldms\n", w, h, frame.bits, frame.route ? frame.route : "?", ms);
+            std::fclose(f);
+        }
+    }
+    return ok;
 }

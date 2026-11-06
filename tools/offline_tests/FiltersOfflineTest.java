@@ -86,7 +86,7 @@ public final class FiltersOfflineTest {
         FilterCatalog normal = FilterCatalog.get(FilterScope.NORMAL);
         FilterCatalog master = FilterCatalog.get(FilterScope.MASTER);
         check("normal catalog: 清透, 琥珀", ids(normal.enabled()).equals(list("qing_tou.bin", "hu_po.bin")));
-        check("master catalog: 39 entries, 34 shown by default", master.entries().size() == 39 && master.enabled().size() == 34);
+        check("master catalog: 41 entries, 36 shown by default", master.entries().size() == 41 && master.enabled().size() == 36);
         check("master catalog order", ids(master.entries()).subList(0, 13).equals(list(
             "qing_tou.bin", "hu_po.bin",
             "Radiance.cube.rgb.bin", "Emerald.cube.rgb.bin", "kodak.cube.rgb.bin", "vivid-warm.cube.rgb.bin", "fuji.cube.rgb.bin",
@@ -158,7 +158,7 @@ public final class FiltersOfflineTest {
         List<FilterEntry> master = FilterCatalog.get(FilterScope.MASTER).entries();
         FakeGroup pro = new FakeGroup("default", "portra400_master.bin", "positive_master.bin");
         int added = inject(pro, false, master);
-        check("master: all 39 added, switched-off ones included", added == 39);
+        check("master: all 41 added, switched-off ones included", added == 41);
         check("master: X10 right after 标准", pro.mBackTypeList.subList(0, 3).equals(list("default", "qing_tou.bin", "hu_po.bin")));
         check("master: stock filters keep their order", pro.mBackTypeList.subList(3, 5).equals(list("portra400_master.bin", "positive_master.bin")));
         check("master: TAIL in catalog order", pro.mBackTypeList.get(5).equals("Radiance.cube.rgb.bin")

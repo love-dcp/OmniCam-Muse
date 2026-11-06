@@ -36,6 +36,17 @@ public final class SoftLight {
     private static native void nativeSetLevels(boolean weak, boolean medium, boolean strong);
     private static native void nativeSetNoLocalContrast(boolean on);
     private static native void nativeSetMasterMode(boolean master);
+    private static native void nativeNoteShot();
+
+    /**
+     * Marks a shot for the native trace (soft_light.cpp). The capture does not always come through
+     * the render entry the MONOPAN pass is written into, and a shot that took another route looks
+     * exactly like a shot that lost its filter; from here on every render entry names itself for a
+     * few seconds, so which route a shot took is in the log.
+     */
+    public static void noteShot() {
+        nativeNoteShot();
+    }
 
     /** The replaced levels; the property wins, the settings file is the fallback. */
     private static int levels() {

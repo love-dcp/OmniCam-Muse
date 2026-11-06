@@ -66,5 +66,20 @@ const char *masterColorRemapPath(const char *path, char *buf, size_t n);
 void onLibraryLoadedForPopFisheye(HookFunction hook, const char *name, void *handle);
 
 // MONOPAN 50 / 迫冲 (monopan.cpp): the M3 grain, tone and vignette on the finished capture YUV.
-// Called from the capture hook in soft_light.cpp; true when the shot was rewritten.
-bool monopanApplyCapture(const void *hostBuffer, int matrix, int range);
+// Meishe renders the same shot through one of three entries depending on how the camera decided to
+// run the effect (a P010 host buffer, an 8-bit host buffer, an AHardwareBuffer), so each route in
+// soft_light.cpp describes the frame it got and the pass works on any of them.
+struct MonoPanFrame {
+    const char *route = "?";     // the entry the frame came in on, for the log
+    void *luma = nullptr;        // Y plane, 8 or 16 bits per sample
+    size_t lumaStride = 0;       // bytes per row
+    void *chroma = nullptr;      // interleaved chroma at half height; null when there is none
+    size_t chromaStride = 0;     // bytes per row
+    int chromaPixelStride = 1;   // 1 for NV12/NV21, 2 for P010
+    int width = 0, height = 0;
+    int bits = 16;               // bits per luma sample
+    bool fullRange = true;
+    int matrix = 0;
+};
+// True when the shot was rewritten: a variant file was fresh and the helper answered.
+bool monopanApplyFrame(const MonoPanFrame &frame);

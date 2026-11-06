@@ -167,13 +167,13 @@ vignette table missing under %s
 | `module/payload/meishe_lut/JG_MONOPAN50*.bin` | **重新烘焙**：不再是恒等表，而是“亮度 + 主曲线”的单色 LUT（`tools/bake_monopan_luts.py`）。这样取景器里就已经是黑白，迫冲的对比也略高 |
 | `module/service.sh` | 部署参数表、拷 helper 与库到 `/data/local/tmp/monopan`、拉起 helper（`pkill` 单例） |
 | `app/.../filters/MasterFilterDefaults.java` | 两个 filter entry：`MONOPAN 50` / `MONOPAN 50 迫冲`，类别「徕卡风格」 |
-| `app/.../masterfilter/MonoPan.java` | 在拍摄元数据构建前把变体写进 `files/jiege/monopan/active` |
-| `app/src/main/cpp/monopan.cpp` | 拍摄后处理：读变体 → 取亮度 → 跑 helper → 回写亮度 + 色度置中 → 暗角 |
-| `app/src/main/cpp/soft_light.cpp` | 在 `MsRenderHDRHostBuffer` 的两条返回路径上各调用一次 `monopanApplyCapture` |
+| `app/.../masterfilter/MonoPan.java` | 每次快门都在拍摄元数据构建前重写变体到 `files/jiege/monopan/active` |
+| `app/src/main/cpp/monopan.cpp` | 拍摄后处理：读变体 → 取亮度 → 跑 helper → 回写亮度 + 色度置中 → 暗角；支持 8-bit 与 P010 |
+| `app/src/main/cpp/soft_light.cpp` | 钩 Meishe 的 host、GPU download 与 hardware-buffer 成片出口 |
 
 设计要点：
 
-* **标记保留、按新鲜度判断**：一次拍摄会把**好几个 buffer** 送进这个 hook（先 1280×960 的缩略图，再主图），读完即删会让主图拿不到标记，所以文件留在原地、只做 120 s 超龄判断；用户切走滤镜时由 Java 侧删掉它。
+* **标记保留、按新鲜度判断**：一次拍摄会把**好几个 buffer** 送进处理链（先 1280×960 的缩略图，再主图），读完即删会让主图拿不到标记，所以文件留在原地、只做 120 s 超龄判断；用户切走滤镜时由 Java 侧删掉它。主图在部分拍摄里可能延迟数十秒才交给 APS，30 s 的旧窗口已经上机证实会误判为 stale。
 * **失败即放行**：helper 没起来、超时、输出不全，都直接 return，照片保持相机原始渲染。日志 tag 是 `MonoPan`。
 * **超时预算**：默认 4 s（`persist.omnicam.monopan.timeout`）。实测 12.6MP 一单只要 167–270 ms（GPU 路径，与分辨率几乎无关），预算绰绰有余。
 * **暗角**：径向衰减，`persist.omnicam.monopan.vig` = 0–100，默认 22（角上约 −0.4 档，从半径 0.45 开始到 1.0 落到底）。35% 实测角上 −1.3 档，过重。
@@ -197,7 +197,17 @@ vignette table missing under %s
 
 ### 5.3 还没解决的
 
-1. **主图不一定经过 `MsRenderHDRHostBuffer`**。同一台机、同一滤镜，实测有一次主图 `4096×3072` 走了 hook（成片有颗粒），后续几张只有 `1280×960` 走 hook（成片只有 LUT 黑白、没有颗粒和暗角）。缩略图那条路是稳定的，主图那条要相机自己决定走 Meishe 才触发。**排查方向**：HDR/多帧是否开启、`pass tex` 与 `pass host` 的分工。这是当前唯一影响观感一致性的问题。
+1. **主图缺失的根因是标记过期，不是 APS 出口**。旧实现把活动标记保留 120 s，但后来把窗口缩到 30 s；主图延迟超过 30 s
+   时会命中 `skip stale 4096x3072`，成片只剩 LUT 黑白。现在 Java 每张照片都重写标记，native 窗口恢复到 120 s。
+
+   上机继续试过在 `APSClient.addFrameBuff` 入队前处理缓冲。实际日志显示一次拍摄会向 APS 送 8 张
+   `4096×3072` 连拍输入；逐帧处理后再由 HDRTransform 输出最终帧，会重复叠颗粒，因此这条注入已撤掉。
+   APS 到的是融合输入，不是最终 JPEG 帧。Meishe 的 host / GPU download / hardware-buffer 出口才是需要处理的最后一道 YUV。
+
+   2026-11-06 15:00–15:14 在 PKJ110 实拍验证：普通 MONOPAN 和迫冲在正常拍摄间隔下都会在 1–2 s 内记录
+   `applied 4096x3072 ... via hdr`。**仍有一个快速连拍分支**：如果上一张按下后约 4 s 内继续按快门，
+   第二张会走 quick-JPEG，当前只记录到 `1280x960`，成片中心高频能量约 2.2–2.8，而完整主图约 7.5–10.1。
+   这条快速出图由 APS 直接编码，不能通过逐帧修改 APS 输入解决；快速连拍的成片一致性仍待处理。
 2. **暗角表没落地**（3.5–3.8）：仍是固定径向形状。要复刻 M3 原表，最快一步是把像素区 17×17 网格的 8-float 叶子 dump 出来，按 lux/zoom 挑几组写进 `monopan.cpp`，而不是重写通用树解析。
 3. **取景器只有单色，没有颗粒/暗角**。Opus 同样只在拍摄链上做；预览走 GL，要加得复用 `GlPipeline`/`scatterTexture`。
 4. 两张 LUT 的对比/抬黑是按 M3 常见观感定的，不是官方数据；不合适就改 `tools/bake_monopan_luts.py` 重烘。

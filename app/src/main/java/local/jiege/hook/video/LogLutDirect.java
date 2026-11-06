@@ -4,6 +4,8 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Settings;
+import local.jiege.settings.ModuleSettings;
 
 /**
  * Pro video: try to make the stock "bake the LUT into the recording" switch actually do something.
@@ -53,9 +55,17 @@ import local.jiege.hook.common.Log;
  *       15, only index 1 at startup. The preview and the encoder both bypass the table.</li>
  * </ul>
  *
- * <p>So the hook stays as a probe, not as a fix: on this platform nothing in Java reaches the
- * encoder's LUT stage, and the difference from the X9U is in the HAL. Keeping it costs one string
- * compare per feature query and it reports the state if a future firmware changes the picture.
+ * <p>Those two tests only covered feature[8] and the public LUT loader. A later dex pass found the
+ * separate feature[3] strategy switch described above: the stock X8U answers 0 and selects
+ * {@code StraightOutOfTone}, whose inherited b() is a stub; feature[3] == 1 selects the shipped
+ * {@code MasterToneLutByHal} implementation. This class selects that strategy and also makes
+ * {@code vk()} agree with the Log format selected by the UI. Y7 buildSession then sends the
+ * direct-output mode and custom LUT name through the stock HAL interface.
+ *
+ * <p>Measured on PKJ110 at 1080p30 Log with the custom {@code ref} LUT: direct on produced
+ * {@code com.oplus.log.video.mode=2}; direct off produced 0. A 3.6s A/B pair differed from
+ * saturation 27.8 to 21.4 and mean RGB (104.6, 98.3, 76.8) to (104.6, 101.3, 83.1), so the LUT is
+ * in the encoded file rather than the viewfinder only.
  */
 final class LogLutDirect {
     private static final String TAG = "LogLut";
@@ -64,6 +74,16 @@ final class LogLutDirect {
     private static final String FUNC_CUSTOM_LUT = "func_master_video_log_custom_lut";
     /** The configuration row the custom-LUT slot actually reads. */
     private static final String CFG_HDR_LUT = "com.oplus.camera.preview.hdr.transform.lut.video.support";
+    /**
+     * MasterVideoDecision.c(3) selects the Log tone/LUT implementation. X8U's stock feature list
+     * only has index 0, so this falls through to {@code StraightOutOfTone}; that implementation
+     * inherits a stub {@code b(DecisionParam)} which always reports Log LUT mode 0 to the HAL.
+     * The build also contains {@code MasterToneLutByHal}, whose b() reports 2 when Log recording
+     * and the direct switch are both on. The camera normally turns the direct request (2) into a
+     * limited request (1) at 120fps or 8K; Vj is patched below for 120fps.
+     */
+    private static final int HAL_DIRECT_FEATURE = 3;
+    private static final String FORCE_120 = "persist.omnicam.loglut.120";
 
     /** Pro video module. Declares its own final getSupportFunction, so BaseMode alone is not enough. */
     private static final String MODE_PRO_VIDEO = "rm.e";
@@ -78,6 +98,10 @@ final class LogLutDirect {
 
     private static volatile boolean reportedQuery;
     private static volatile boolean reportedConfig;
+    private static volatile boolean reportedStrategy;
+    private static volatile int reportedDirectMode = -1;
+    private static volatile boolean reported120;
+    private static volatile boolean strategyInstalled;
     private static volatile int queries;
     /** Table indexes already reported, so the log stays one line per index. */
     private static final java.util.Set<Integer> loadedIndexes =
@@ -86,11 +110,183 @@ final class LogLutDirect {
     private LogLutDirect() {}
 
     static void install(ClassLoader classLoader) {
+        relabelUnsupportedHint();
+        enableHalDirectStrategy(classLoader);
         answerGetSupportFunction(classLoader, MODE_PRO_VIDEO);
         answerGetSupportFunction(classLoader, MODE_ALT);
         answerGetSupportFunction(classLoader, MODE_BASE);
         observeConfig(classLoader);
         observeLutLoader(classLoader);
+    }
+
+    /** The stock label still names 120fps even though Vj now enables it below. */
+    private static void relabelUnsupportedHint() {
+        if (property(FORCE_120, 1) == 0) return;
+        try {
+            XposedBridge.hookAllMethods(android.widget.TextView.class, "setText",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.args.length == 0 || !(param.args[0] instanceof CharSequence)) return;
+                            String text = param.args[0].toString();
+                            if (!text.contains("120fps") || !text.contains("8K")) return;
+                            param.args[0] = text.replaceAll("(?i)\\s*120fps\\s*(or|或|/)\\s*", "");
+                        }
+                    });
+        } catch (Throwable error) {
+            Log.e(TAG, "unsupported hint relabel failed", error);
+        }
+    }
+
+    private static boolean enabled() {
+        return Settings.get(ModuleSettings.LOG_LUT);
+    }
+
+    /**
+     * Select the stock {@code MasterToneLutByHal} strategy instead of {@code StraightOutOfTone}.
+     *
+     * <p>The strategy instance is chosen once in {@code MasterVideoDecision.a.<clinit>}. Hooking
+     * c() makes the normal constructor pick the HAL strategy. Do not touch that singleton here:
+     * forcing its initialization during ModuleEntry install blocks the camera UI on a black screen.
+     */
+    private static void enableHalDirectStrategy(final ClassLoader classLoader) {
+        try {
+            Class<?> decision = XposedHelpers.findClass("o9.h", classLoader);
+            XposedBridge.hookAllMethods(decision, "c", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled() || param.args.length < 1
+                            || !(param.args[0] instanceof Integer)
+                            || (Integer) param.args[0] != HAL_DIRECT_FEATURE) {
+                        return;
+                    }
+                    Integer stock = param.getResult() instanceof Integer
+                            ? (Integer) param.getResult() : 0;
+                    if (stock != 1) param.setResult(1);
+                    if (!reportedStrategy) {
+                        reportedStrategy = true;
+                        Log.i(TAG, "Log LUT strategy feature[3] answered 1 (stock " + stock + ")");
+                    }
+                }
+            });
+
+            /*
+             * The singleton may already have been initialized before c() was hooked. Replace it
+             * only after the Pro Video mode object exists: doing this during ModuleEntry install
+             * forces too much camera initialization early and leaves the app on a black screen.
+             */
+            Class<?> proVideo = XposedHelpers.findClass(MODE_PRO_VIDEO, classLoader);
+            XposedBridge.hookAllMethods(proVideo, "Vj", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled() || property(FORCE_120, 1) == 0) return;
+                    if (!(param.getResult() instanceof Integer) || (Integer) param.getResult() != 1) return;
+                    try {
+                        Object is120 = XposedHelpers.callMethod(param.thisObject, "y");
+                        if (Boolean.TRUE.equals(is120)) {
+                            param.setResult(2);
+                            if (!reported120) {
+                                reported120 = true;
+                                Log.i(TAG, "120fps direct mode: promoted 1 -> 2");
+                            }
+                        }
+                    } catch (Throwable error) {
+                        Log.e(TAG, "120fps direct decision unavailable", error);
+                    }
+                }
+            });
+            XposedBridge.hookAllConstructors(proVideo, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (enabled()) installHalStrategy(classLoader);
+                }
+            });
+            XposedBridge.hookAllMethods(proVideo, "vk", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled()) return;
+                    String format = logFormat(classLoader);
+                    if ("log".equals(format)) param.setResult(Boolean.TRUE);
+                }
+            });
+            XposedBridge.hookAllMethods(proVideo, "Y7", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled() || !strategyInstalled) return;
+                    try {
+                        Object decision = XposedHelpers.callMethod(param.thisObject, "Il");
+                        Object strategy = XposedHelpers.getObjectField(
+                                XposedHelpers.getStaticObjectField(
+                                        XposedHelpers.findClass("o9.h$a", classLoader), "a"), "c");
+                        int mode = (Integer) XposedHelpers.callMethod(strategy, "b", decision);
+                        Log.i(TAG, "HAL decision inputs: lut="
+                                + XposedHelpers.getBooleanField(decision, "a")
+                                + " hdr=" + XposedHelpers.getBooleanField(decision, "b")
+                                + " highRes=" + XposedHelpers.getBooleanField(decision, "c")
+                                + " logKind=" + XposedHelpers.getIntField(decision, "d")
+                                + " direct=" + XposedHelpers.getIntField(decision, "e")
+                                + " format=" + logFormat(classLoader)
+                                + " -> mode=" + mode);
+                    } catch (Throwable error) {
+                        Log.e(TAG, "HAL decision probe failed", error);
+                    }
+                }
+            });
+
+            XposedBridge.hookAllMethods(XposedHelpers.findClass("o9.f", classLoader), "b",
+                    new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled() || param.args.length < 1 || !(param.getResult() instanceof Integer)) return;
+                    int mode = (Integer) param.getResult();
+                    if (mode <= 0 || mode == reportedDirectMode) return;
+                    reportedDirectMode = mode;
+                    Log.i(TAG, "HAL Log LUT mode " + mode);
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "HAL Log LUT strategy unavailable", error);
+        }
+    }
+
+    private static int property(String name, int fallback) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            String value = (String) type.getMethod("get", String.class).invoke(null, name);
+            return value == null || value.isEmpty() ? fallback : Integer.parseInt(value.trim());
+        } catch (Throwable error) {
+            return fallback;
+        }
+    }
+
+    private static String logFormat(ClassLoader classLoader) {
+        try {
+            Object manager = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.oplus.camera.data.DataManager", classLoader),
+                    "getInstance");
+            Object key = XposedHelpers.getStaticObjectField(
+                    XposedHelpers.findClass("n9.e", classLoader), "K0");
+            return String.valueOf(XposedHelpers.callMethod(manager, "b", key, "sdr"));
+        } catch (Throwable error) {
+            return "unknown";
+        }
+    }
+
+    private static synchronized void installHalStrategy(ClassLoader classLoader) {
+        if (strategyInstalled) return;
+        try {
+            Object singleton = XposedHelpers.getStaticObjectField(
+                    XposedHelpers.findClass("o9.h$a", classLoader), "a");
+            Object current = XposedHelpers.getObjectField(singleton, "c");
+            // R8 removes the stateless strategy's constructor and the stock clinit allocates the
+            // object directly. allocateInstance matches that shape and does not need a ctor.
+            Class<?> unsafeType = Class.forName("sun.misc.Unsafe");
+            java.lang.reflect.Field unsafeField = unsafeType.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            Object unsafe = unsafeField.get(null);
+            Object hal = unsafeType.getMethod("allocateInstance", Class.class)
+                    .invoke(unsafe, XposedHelpers.findClass("o9.f", classLoader));
+            XposedHelpers.setObjectField(singleton, "c", hal);
+            strategyInstalled = true;
+            Log.i(TAG, "Log LUT decision strategy: "
+                    + XposedHelpers.callMethod(current, "getName") + " -> "
+                    + XposedHelpers.callMethod(hal, "getName"));
+        } catch (Throwable error) {
+            Log.e(TAG, "HAL Log LUT strategy replacement unavailable", error);
+        }
     }
 
     /**
@@ -139,6 +335,7 @@ final class LogLutDirect {
             Class<?> type = XposedHelpers.findClass(className, classLoader);
             XposedBridge.hookAllMethods(type, "getSupportFunction", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled()) return;
                     if (param.args.length != 1 || !(param.args[0] instanceof String)) return;
                     if (!FUNC_CUSTOM_LUT.equals(param.args[0])) return;
                     boolean stock = Boolean.TRUE.equals(param.getResult());

@@ -208,6 +208,124 @@ lut table 1 loaded: null (no file)      ← 相机启动时唯一一次，之后
 留档代码：`app/src/main/java/local/jiege/hook/video/LogLutDirect.java`（路一的答案 + 两条观测）。
 cube 已从 payload 移除，避免留死数据。
 
+### 6.2 已解决：`master.video.feature.list[3]` 选择 HAL 直出策略（r162 实测）
+
+前两轮测试漏了一个与“是否支持自定义 LUT”不同的门：`MasterVideoDecision.c(3, 0)`。
+它不控制 UI，而是决定 `MasterVideoDecision` 用哪套 Log 直出实现：
+
+| feature[3] | 实现 | 发给 HAL 的 `KEY_LOG_VIDEO_MODE` |
+|---|---|---|
+| 0（X8U 原厂） | `StraightOutOfTone` | 继承基类的常量 `0` |
+| 1 | `MasterToneLutByHal` | 正常直出请求为 `2`，受限请求加防抖时走 `1` |
+
+X8U 的 `com.oplus.camera.master.video.feature.list` 原厂只有 1 项（值为 `1`），所以索引 3
+落到默认值 0。`MasterToneLutByHal.b(DecisionParam)` 才是原厂真正的 HAL 直出判定：
+
+```java
+if (logVideo && directMode == 2) return 2;
+if (logVideo && directMode == 1 && stabilization) return 1;
+return 0;
+```
+
+Pro 视频构建相机会话时，`rm.e.Y7()` 会把两项值送进 HAL：
+
+```java
+KEY_CONFIGURE_MASTER_VIDEO_CUSTOM_LUT_NAME = <当前自定义 LUT 名>
+KEY_CONFIGURE_LOG_VIDEO_MODE = decision.b(Il())
+```
+
+还有一个容易漏掉的内部状态：UI 选择 Log 后，Presenter 的 `hh.a.e()` 会被监看钩子回答为
+`on`，但 `MasterVideoMode.vk()` 仍直接读 `pref_log_video_key`，所以最初实际下发的仍是 0。
+最终实现必须同时让 `vk()` 在“当前格式为 log”时回答真。
+
+最终实现方式不是改编码文件，也不是继续观察 `Lut3dDataManager.i()`，而是：
+
+1. 让 `o9.h.c(3, 0)` 返回 1；
+2. 在 Pro Video 对象创建后，将已初始化的 `o9.h$a.a.c` 从 `StraightOutOfTone`
+   替换为 `MasterToneLutByHal`。不能在模块安装阶段提前读取单例，否则相机会黑屏；
+3. 让 `rm.e.vk()` 在 `n9.e.K0 == "log"` 时回答真，SDR/HDR 分支保持原样；
+4. 保持现有监看 LUT 选择和“录制效果直出”开关。
+
+PKJ110 实测（1080p30、Log、自定义 `ref.cube`、同一机位，各约 3.6 秒）：
+
+| 样片 | 直出 | HAL 模式 | 像素格式 | mean RGB | 饱和度代理 |
+|---|---:|---:|---|---|---|
+| A | 开 | 2 | yuv420p | 104.6 / 98.3 / 76.8 | 27.8 |
+| B | 关 | 0 | yuv420p10le | 104.6 / 101.3 / 83.1 | 21.4 |
+
+日志同时显示 `com.oplus.log.video.mode: 2`、`lut=true`、`format=log` 和
+`mFeatureName=logVideo`。因此直出确实进入编码文件，不只是监看。开启直出后本机输出为 8-bit
+HEVC；关闭时仍为 10-bit HEVC，这是当前 HAL LUT 路径的格式限制。
+
+### 6.3 分辨率 / 帧率 / 监看模式矩阵（r162 实测）
+
+2026-11-06 在 PKJ110 上，专业视频、自定义 `ref` LUT、录制效果直出开启，逐档录制并读取
+HEVC 实际像素格式。`yuv420p` 表示 8-bit HAL 直出路径；`yuv420p10le` 表示仍为 10-bit
+Log 编码。
+
+| 分辨率 | 帧率 | 录制格式 / 监看 LUT | 实际像素格式 | 直出 |
+|---|---:|---|---|---|
+| 1080p | 30 | Log / ref | `yuv420p` | 是 |
+| 1080p | 60 | Log / ref | `yuv420p` | 是 |
+| 1080p | 120 | Log / ref | `yuv420p` | 是（r163 强制 Vj） |
+| 4K | 30 | Log / ref | `yuv420p` | 是 |
+| 4K | 60 | Log / ref | `yuv420p` | 是 |
+| 4K | 120 | Log / ref | `yuv420p` | 是（r163 强制 Vj） |
+| 1080p | 30 | Log / SDR Rec.709 | `yuv420p` | 是 |
+| 1080p | 30 | Log / HDR HLG | `yuv420p10le` | 实测未写入，见下 |
+| 4K | 30 | Log / SDR Rec.709 | `yuv420p` | 是 |
+| 4K | 30 | Log / HDR HLG | `yuv420p10le` | 实测未写入，见下 |
+
+这里的“SDR / HDR 监看 LUT”指录制格式仍为 **Log**，只是 LUT 面板选择
+`SDR (Rec.709)` 或 `HDR (HLG)`。两者不是一回事：
+
+* SDR Rec.709 直出可用。4K30 开关前后中心区域饱和度变化 `+3.79`，RGB 均值变化
+  `-1.52 / -2.88 / -4.13`，首帧平均像素差 `5.2`，并且像素格式从 10-bit 变为 8-bit。
+* HDR HLG 开关虽然可点亮，HAL 在 1080p30 决策日志里也返回 `mode=2`，但输出仍是
+  `yuv420p10le`，开关前后首帧平均像素差只有 `1.71`（p50=1），4K30 更是 `1.45`，
+  与 HEVC 编码噪声同量级。结论：当前 HAL 路径没有把 HLG LUT 烘进编码文件。
+
+若把录像格式直接切到 `SDR` 或 `HDR`，直出也不是可用方案：
+
+| 录制格式 | UI | HAL 决策 |
+|---|---|---|
+| SDR | LUT 面板仍在，但没有“录制效果直出”卡片 | `format=sdr, lut=false -> mode=0` |
+| HDR | LUT 入口和直出卡片都不显示 | `format=hdr, lut=false -> mode=0` |
+
+因此目前可用的范围是：**Log 录制 + ref 或 SDR Rec.709 监看 LUT，1080p/4K 的 30、
+60、120 fps 可直出；HDR HLG 尚未真正落地。**
+
+### 6.4 r163：120fps 强制直出
+
+`rm.e.Vj()` 读取直出设置时，如果当前是 120fps 或 8K 且设置为 2，会把值降为 1。
+`MasterToneLutByHal.b()` 只有在 `directMode == 2` 时返回 HAL 模式 2，所以 120fps 最终
+变成了 `mode=0`。r163 在 `Vj()` 返回后只对 120fps 把 1 恢复成 2，8K 保持原厂限制。
+
+PKJ110 实测：
+
+| 规格 | HAL | 编码 | 实际帧率 | 可解码 |
+|---|---|---:|---:|---|
+| 1080p120 | `com.oplus.log.video.mode=2` | `yuv420p` 8-bit | 119.7fps | 是 |
+| 4K120 | `com.oplus.log.video.mode=2` | `yuv420p` 8-bit | 119.7fps | 是 |
+
+### 6.5 HDR HLG 直出：当前 HAL 不支持
+
+r163 也验证了强制 HLG 的路径：把 `MasterToneLutByHal.b()` 分别强制为 1 和 2，并把
+`VIDEO_DATASPACE` 从原厂 BT.2020 改成 `BT2020_HLG`。两种组合都能产出可解码文件，
+且 LUT 确实改变了画面，但编码器都回落到：
+
+```
+pix_fmt = yuv420p (8-bit)
+color_primaries = BT.709
+color_trc = BT.709
+colorspace = BT.709
+range = limited
+```
+
+关闭直出则保留 10-bit BT.2020。也就是说，这台 PKJ110 的 HAL 直出 LUT 通路实际固定为
+BT.709 8-bit，无法同时满足“LUT 烘入”和真正的 HLG 10-bit 输出。该实验分支没有保留，
+避免把 SDR 文件误标成 HDR。
+
 
 ## 7. 复现
 

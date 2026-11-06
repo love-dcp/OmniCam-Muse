@@ -178,12 +178,71 @@ void probeRender(const char *what, const void *param) {
 // replaced pair cannot tell us when neither fires. Every entry takes its arguments in the
 // first eight integer registers, so forwarding eight words is safe where the real signature
 // is shorter, and nothing is modified.
+
+// ---- shot trace -------------------------------------------------------------------------------
+// The capture does not always come through the entry the MONOPAN pass is written into, and a shot
+// that took another route looks exactly like a shot that lost its filter. MonoPan.java stamps the
+// moment it writes the variant (nativeNoteShot), i.e. when the shot's request is built; for the
+// next few seconds every render entry names itself here, with the size it was handed where the
+// entry exposes one. Only a change of entry, size or burst is logged: the preview calls one entry
+// over and over and would otherwise fill the budget before the capture arrives.
+//
+// The lines go to a file as well as to logcat: the camera floods logd with its own IPU debug output
+// while a shot is processing, and the lines that matter were simply not there when read back.
+constexpr int64_t kTraceWindowMs = 20000;
+constexpr char kTraceFile[] = "/data/user/0/com.oplus.camera/files/jiege/monopan/trace.txt";
+std::atomic<int64_t> gShotAtMs{0};
+std::atomic<int> gTraceLines{0};
+const char *gTraceLast = nullptr;
+uint32_t gTraceLastW = 0, gTraceLastH = 0;
+int64_t gTraceLastMs = 0;
+
+int64_t traceNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void traceShot(const char *what, uint32_t width = 0, uint32_t height = 0) {
+    const int64_t at = gShotAtMs.load(std::memory_order_relaxed);
+    if (!at) return;
+    const int64_t now = traceNowMs();
+    const int64_t dt = now - at;
+    if (dt < 0 || dt > kTraceWindowMs) return;
+    if (gTraceLast == what && gTraceLastW == width && gTraceLastH == height && now - gTraceLastMs < 250) return;
+    gTraceLast = what;
+    gTraceLastW = width;
+    gTraceLastH = height;
+    gTraceLastMs = now;
+    if (gTraceLines.fetch_add(1) >= 200) return;
+    char text[128];
+    if (width && height) {
+        std::snprintf(text, sizeof text, "%s %ux%u %.1fMP", what, width, height, double(uint64_t(width) * height) / 1e6);
+    } else {
+        std::snprintf(text, sizeof text, "%s", what);
+    }
+    if (FILE *f = std::fopen(kTraceFile, "a")) {
+        std::fprintf(f, "+%lldms %s\n", (long long)dt, text);
+        std::fclose(f);
+    }
+    __android_log_print(ANDROID_LOG_INFO, TAG, "shot +%lldms %s", (long long)dt, text);
+}
+
+// The entry probes the pass-through hooks call, plus the shot trace when one is open.
 void probeEntry(const char *what, int slot) {
-    static std::atomic<uint32_t> seen[6];
+    static std::atomic<uint32_t> seen[16];
     uint32_t k = seen[slot].fetch_add(1, std::memory_order_relaxed);
     if (k == 0 || k % 200 == 0) {
         __android_log_print(ANDROID_LOG_INFO, TAG, "entry %s #%u", what, k + 1);
     }
+    traceShot(what);
+}
+
+// The routes the MONOPAN pass covers, so a build can be narrowed down while a route is suspect.
+bool monoPanRoute(const char *name) {
+    char key[64];
+    std::snprintf(key, sizeof key, "persist.omnicam.monopan.%s", name);
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(key, value) <= 0) return true;
+    return std::atoi(value) != 0;
 }
 
 using RenderAny = int (*)(void *, void *, void *, void *, void *, void *, void *, void *);
@@ -209,6 +268,26 @@ using RenderHdrHostBuffer = int (*)(void *, void *, const HostBufferInfo *, unsi
 RenderHdrHostBuffer origRenderHdrHostBuffer;
 RenderAny origRenderTexture;
 RenderAny origRenderTextureWithPosition;
+
+// A host buffer as the MONOPAN pass sees it. The sample size comes from the stride rather than from
+// pixFmt: two bytes per pixel is P010, one is 8-bit NV12/NV21, and that is the only difference the
+// pass cares about.
+MonoPanFrame monoPanFrameOf(const HostBufferInfo &b, const char *route) {
+    MonoPanFrame frame;
+    frame.route = route;
+    const int w = int(b.width) & ~1;
+    frame.width = int(b.width);
+    frame.height = int(b.height);
+    frame.luma = b.plane[0];
+    frame.lumaStride = b.stride[0];
+    frame.bits = w > 0 && b.stride[0] / uint32_t(w) >= 2 ? 16 : 8;
+    frame.chroma = b.plane[1];
+    frame.chromaStride = b.stride[1];
+    frame.chromaPixelStride = frame.bits == 8 ? 1 : 2;
+    frame.fullRange = b.range == 1;
+    frame.matrix = int(b.matrix);
+    return frame;
+}
 
 #define SOFT_LIGHT_PASS_THROUGH(fn, original, slot, label)                                              \
     int fn(void *a0, void *a1, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7) {           \
@@ -790,6 +869,84 @@ void scatterP010(AHardwareBuffer *ahb, const SoftFilter &filter, Transfer tr, Yu
     AHardwareBuffer_unlock(ahb, nullptr);
 }
 
+// The same buffer for the MONOPAN pass: the planes are locked once and handed over as they are, so
+// the pass covers whatever sample size the buffer carries (P010 is a two byte luma, NV12 a one byte
+// one) without a second copy.
+bool applyMonoPanToHardwareBuffer(AHardwareBuffer *ahb, int matrix, int range) {
+    if (!ahb) return false;
+    AHardwareBuffer_Desc desc{};
+    AHardwareBuffer_describe(ahb, &desc);
+    using LockPlanes = int (*)(AHardwareBuffer *, uint64_t, int32_t, const ARect *, AHardwareBuffer_Planes *);
+    static auto lockPlanes = reinterpret_cast<LockPlanes>(dlsym(RTLD_DEFAULT, "AHardwareBuffer_lockPlanes"));
+    if (!lockPlanes) return false;
+    AHardwareBuffer_Planes planes{};
+    if (lockPlanes(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, nullptr, &planes) != 0 ||
+        planes.planeCount < 1) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "monopan: capture buffer not lockable (format 0x%x)", desc.format);
+        return false;
+    }
+    MonoPanFrame frame;
+    frame.route = "hw";
+    frame.luma = planes.planes[0].data;
+    frame.lumaStride = planes.planes[0].rowStride;
+    frame.bits = planes.planes[0].pixelStride >= 2 ? 16 : 8;
+    if (planes.planeCount > 1) {
+        frame.chroma = planes.planes[1].data;
+        frame.chromaStride = planes.planes[1].rowStride;
+        frame.chromaPixelStride = planes.planes[1].pixelStride;
+    }
+    frame.width = int(desc.width);
+    frame.height = int(desc.height);
+    frame.fullRange = range == 1;
+    frame.matrix = matrix;
+    const bool ok = monopanApplyFrame(frame);
+    AHardwareBuffer_unlock(ahb, nullptr);
+    return ok;
+}
+
+// The main image does not always come through a render entry: when Meishe renders it on the GPU
+// (the filter unit processes textures, tiled or not) the finished YUV only appears here, on its way
+// back to the CPU - MsDownloadHotBufferFromGPU(CNvGpuFrame*, int, SMsHostBufferInfo*, int, int, int,
+// int, int). Without this the shot kept the filter's LUT but lost the grain and the vignette, which
+// is exactly what a run of shots showed (docs/MONOPAN.md).
+using DownloadHostBuffer = int (*)(void *, int, HostBufferInfo *, int, int, int, int, int);
+DownloadHostBuffer origDownloadHostBuffer;
+
+int hookDownloadHostBuffer(void *frame, int a1, HostBufferInfo *out, int a2, int a3, int a4, int a5, int a6) {
+    if (!origDownloadHostBuffer) return 0;
+    const int ret = origDownloadHostBuffer(frame, a1, out, a2, a3, a4, a5, a6);
+    if ((ret & 1) && out) {
+        traceShot("MsDownloadHostBuffer", out->width, out->height);
+        if (monoPanRoute("download")) monopanApplyFrame(monoPanFrameOf(*out, "download"));
+    }
+    return ret;
+}
+
+// Every remaining export that could carry a capture frame, hooked as a probe that only names itself
+// in the shot trace. Nothing is replaced: a shot that stays away from all the entries above still
+// says where it went, which is the only way to tell "the filter never ran" from "the filter ran
+// somewhere I do not hook" (docs/MONOPAN.md).
+using RenderProbe = int (*)(void *, void *, void *, void *, void *, void *, void *, void *);
+RenderProbe origTexturePre, origTexturePost, origUpload, origConvert;
+RenderProbe origEffects, origEffectsTiled, origEffectsHw, origEffectsYuv;
+
+#define SOFT_LIGHT_PROBE(fn, original, slot, label)                                            \
+    int fn(void *a0, void *a1, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7) {   \
+        probeEntry(label, slot);                                                               \
+        return original ? original(a0, a1, a2, a3, a4, a5, a6, a7) : 0;                         \
+    }
+
+SOFT_LIGHT_PROBE(hookTexturePre, origTexturePre, 6, "MsRenderTexturePreRender")
+SOFT_LIGHT_PROBE(hookTexturePost, origTexturePost, 7, "MsRenderTexturePostRender")
+SOFT_LIGHT_PROBE(hookUpload, origUpload, 8, "MsUploadHotBufferToGPU")
+SOFT_LIGHT_PROBE(hookConvert, origConvert, 9, "MsConvertHostBuffer")
+SOFT_LIGHT_PROBE(hookEffects, origEffects, 10, "DoProcessEffects")
+SOFT_LIGHT_PROBE(hookEffectsTiled, origEffectsTiled, 11, "DoProcessEffectsTiled")
+SOFT_LIGHT_PROBE(hookEffectsHw, origEffectsHw, 12, "DoProcessEffectsHardwareBuffer")
+SOFT_LIGHT_PROBE(hookEffectsYuv, origEffectsYuv, 13, "DoProcessEffectsYUV")
+
+#undef SOFT_LIGHT_PROBE
+
 // SMsHostBufferInfo path: the planes are already plain CPU memory, so the descriptors are built
 // by hand. P010 is semi-planar: Y, then one interleaved plane with 4 bytes per chroma pair.
 bool scatterHostBuffer(const HostBufferInfo &b, const SoftFilter &filter, Transfer tr, YuvCoding coding) {
@@ -1225,7 +1382,10 @@ RenderHdrTexture origHdrTexture;
 int hookHdrTexture(void *core, void *effect, const GpuTextureInfo *in, unsigned n, GpuTextureInfo *out, const void *param,
                    const void *metadata, int flags) {
     probeRender("hdrTexture", param);
-    if (out) logPass("tex", out->width, out->height, out->format, out->transfer, 0, 0, param);
+    if (out) {
+        logPass("tex", out->width, out->height, out->format, out->transfer, 0, 0, param);
+        traceShot("MsRenderHDRTexture", out->width, out->height);
+    }
     const SoftFilter *filter = filterFor(param);
     Transfer tr;
     if (!filter || !out || !transferOf(out->transfer, tr)) return origHdrTexture(core, effect, in, n, out, param, metadata, flags);
@@ -1248,12 +1408,18 @@ int hookHardwareBuffer(void *core, void *effect, const HardwareBufferInfo *in, u
         AHardwareBuffer_Desc desc{};
         AHardwareBuffer_describe(out->buffer, &desc);
         logPass("hw", desc.width, desc.height, uint32_t(desc.format), uint32_t(out->transfer), 0, 0, param);
+        traceShot("MsRenderHardwareBuffer", desc.width, desc.height);
     }
     const SoftFilter *filter = filterFor(param);
     Transfer tr;
     gCaptureSoft.store(filter != nullptr);
     if (!filter || !out || !out->buffer || !transferOf(uint32_t(out->transfer), tr)) {
-        return origHardwareBuffer(core, effect, in, n, out, param, metadata, flags);
+        const int plain = origHardwareBuffer(core, effect, in, n, out, param, metadata, flags);
+        // MONOPAN is a filter of its own, so it takes the frame whether or not a soft light is on.
+        if ((plain & 1) && out && out->buffer && monoPanRoute("hw")) {
+            applyMonoPanToHardwareBuffer(out->buffer, out->matrix, out->range);
+        }
+        return plain;
     }
     int ret;
     if (keepStock()) {
@@ -1276,6 +1442,8 @@ int hookHardwareBuffer(void *core, void *effect, const HardwareBufferInfo *in, u
     scatterP010(out->buffer, *filter, tr, yuvCoding(out->matrix, out->range));
     __android_log_print(ANDROID_LOG_INFO, TAG, "capture took %lld ms", (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start).count());
+    // Grain goes on last: it is on the film, after whatever the soft light did to the scene light.
+    if (monoPanRoute("hw")) applyMonoPanToHardwareBuffer(out->buffer, out->matrix, out->range);
     return ret;
 }
 
@@ -1447,6 +1615,7 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
     if (!origRenderHdrHostBuffer) return 0;
     if (!out) return origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
     logPass("host", out->width, out->height, out->pixFmt, out->transfer, out->stride[0], out->stride[1], param);
+    traceShot("MsRenderHDRHostBuffer", out->width, out->height);
     // The palette dial is applied to the same render the soft light works on (see below).
     refreshPalette();
     if (gPalette.on && applyPaletteToCapture(*out, yuvCoding(int(out->matrix), int(out->range)))) {
@@ -1461,7 +1630,7 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
         // Not a soft light shot. MONOPAN is a filter of its own, so it still gets this frame -
         // it does nothing unless the app wrote a variant for the shot (monopan.cpp).
         const int plain = origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
-        if (plain & 1) monopanApplyCapture(out, int(out->matrix), int(out->range));
+        if ((plain & 1) && monoPanRoute("hdr")) monopanApplyFrame(monoPanFrameOf(*out, "hdr"));
         return plain;
     }
     int ret;
@@ -1474,7 +1643,7 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
     if (!(ret & 1)) return ret;
     // MONOPAN 50 / 迫冲: the M3 grain, tone and vignette on the same finished frame (monopan.cpp).
     // It consumes the variant the app wrote for this shot, so it does nothing for other filters.
-    monopanApplyCapture(out, int(out->matrix), int(out->range));
+    if (monoPanRoute("hdr")) monopanApplyFrame(monoPanFrameOf(*out, "hdr"));
     if (sameFrameAgain(out->width, out->height, out->plane[0])) {
         __android_log_print(ANDROID_LOG_WARN, TAG, "capture: %ux%u scattered already, skipping", out->width, out->height);
         return ret;
@@ -1560,11 +1729,47 @@ void onLibraryLoadedForSoftLight(HookFunction hook, const char *name, void *hand
                reinterpret_cast<void **>(&origRenderHostBuffer), TAG);
     hookExport(hook, handle, "MsRenderHDRHostBuffer", reinterpret_cast<void *>(hookRenderHdrHostBuffer),
                reinterpret_cast<void **>(&origRenderHdrHostBuffer), TAG);
+    // The GPU path's finished frame, for the shots no render entry above sees.
+    hookExport(hook, handle, "MsDownloadHotBufferFromGPU", reinterpret_cast<void *>(hookDownloadHostBuffer),
+               reinterpret_cast<void **>(&origDownloadHostBuffer), TAG);
+    // Probes: nothing is replaced, they only report themselves during a shot.
+    hookExport(hook, handle, "MsRenderTexturePreRender", reinterpret_cast<void *>(hookTexturePre),
+               reinterpret_cast<void **>(&origTexturePre), TAG);
+    hookExport(hook, handle, "MsRenderTexturePostRender", reinterpret_cast<void *>(hookTexturePost),
+               reinterpret_cast<void **>(&origTexturePost), TAG);
+    hookExport(hook, handle, "MsUploadHotBufferToGPU", reinterpret_cast<void *>(hookUpload),
+               reinterpret_cast<void **>(&origUpload), TAG);
+    hookExport(hook, handle, "MsConvertHostBuffer", reinterpret_cast<void *>(hookConvert),
+               reinterpret_cast<void **>(&origConvert), TAG);
+    hookExport(hook, handle, "_ZN18CNvComputeRenderer16DoProcessEffectsEP11CNvGpuFrameRKNS_13RenderContextES1_bS1_",
+               reinterpret_cast<void *>(hookEffects), reinterpret_cast<void **>(&origEffects), TAG);
+    hookExport(hook, handle, "_ZN18CNvComputeRenderer21DoProcessEffectsTiledEP11CNvGpuFrameRKNS_13RenderContextES1_bS1_",
+               reinterpret_cast<void *>(hookEffectsTiled), reinterpret_cast<void **>(&origEffectsTiled), TAG);
+    hookExport(hook, handle, "_ZN18CNvComputeRenderer34DoProcessEffectsWithHarewareBufferEP11CNvGpuFrameRKNS_13RenderContextES1_",
+               reinterpret_cast<void *>(hookEffectsHw), reinterpret_cast<void **>(&origEffectsHw), TAG);
+    hookExport(hook, handle, "_ZN18CNvComputeRenderer19DoProcessEffectsYUVEP11CNvGpuFrameS1_RKNS_13RenderContextES1_S1_",
+               reinterpret_cast<void *>(hookEffectsYuv), reinterpret_cast<void **>(&origEffectsYuv), TAG);
     hookExport(hook, handle, "MsRenderTexture", reinterpret_cast<void *>(hookRenderTexture),
                reinterpret_cast<void **>(&origRenderTexture), TAG);
     hookExport(hook, handle, "MsRenderTextureWithPosition", reinterpret_cast<void *>(hookRenderTextureWithPosition),
                reinterpret_cast<void **>(&origRenderTextureWithPosition), TAG);
     __android_log_print(ANDROID_LOG_INFO, TAG, "render entries probed");
+}
+
+// MonoPan.java stamps every shot here, right after it writes the variant marker, which is when the
+// capture request for that shot is built. The render entries then name themselves for a few
+// seconds (traceShot), so a shot that took another route than the MONOPAN pass covers is visible
+// in the log instead of silently losing its grain.
+extern "C" JNIEXPORT void JNICALL Java_local_jiege_hook_softlight_SoftLight_nativeNoteShot(JNIEnv *, jclass) {
+    gShotAtMs.store(traceNowMs(), std::memory_order_relaxed);
+    gTraceLines.store(0);
+    gTraceLast = nullptr;
+    gTraceLastW = gTraceLastH = 0;
+    if (FILE *f = std::fopen(kTraceFile, "a")) {
+        std::fprintf(f, "---- shot ----\n");
+        std::fclose(f);
+    }
+    __android_log_print(ANDROID_LOG_INFO, TAG, "shot window open");
 }
 
 extern "C" JNIEXPORT void JNICALL Java_local_jiege_hook_softlight_SoftLight_nativeSetFocal(JNIEnv *, jclass, jfloat millimetres) {
