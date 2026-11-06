@@ -29,8 +29,8 @@ public final class MonoPan {
     private static final String ACTIVE = MONOPAN_DIR + "/active";
     private static final String PLAIN_ID = "JG_MONOPAN50.cube.rgb.bin";
     private static final String PUSH_ID = "JG_MONOPAN50PRO.cube.rgb.bin";
-    private static final int PLAIN = 2;
-    private static final int PUSH = 1;
+    private static final int PLAIN = 1;
+    private static final int PUSH = 2;
 
     /** Last value written, so a run of shots with the same filter touches the file once. */
     private static volatile String written;

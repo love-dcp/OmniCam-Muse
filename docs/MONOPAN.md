@@ -43,6 +43,8 @@ job/done    helper 写，表示 out.y 完整
   `MonopanInit` / `MonopanProcess` / `MonopanDeinit`。
 * helper 会 `stat(jobdir)` 取 owner 并对自己的输出 `fchown`，所以相机（非 root）能覆盖这些文件。
 * 30 s 无应答时驱动放弃本次作业。
+* **`req` 必须原子落盘**（临时文件 + `rename`）。helper 是轮询文件存在性来取活的：用 `printf > req` 直接重定向时，它会在「文件已建、内容未写」的瞬间打开，`fscanf` 一个字段都读不到，退回默认值（w=h=0、variant=1），随后打 `0x0 variant 1: request invalid, status -1` 并写 `done=fail`。这一条在测试脚本里踩了一整轮，`monopan.cpp` 一开始就是用 `rename` 写的，所以真实路径不受影响。
+* 尺寸只要求 `w >= 2`、`h > 1`；实测 640×480 与 4000×3000 都能跑。
 
 ### 3.2 厂商库的 ABI（DWARF 逐字恢复）
 
@@ -87,10 +89,18 @@ struct Image {             // 112 B
 | mode | 1 | 0 |
 | curve（32 点） | 0, 0.0118, 0.0251, 0.0408, 0.0601, 0.0841, 0.1132, 0.1451, 0.1789, 0.2143, 0.2511, 0.2891, 0.3281, 0.3677, 0.4077, 0.4483, 0.4897, 0.5317, 0.5739, 0.6163, 0.6585, 0.7004, 0.7417, 0.7822, 0.8213, 0.8581, 0.8917, 0.9213, 0.9460, 0.9654, 0.9803, 0.9916 | 0.098, 0.114, 0.129, 0.153, 0.176, 0.204, 0.231, 0.255, 0.282, 0.306, 0.337, 0.369, 0.400, 0.431, 0.463, 0.494, 0.525, 0.557, 0.588, 0.620, 0.651, 0.682, 0.710, 0.741, 0.769, 0.800, 0.827, 0.855, 0.882, 0.914, 0.941, 0.969 |
 
-变体到滤镜的对应关系（**推断**，依据“迫冲＝感光过度冲洗”：黑位抬高 + 颗粒更密更细）：
+变体到滤镜的对应关系（**2026-11-06 上机实测定案**，640×480 渐变+噪声喂同一张图给两个变体）：
 
-* `variant 2`（黑位 0、颗粒密度 4、颗粒更粗 1.8）→ **MONOPAN 50**
-* `variant 1`（黑位抬到 0.098、密度 20、颗粒更细 0.8）→ **MONOPAN 50 迫冲**
+| | 高频颗粒能量 | 平均亮度 | 反差（标准差） | 判读 |
+| --- | --- | --- | --- | --- |
+| 输入 | 3.54 | 119.3 | 54.0 | — |
+| variant 1 | 7.03 | 113.4 | 56.5 | 颗粒细、压暗轻 |
+| variant 2 | 8.10 | 101.7 | 64.6 | 颗粒粗、压暗重、反差大 |
+
+* `variant 1`（density 20 / grain 0.8 / kernel 3 / sigma 0.2 / mode 0）→ **MONOPAN 50**
+* `variant 2`（density 4 / grain 1.8 / kernel 7 / sigma 0.5 / mode 1）→ **MONOPAN 50 迫冲**
+
+两条判据一致：`mode 1` 的那套是「粗颗粒 + 抬反差 + 压暗」，正是迫冲该有的样子。**早期按“黑位抬高”推断的对应关系是反的**，已按实测改正（`monopan.cpp` 的 `kVariantPlain = 1` / `kVariantPush = 2`）。
 
 ### 3.4 单色是怎么来的
 
@@ -163,24 +173,45 @@ vignette table missing under %s
 
 设计要点：
 
-* **一次性标记**：native 读完即删 `active`，所以别的滤镜的拍摄不可能捡到上一次的变体；标记超过 120 s 也视为过期。
+* **标记保留、按新鲜度判断**：一次拍摄会把**好几个 buffer** 送进这个 hook（先 1280×960 的缩略图，再主图），读完即删会让主图拿不到标记，所以文件留在原地、只做 120 s 超龄判断；用户切走滤镜时由 Java 侧删掉它。
 * **失败即放行**：helper 没起来、超时、输出不全，都直接 return，照片保持相机原始渲染。日志 tag 是 `MonoPan`。
-* **超时预算**：默认 4 s（`persist.omnicam.monopan.timeout`），到点放弃本次作业而不是卡住快门。
-* **暗角**：径向衰减，`persist.omnicam.monopan.vig` = 0–100，默认 35（约 −1 EV 在角上），从半径 0.45 开始到 1.0 落到底。
+* **超时预算**：默认 4 s（`persist.omnicam.monopan.timeout`）。实测 12.6MP 一单只要 167–270 ms（GPU 路径，与分辨率几乎无关），预算绰绰有余。
+* **暗角**：径向衰减，`persist.omnicam.monopan.vig` = 0–100，默认 22（角上约 −0.4 档，从半径 0.45 开始到 1.0 落到底）。35% 实测角上 −1.3 档，过重。
 * **单色**：色度平面填 512（中性），亮度整体替换。
 
-## 五、还没做完 / 上机要做的事
+## 五、上机实测（2026-11-06，PKJ110 / X8U）
 
-1. **暗角表没落地**（原因见 3.5–3.8）。现在用的是固定形状；要复刻 M3 原表，最快的一步是把像素区 17×17 网格的 8-float 叶子 dump 出来，按 lux/zoom 挑几组写进 `monopan.cpp`，而不是去重写通用树解析。
-2. **取景器只有单色，没有颗粒/暗角**。Opus 同样只在拍摄链上做（`MsRenderHardwareBuffer`），预览走 GL，颗粒成本高。若要预览也有颗粒，得在 `soft_light.cpp` 的 GL 管线里加一遍（现有 `GlPipeline`/`scatterTexture` 可复用）。
-3. **上机验证顺序**（都只看 logcat，tag `MonoPan`）：
-   ```
-   adb shell ps -A | grep monopan_helper        # helper 在跑
-   adb shell ls -l /data/data/com.oplus.camera/files/jiege/monopan/job
-   adb logcat -s MonoPan                        # 选 MONOPAN 拍摄，应出现 "variant N for this shot" 与 "capture ... ok"
-   ```
-   * 没有 `variant` 日志 → Java 侧没命中 `mFilterType`（可能取值不是 LUT 文件名），把 `MonoPan` 的 `variant()` 改成打印 `name` 先看实际值。
-   * 有 `variant` 但 `the helper did not answer` → helper 没起来或库路径不对，看 `logcat | grep monopan`。
-   * `buffer rejected` → host buffer 布局与 `HostBufferInfo` 不一致。
-4. **两张 LUT 的观感**（对比/抬黑）是我按 M3 的常见观感定的，不是官方数据；若上机后发现与 Opus 1.3 差别大，改 `tools/bake_monopan_luts.py` 里的对比/抬黑重烘即可。
-5. 关掉整项功能：`setprop persist.omnicam.aura.skip monopan` 后重启相机（Java 侧不再写标记）；native 侧可 `setprop persist.omnicam.monopan.vig 0` 去掉暗角。
+### 5.1 通过的部分
+
+* helper 常驻并跑通作业：640×480 146–230 ms、1280×960 231–304 ms、4000×3000 **167 ms**、主图 4096×3072 264–270 ms。**耗时与分辨率几乎无关**（GPU 路径），4 s 预算绰绰有余。
+* Java 侧取值正确：`grain hook mode=ProfessionalMode type=JG_MONOPAN50.cube.rgb.bin` → `variant 1 for this shot`。`mFilterType` 就是 LUT 文件名字符串，`contains` 匹配可用。
+* native 全程日志：`capture 4096x3072 variant 1, vignette 35%, 446 ms`（含缩略图那一单）。
+* 成片（12.6MP）：彩度 0.50 → 0.10（黑白）、中心高频能量 3.5 → 8.19（颗粒）、角/中心 0.52（暗角）。
+
+### 5.2 三个必须记住的坑
+
+1. **LUT 必须落在 `/odm/etc/camera/meishe_lut/`**，`files/pop_port/meishe_lut` 不够。该目录由 `post-fs-data.sh` 的 `bind_merged_dir` 从 `payload/meishe_lut` 合并进 `/data/adb/omnicam_muse/merged` 后 bind 提供；挂载缺失时相机直接报 `Failed to open lut file …/JG_MONOPAN50PRO.cube.rgb.bin`，取景器不会变黑白。
+2. **`active` 的 owner 必须是相机 uid（10158）**。root 手动 `echo > active` 建出的 0644 文件会让相机的 `FileOutputStream` 失败，变体永远写不进去——表现为「hook 明明触发了，但 active 的 mtime 一直不变」。
+3. **logcat 会被冲掉**。相机启动瞬间几万行，默认缓冲区会把模块安装日志挤没，从而误判「hook 没装」。先 `adb logcat -G 16M` 再 `-c`，或用 `-b main -t`。
+4. **挂载会掉**。本轮中途 `UnmountedGuard.filesMounted()` 变 false（`/odm/lib64` 与 `libAlgoInterface.so` 同 device），模块于是走「未挂载」分支、**native 完全不加载**（连 `MuseSoftLight` 都没有）。`sh /data/adb/modules/ricoh_pop_x9u/selfheal.sh` 可原地恢复，不必重启。
+
+### 5.3 还没解决的
+
+1. **主图不一定经过 `MsRenderHDRHostBuffer`**。同一台机、同一滤镜，实测有一次主图 `4096×3072` 走了 hook（成片有颗粒），后续几张只有 `1280×960` 走 hook（成片只有 LUT 黑白、没有颗粒和暗角）。缩略图那条路是稳定的，主图那条要相机自己决定走 Meishe 才触发。**排查方向**：HDR/多帧是否开启、`pass tex` 与 `pass host` 的分工。这是当前唯一影响观感一致性的问题。
+2. **暗角表没落地**（3.5–3.8）：仍是固定径向形状。要复刻 M3 原表，最快一步是把像素区 17×17 网格的 8-float 叶子 dump 出来，按 lux/zoom 挑几组写进 `monopan.cpp`，而不是重写通用树解析。
+3. **取景器只有单色，没有颗粒/暗角**。Opus 同样只在拍摄链上做；预览走 GL，要加得复用 `GlPipeline`/`scatterTexture`。
+4. 两张 LUT 的对比/抬黑是按 M3 常见观感定的，不是官方数据；不合适就改 `tools/bake_monopan_luts.py` 重烘。
+
+### 5.4 现场命令
+
+```
+adb shell ps -A | grep monopan_helper                 # helper 常驻
+adb shell ls -l /odm/etc/camera/meishe_lut/JG_MONOPAN*   # 两枚 LUT 已挂上
+adb logcat -G 16M; adb logcat -c                      # 先放大缓冲再清
+adb logcat -d | grep -E "MonoPan|MonoPanHelper|pass host"
+```
+
+* 没有 `variant N for this shot` → 不在大师模式，或选中的不是 MONOPAN；`MonoPan` 的 `variant()` 匹配的是 `mFilterType.toString()`。
+* 有 `variant` 但 `no output` / `the helper did not answer` → helper 没起或 `/data/local/tmp/monopan` 里的库缺失。
+* `buffer rejected` → host buffer 布局与 `HostBufferInfo` 不一致。
+* 整项关掉：`setprop persist.omnicam.aura.skip monopan` 后重启相机；只想去暗角：`setprop persist.omnicam.monopan.vig 0`。

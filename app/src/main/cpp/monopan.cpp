@@ -50,10 +50,13 @@ constexpr char kDir[] = "/data/user/0/com.oplus.camera/files/jiege/monopan";
 constexpr char kActive[] = "/data/user/0/com.oplus.camera/files/jiege/monopan/active";
 constexpr char kJobDir[] = "/data/user/0/com.oplus.camera/files/jiege/monopan/job";
 
-// The two filters. 2 is MONOPAN 50, 1 is MONOPAN 50 迫冲; both numbers are the variant the vendor
-// library keys its parameter set on, and the two below are the only values the app writes.
-constexpr int kVariantPlain = 2;
-constexpr int kVariantPush = 1;
+// The two filters. The vendor helper keys its parameter set on this number: variant 1 is density 20 /
+// grain 0.8 / kernel 3 / sigma 0.2 / mode 0, variant 2 is density 4 / grain 1.8 / kernel 7 / sigma
+// 0.5 / mode 1. Measured on a 640x480 ramp (2026-11-06): variant 2 lifts the high frequency energy
+// to 8.10 against 7.03, drops the mean to 101.7 against 113.4 and raises the spread to 64.6 against
+// 56.5. That is the coarser, darker, harder one, so 2 is 迫冲 (push processed) and 1 is the plain 50.
+constexpr int kVariantPlain = 1;
+constexpr int kVariantPush = 2;
 
 // A shot's frame is dispatched right after the shutter, so the wait has to be short: past this
 // the picture is left alone rather than held back. Override with persist.omnicam.monopan.timeout.
@@ -106,15 +109,17 @@ bool writeWholeFile(const std::string &path, const void *data, size_t size) {
     return put == size;
 }
 
-// The app's current selection, consumed so that no other filter's shot can pick it up.
+// The app's current selection. The file is left in place on purpose: one shot hands several buffers
+// through this hook (the 1280x960 thumbnail first, the full frame after it), and consuming the
+// marker on the first of them would leave the picture itself untouched. The app clears the file when
+// the user leaves the filter, and the age check covers a camera that died holding one.
 int takeVariant() {
     struct stat st {};
     if (stat(kActive, &st) != 0) return 0;
     const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::vector<uint8_t> raw;
-    if (!readWholeFile(kActive, raw)) return 0;
-    unlink(kActive);
     if (now - st.st_mtime > kActiveMaxAgeSec) return 0;
+    std::vector<uint8_t> raw;
+    if (!readWholeFile(kActive, raw) || raw.empty()) return 0;
     const int variant = std::atoi(reinterpret_cast<const char *>(raw.data()));
     return (variant == kVariantPlain || variant == kVariantPush) ? variant : 0;
 }
@@ -243,7 +248,9 @@ bool monopanApplyCapture(const void *buffer, int matrix, int range) {
     const int timeout = property("persist.omnicam.monopan.timeout", kDefaultTimeoutMs);
     if (!runJob(w, h, variant, in, out, timeout)) return false;
 
-    const int vigPercent = property("persist.omnicam.monopan.vig", 35);
+    // 35% measured -1.3 stops in the corners once the scene's own falloff is taken out, which read
+    // as a heavy filter rather than the lens; 22% lands at about -0.4 stops, the M3 look.
+    const int vigPercent = property("persist.omnicam.monopan.vig", 22);
     const float vig = std::clamp(vigPercent, 0, 100) / 100.0f;
     uint32_t neutral = coding.rawOf(512.0f);
     if (!b->plane[1]) neutral = 0;  // single plane buffers: nothing to neutralise
