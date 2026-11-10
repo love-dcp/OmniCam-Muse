@@ -243,7 +243,7 @@ private fun NativePatchCard(cardModifier: Modifier) {
     Card(modifier = cardModifier) {
         SwitchPreference(
             title = "专业视频 ISZ",
-            summary = "变焦 2x-3x 时切换传感器裁剪模式，提升清晰度（挂载补丁库+增强配置）。请在专业视频中关闭防抖使用：开防抖时 2X 画面会退回 1X 大小，超级防抖还可能闪退。切换后自动重启相机",
+            summary = "仅专业视频主摄在 2X-3X（含 3X）使用传感器裁剪提升清晰度，6X 保留原厂长焦。建议关闭防抖；开防抖仍可能出现 FOV 回退。切换后自动重启相机",
             checked = iszOn == true,
             enabled = iszOn != null && !busy,
             onCheckedChange = { on ->

@@ -23,13 +23,13 @@
 
 ## PKJ110 原生补丁
 
-三项，全部在真机验证过，由 `post-fs-data.sh` 开机绑定：
+三项由 `post-fs-data.sh` 开机绑定；EIS 与 CAF 补丁已在真机验证。ISZ 首版已通过关闭防抖的 1080p30、4K30 SDR 和 4K30 HDR 场景，但防抖开启与 60fps 尚未完成，因此仍保持 opt-in：
 
 | 补丁 | payload | md5 | 作用 |
 | --- | --- | --- | --- |
 | `oplus_eis_camera.vcfg` | `payload_pkj110/etc/` | `48ab334b` | 修 6X 预览下半部竖条纹 |
 | `com.qti.stats.caflogicaldriver.so` | `payload_pkj110/lib64/` | `69c781d3` | 堵 CAF UBSAN abort |
-| `libextensionlayer.so` | `payload_pkj110/lib64/` | `a860a65c` | 视频传感器内变焦（**默认关闭**，见下方已知问题） |
+| `libextensionlayer.so` | `payload_pkj110/lib64/` | `6c3d0eb1` | 专业视频传感器内变焦（关闭防抖时支持 1080p30、4K30 SDR/HDR；**默认关闭**，见下方说明） |
 
 EIS 配置的目标路径必须用 `vendor_configs_file` 上下文，库用 `vendor_file`，搞反了相机读不到配置会直接闪退。
 
@@ -57,9 +57,18 @@ ISZ 那一项**默认不装**，需要有意识地加 `--with-isz` 才会启用�
 
 （若将来要做彻底修复，方向是在相机 app 进程内 hook Camera2 请求，把会话创建后的头几帧 `SCALER_CROP_REGION` 强制成全幅、之后再放行真实倍率；代价是画面会先广角起一下再跳过去。）
 
-**视频 ISZ 与超级防抖不能共存，因此该补丁默认关闭（2026-10-28 定性）。**
+**专业视频 ISZ 先支持主摄 2X–3X，6X 保留原厂长焦链路。**
 
-运行日志（`pluginbase.cpp:5360`）显示**普通视频 + 超级防抖**的 `m_modeDescriptor` 也是 `4`，正好落在 ISZ 白名单 `{4,6,8,10}` 里——所谓"只留专业视频"的收窄其实从未排除它。ISZ 一旦激活，sensor 就切到裁剪模式（Physical Sensor Mode 13 主摄 / 23 长焦 / 9 超长焦），与 EIS 按全幅标定的 frameSize 对不上；MCTFE 失败后 chi 看门狗重试约 16 轮，最终 `SIGABRT`。
+旧版只检查 `m_modeDescriptor`。运行日志（`pluginbase.cpp:5360`）证明**普通视频 + 超级防抖**也报告 descriptor `4`，因此旧白名单会误放行普通视频；sensor 切到裁剪模式后与 EIS 的全幅标定不匹配，最终可触发 MCTFE 失败和 provider `SIGABRT`。
 
-表现：开着防抖时 2X 切 3X/6X 画面不动，约 50 秒后闪退。撤掉该库立即恢复（17:40 实测）。**想保留 ISZ 就只能接受这个冲突**，目前没有在配置层区分两者的入口。
+当前候选库只允许 `m_modeDescriptor=30` 的专业视频，并在原生判断中接受 `2.0X–3.0X`（含 3X）；普通视频曾报告 descriptor `4`，4K30 回归分别报告 descriptor `2` 和 `6`，都会在 sensor 裁剪判断前被拒绝。原生上限同时保证从 2X / 3X 切到 6X 时不再返回 ISZ，6X 保留原厂长焦链路。
+
+专业视频关闭防抖时，1080p30、4K30 SDR 和 4K30 HDR 的 2X/3X 都已实测进入 `SensorMode:13`；4K30 的 3X 裁剪区为 `4096x2560`。HDR 成片保持 3840×2160、30fps 的 10-bit HEVC、BT.2020/HLG，489 帧完整解码，记录过程没有 `RecoveryErr` 或 `ErrorCode:1047`。切到 6X 后 ISZ 关闭并回到原厂长焦链路，4K30 连续观察 30 秒未出现 MCTFE `1047`。普通视频 4K30 的 2X、3X 和 6X 隔离也已回归，没有进入 ISZ；标准 4K30 SDR 报告 descriptor `2` 时不会生效，这是预期的模式隔离。
+
+专业视频自身开启防抖时，ISZ 与 EIS 的 FOV 仍可能冲突。当前建议在专业视频中关闭防抖使用；防抖开启和 60fps 都不能视为已经验证。
+
+真机候选使用独立的双 bind 流程，不经过 `apply-now.sh`：先运行
+`tools/x8u_isz_lab.ps1 -Action Status`，再运行 `-Action Apply`。每完成一组倍率用
+`-Action Capture -Name <名称>` 保存截图、UI 和 ISZ 日志，结束时运行 `-Action Restore`
+恢复原厂并检查无残留挂载。完整矩阵和判定标准见 `docs/X8U_ISZ_TEST.md`。
 

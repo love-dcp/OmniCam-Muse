@@ -9,13 +9,10 @@
 #   sh /data/adb/modules/ricoh_pop_x9u/apply-now.sh
 #   sh .../apply-now.sh --with-isz         # 额外启用视频 ISZ（默认关闭，见下）
 #
-# 关于 ISZ：libextensionlayer 的 ISZ 补丁默认不装。实测（2026-10-28 17:40）
-# 普通视频 + 超级防抖的 m_modeDescriptor 也是 4，正好落在白名单里，ISZ 一开
-# sensor 就切裁剪模式（Physical 13/23/9），与 EIS 的全幅标定不匹配，MCTFE
-# 报错后 chi 看门狗会杀掉 provider（表现为切 3X/6X 无反应，约 50 秒后闪退）。
-# 另注（2026-10-31 r28 实测）：专业视频开防抖时 2X 画面会退回 1X 全幅
-# （EIS 触发 FOV 缩回）——想看到 ISZ 生效请关防抖；防抖位本身不在 ISZ 的
-# 门控里（lib 白名单 desc&~2 掩掉防抖位，config iZoomSettins 按 opmode 匹配）。
+# 关于 ISZ：新版库只允许 m_modeDescriptor=30 的专业视频，并且原生判断把倍率
+# 限制在 2X-3X；普通视频（包括 descriptor=4 的超级防抖）在切换 sensor 裁剪前
+# 被拒绝。原生上限防止从 2X/3X 切到 6X 时残留 ISZ 状态，6X 保留原厂长焦链路。
+# 专业视频自身开防抖时仍可能发生 FOV 缩回；想稳定看到 ISZ 请先关防抖。
 # 确有需要再加 --with-isz，风险自负。
 #
 # ISZ = 双 bind（2026-10-31 r29）：只挂 lib 时 config 侧 opmode 白名单没有

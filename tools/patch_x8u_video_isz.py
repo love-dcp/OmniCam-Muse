@@ -30,9 +30,12 @@ Patch (all edits inside [InsensorZoom] only, verified structurally):
   2. New ``iZoomSettins`` rows are appended for each extra opmode, mirroring the stock video
      rows but with the lux gate cleared (Lux=0, LowlightExposure=0, like stock row [8] which is
      the only ungated video row):
-       - main cam    (camId 0, iZoomId 5) at RatioMin..RatioMax   (default 2.0..2.999999)
+       - main cam    (camId 0, iZoomId 5) at RatioMin..RatioMax   (default 2.0..3.0)
        - ultra-tele  (camId 4, iZoomId 8)                        (default 5.5..30.0)
        - tele        (camId 3, iZoomId 7)                        (default off; --add-tele)
+     ``--main-only`` omits the ultra-tele (and optional tele) rows. The shipped X8U profile uses
+     this because 5.5x ultra-tele ISZ can make the professional-video session fail with MCTFE
+     1047; 2x--3x main-camera ISZ is the validated first-release scope.
   3. Optional ``--widen-utele`` rewrites RatioMin of the stock utele video rows [7]/[9] from
      12.0 down to 5.5 so 6X video reaches ISZ in the stock modes too.
   4. Optional ``--fps60`` adds ``isSupport60FpsIzoom = TRUE`` so 60fps video can use ISZ.
@@ -138,7 +141,8 @@ def patch_logic_camid(text: str, camid: str) -> str:
     return text[:m.start(3)] + new_body + text[m.end(3):]
 
 
-def patch(text: str, extra_opmodes: list[str], add_tele: bool, widen_utele: bool,
+def patch(text: str, extra_opmodes: list[str], add_tele: bool, add_utele: bool,
+          widen_utele: bool,
           fps60: bool, main_range: tuple[str, str], utele_range: tuple[str, str],
           tele_range: tuple[str, str], log_izoom: bool) -> str:
     # split out the [InsensorZoom] section
@@ -194,8 +198,10 @@ def patch(text: str, extra_opmodes: list[str], add_tele: bool, widen_utele: bool
     for op in extra_opmodes:
         idx += 1
         new_lines.append(fmt_row(idx, op, main_range[0], main_range[1], 0, IZOOM_ID_MAIN))
-        idx += 1
-        new_lines.append(fmt_row(idx, op, utele_range[0], utele_range[1], 4, IZOOM_ID_UTETELE))
+        if add_utele:
+            idx += 1
+            new_lines.append(
+                fmt_row(idx, op, utele_range[0], utele_range[1], 4, IZOOM_ID_UTETELE))
         if add_tele:
             idx += 1
             new_lines.append(fmt_row(idx, op, tele_range[0], tele_range[1], 3, IZOOM_ID_TELE))
@@ -253,6 +259,10 @@ def main() -> None:
     ap.add_argument("--opmodes", default="0x80AF;0x80CD",
                     help="opmodes to append to VideoIzoomOperationMode (';' or ',' separated)")
     ap.add_argument("--add-tele", action="store_true", help="also add tele (camId 3) rows")
+    ap.add_argument("--main-only", action="store_true",
+                    help="only add main-camera rows; omit ultra-tele and tele rows")
+    ap.add_argument("--no-utele", action="store_true",
+                    help="omit ultra-tele (camId 4) rows while retaining main and --add-tele rows")
     ap.add_argument("--widen-utele", action="store_true",
                     help="lower stock utele video rows [7]/[9] RatioMin to --utele-min")
     ap.add_argument("--fps60", action="store_true", help="add isSupport60FpsIzoom = TRUE")
@@ -265,7 +275,7 @@ def main() -> None:
                     help="add VideoIzoomEnableLogicCamId = N to [InsensorZoom] (rear logical cam = 0); "
                          "key is absent from X8U stock, loader default is -1")
     ap.add_argument("--main-min", default="2.0")
-    ap.add_argument("--main-max", default="2.999999")
+    ap.add_argument("--main-max", default="3.0")
     ap.add_argument("--utele-min", default="5.5")
     ap.add_argument("--utele-max", default="30.0")
     ap.add_argument("--tele-min", default="5.0")
@@ -284,13 +294,15 @@ def main() -> None:
     text = args.stock.read_text(encoding="utf-8", errors="replace")
     patched = patch_full(
         text, args.logic_camid, args.ascii_log,
-        extra_opmodes=ops, add_tele=args.add_tele, widen_utele=args.widen_utele,
+        extra_opmodes=ops, add_tele=args.add_tele and not args.main_only,
+        add_utele=not (args.main_only or args.no_utele), widen_utele=args.widen_utele,
         fps60=args.fps60,
         main_range=(args.main_min, args.main_max),
         utele_range=(args.utele_min, args.utele_max),
         tele_range=(args.tele_min, args.tele_max),
         log_izoom=args.log_izoom)
-    per_mode = 2 + (1 if args.add_tele else 0)
+    per_mode = (1 if args.main_only or args.no_utele else 2) + (
+        1 if args.add_tele and not args.main_only else 0)
     verify(patched, ops, per_mode * len(ops))
     # write binary: write_text() on Windows would convert \n to \r\n and the HAL parser
     # sees "\r"-suffixed values -> section silently dropped (stock file is LF-only)

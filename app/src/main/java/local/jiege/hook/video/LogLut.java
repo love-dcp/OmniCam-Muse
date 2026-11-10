@@ -133,6 +133,7 @@ public final class LogLut {
         observePanel(classLoader);
         observeLutLoad(classLoader);
         LogLutDirect.install(classLoader);
+        LogLutImport.install(classLoader);
 
         Log.i(TAG, "log lut hook installed");
     }

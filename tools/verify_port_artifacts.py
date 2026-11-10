@@ -91,22 +91,23 @@ PKJ110_PAYLOAD = {
         231544,
         "69c781d3c49492c0fecc39e58e996902",
     ),
-    # Video-ISZ library, bound only via enable_native_isz. r26 switched it from the narrow
-    # variant (e338f8ac, 0xa61d5 clobbers the desc==30 branch -> onCameraError suicide on
-    # PKJ110, 2026-10-30) to the plain a632c build, which 30/60fps testing proved safe.
+    # Video-ISZ library, bound only via enable_native_isz. This build keeps the proven
+    # a632c gate bypass and adds an m_modeDescriptor==30 plus requested-zoom<=3.0 gate
+    # so ordinary video (descriptor 4/6) cannot enter ISZ and 4X-6X stay on the stock path.
     "lib64/libextensionlayer.so": (
         1723576,
-        "a860a65cd5d358d94fbdfc947802c354",
+        "6c3d0eb13f2e2dd0efa6e608b5d70b43",
     ),
-    # Video-ISZ camera config, bound together with the library (r29). X8U's stock
+    # Video-ISZ camera config, bound together with the library. X8U's stock
     # CameraHWConfiguration plus the video-ISZ keys: isSupport60FpsIzoom, the 0x830B
-    # (pro-video) rows in VideoIzoomOperationMode and iZoomSettins, and verbose izoom
-    # logging. Library alone never switches the sensor to a cropped mode -- the config
-    # whitelist is what admits opmode 0x830B. Rebuilt by tools/patch_x8u_video_isz.py
-    # (--opmodes 0x830B --fps60 --log-izoom --ascii-log) from the stock config.
+    # (pro-video) entry in VideoIzoomOperationMode, one main-camera row at 2.0-3.0x,
+    # and verbose izoom logging. The ultra-tele 0x830B row is deliberately absent: moving
+    # from 2x/3x to 6x then stays on the stock tele path instead of reproducing MCTFE 1047.
+    # Rebuilt by tools/patch_x8u_video_isz.py
+    # (--opmodes 0x830B --fps60 --log-izoom --ascii-log --main-only) from the stock config.
     "etc/camera/CameraHWConfiguration.config": (
-        274342,
-        "7ca3d5f0f1529c6803ab45f9ef24879e",
+        274231,
+        "9aa9cf7c444e8ed418d2fe41561688ee",
     ),
     "etc/oplus_eis_camera.vcfg": (
         1969051,
@@ -155,18 +156,22 @@ MODULE_SCRIPTS = {
     #     properties live only in the camera process's view of getprop, and a full uninstall
     #     deletes all 74 of them together with the settings app, so nothing ever rebuilt them.
     #   * uninstall_full.sh 26 621 - writes those 74 properties to that file before deleting them.
-    "post-fs-data.sh": (29228, "e6a140df3b12c565e5d755922c3bd9b5"),
-    "post-mount.sh": (13856, "6a24af1fbc6f660976ce8820465da041"),
+    # r163: realign three pins that were older than the tracked r156/r157 scripts. The verifier
+    # was reporting the freshly built archive as stale even though the archive bytes matched disk:
+    #   post-mount.sh and x8u-repair.sh gained the per-file foreign-lib64 restoration in r156;
+    #   service.sh gained MONOPAN helper deployment in r157.
+    "post-fs-data.sh": (29408, "4e7bbe4c248902eb6e2b7688da68bb6d"),
+    "post-mount.sh": (15993, "28502f82f02ceaac9403e1c2761621c0"),
     # r23: service.sh now clears the in-place update marker; uninstall.sh distinguishes
     # update (conservative) from removal (full cleanup via uninstall_full.sh); action.sh
     # is the explicit full-uninstall button; customize.sh writes the update marker and
     # installs the APK; apply-now.sh binds the native patches without a reboot.
-    "service.sh": (15276, "b97af2b8915343d73dae03ce1713919b"),
+    "service.sh": (16767, "3bed65f8b25645677f535a758ae96c63"),
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
     "uninstall_full.sh": (28772, "ac8ddb66cece6c162ff78959ce9afdb4"),
     "action.sh": (2741, "75ddeb3ab87ac843eea37eda70c7b73d"),
     "customize.sh": (14467, "93c32c4a337a5a396b7641ba8c3079cf"),
-    "apply-now.sh": (3725, "528aba1d82ccfaae51c470535c8562c9"),
+    "apply-now.sh": (3455, "ec898c2aec9c54f6a34f59cb73f67082"),
     # r147: the flash-time self-heal (staged data + /odm binds + mode table). customize.sh
     # calls it directly, and mountify runs it through MODULE_HOT_RUN_SCRIPT after the swap.
     "selfheal.sh": (16333, "49750312a6e83b682e5e3077ff8347f4"),
@@ -174,7 +179,7 @@ MODULE_SCRIPTS = {
     "x8u-pop-diag.sh": (7485, "6fc6c9749a3b15c21e06d08b62acf96a"),
     "x8u-fix-vibrant.sh": (8919, "c1592457cb521e1016a13c68c51bf513"),
     "x8u-config-revert.sh": (10650, "3ad53dd4378c1aeafc1dd0fb29711460"),
-    "x8u-repair.sh": (9793, "0669167d3ec52f2f918cd53a4d58f5d8"),
+    "x8u-repair.sh": (11269, "893ec23863a4083d46ea21181977682f"),
 }
 
 # The POP "Vibrant" filter -- camera_filter_retro_vibrant_dsc ("Positive" / 浓郁, film hint

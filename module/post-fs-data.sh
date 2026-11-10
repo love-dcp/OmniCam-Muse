@@ -408,27 +408,28 @@ elif [ -f "$HWCFG" ]; then
     fi
 fi
 
-# --- [PKJ110] Native patches (2026-10-27, revised 2026-10-28) ----------------
-# Three fixes, all validated live on the device:
+# --- [PKJ110] Native patches (2026-10-27, revised 2026-11-06) ----------------
+# EIS/CAF fixes are always bound. Video ISZ remains opt-in until the EIS-on and
+# 60fps matrix is complete; its EIS-off 1080p30/4K30 paths are validated live.
 #
-# 1. libextensionlayer.so -- video ISZ, pure a632c build (md5 a860a65c).
+# 1. libextensionlayer.so -- pro-video-only video ISZ.
 #    *** DISABLED BY DEFAULT since 2026-10-28 (see WHY IT IS OFF below). ***
-#    ExtensionPluginBase::IsIZoomEnableVideo has two gates, both bypassed:
+#    ExtensionPluginBase::IsIZoomEnableVideo has two gates:
 #      a) 0xa632c `ccmp w16,#1,#0,ne` -> `ccmp wzr,#0,#0,ne`: the AEC runtime
 #         gate (aecIzoomState, always 0) no longer blocks in-sensor zoom.
 #         SensorMode:13 centered crop then fires (102x after patch vs 0x before).
-#      b) 0xa61d4 `ccmp w7,#0x1e,#0,ne` Rn w7 -> wzr: removes desc=30 from the
-#         whitelist, leaving {4,6,8,10}.
-#    WHY IT IS OFF: whitelist {4,6,8,10} is NOT pro-video-only. Runtime logs
-#    (pluginbase.cpp:5360) show ordinary video WITH SUPER STABILIZATION also
-#    reports `m_modeDescriptor:4`, so gate b) never excluded it. Once ISZ is
-#    active the sensor switches to a cropped mode (Physical Sensor Mode 13 main
-#    / 23 tele / 9 ultratele) which no longer matches the full-frame frameSize
-#    the EIS config is calibrated against; MCTFE then fails and the chi
-#    watchdog raises SIGABRT after ~16 retries. Symptom: with stabilization on,
-#    2x->3x/6x appears to do nothing, then the provider dies ~50s later.
-#    Unbinding this single library restores normal zoom (verified 17:40).
-#    To re-enable anyway, accepting that risk: touch $MODDIR/enable_native_isz.
+#      b) 0xa61c8..0xa61d8: accept only m_modeDescriptor == 30 (professional
+#         video) while the requested zoom is <= 3.0. Runtime logs show ordinary
+#         video, including descriptor-4 super stabilization, reports 4.
+#    WHY IT IS STILL OPT-IN: the old {4,6,8,10} descriptor whitelist also admitted
+#    ordinary video with super stabilization, producing cropped SensorMode 13/23/9
+#    against a full-frame EIS calibration and eventually killing the provider.
+#    The current exact descriptor gate rejects ordinary video, and the first-release
+#    config exposes only the main-camera 2x-3x row. The native <=3.0 cap prevents ISZ
+#    state from surviving a move to 6x, which keeps the stock tele path. EIS-off
+#    1080p30/4K30 passed on device, including a 30-second 3x->6x 4K30 run without
+#    1047. Professional-video EIS-on and 60fps are not validated, so do not enable
+#    those paths by default. Touch $MODDIR/enable_native_isz to opt in.
 # 2. com.qti.stats.caflogicaldriver.so -- CAF UBSAN aborts (md5 69c781d3).
 #    Upstream firmware bug
 #    (historical tombstones predate every experiment): during SAT master
@@ -476,8 +477,8 @@ fi
 # full-frame crop and release the real ratio afterwards.
 # touch $MODDIR/disable_caf_ubsan_fix or $MODDIR/disable_eis_config to skip the
 # corresponding bind. The video ISZ library is OFF by default; touch
-# $MODDIR/enable_native_isz to opt back in (accepting the stabilization-zoom
-# failure described above).
+# $MODDIR/enable_native_isz only for the validated EIS-off 1080p30/4K30 scope,
+# or when explicitly testing the unfinished EIS-on / 60fps matrix.
 if [ "$PROFILE" = PKJ110 ]; then
     bind_native_file() {
         local SOURCE="$1" TARGET="$2" CTX="$3"
@@ -496,8 +497,8 @@ if [ "$PROFILE" = PKJ110 ]; then
         fi
     }
     if [ -f "$MODDIR/enable_native_isz" ]; then
-        # 双 bind（r29）：lib + 增强 config（0x830B 行 + isSupport60FpsIzoom），
-        # 只挂 lib 时 ISZ 无法真正切 sensor 裁剪。config 上下文=vendor_configs_file。
+        # 双 bind：lib + 增强 config（仅主摄 2X-3X 的 0x830B 行），只挂 lib
+        # 时 ISZ 无法真正切 sensor 裁剪。config 上下文=vendor_configs_file。
         bind_native_file "$MODDIR/payload_pkj110/lib64/libextensionlayer.so" \
             /odm/lib64/libextensionlayer.so vendor_file
         bind_native_file "$MODDIR/payload_pkj110/etc/camera/CameraHWConfiguration.config" \

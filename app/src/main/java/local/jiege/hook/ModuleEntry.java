@@ -5,6 +5,7 @@ import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import local.jiege.hook.aicomposition.AiComposition;
 import local.jiege.hook.capture.CaptureDumps;
+import local.jiege.hook.capture.LivePhotoSdrCover;
 import local.jiege.hook.capture.MemoryGate;
 import local.jiege.hook.common.CameraLogMirror;
 import local.jiege.hook.common.Log;
@@ -24,6 +25,7 @@ import local.jiege.hook.guard.UnmountedGuard;
 import local.jiege.hook.highpixel.HighPixel200mFace;
 import local.jiege.hook.highpixel.HighPixelEffects;
 import local.jiege.hook.highpixel.HighPixelFilters;
+import local.jiege.hook.highpixel.HighPixelLivePhoto;
 import local.jiege.hook.highpixel.HighPixelSupport;
 import local.jiege.hook.launch.KeyLaunchMode;
 import local.jiege.hook.master.MasterPalette;
@@ -36,6 +38,7 @@ import local.jiege.hook.modestate.ModeStateSplit;
 import local.jiege.hook.natural.NaturalMode;
 import local.jiege.hook.palette.GalleryColorPalette;
 import local.jiege.hook.photozoom.PhotoIzoom;
+import local.jiege.hook.photozoom.PortraitDefaultZoom;
 import local.jiege.hook.pop.PopPort;
 import local.jiege.hook.seamless.SeamlessBlurGuard;
 import local.jiege.hook.shutter.CameraSoundForced;
@@ -46,6 +49,7 @@ import local.jiege.hook.unlock25mp.Unlock25mp;
 import local.jiege.hook.watermark.ModelSpoof;
 import local.jiege.hook.watermark.VideoWatermarkGuard;
 import local.jiege.hook.watermark.XpanWatermarkIsolation;
+import local.jiege.hook.xpan.XpanLiveFeature;
 import local.jiege.hook.xpan.XpanLivePhoto;
 import local.jiege.hook.xpan.XpanViewfinderClean;
 import local.jiege.hook.video.LogLut;
@@ -145,6 +149,9 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
                 Log.guard("Palette", "master palette", () -> MasterPalette.install(classLoader));
             }
             if (!Skip.off("hpeffects")) HighPixelEffects.installCamera(classLoader);
+            // PKJ110 clears the P010 live-photo flag; high-pixel dynamic video then decodes as
+            // green/magenta while its still cover remains correct.
+            if (!Skip.off("hplive")) HighPixelLivePhoto.installCamera(classLoader);
             // X8U port: the hi-res mode's own husselblad label switch (PKJ110 answers false).
             if (!Skip.off("hpentry")) {
                 Log.guard("HighPixel", "hasselblad entry", () -> HighPixelSupport.installCamera(classLoader));
@@ -155,6 +162,9 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             }
             if (!Skip.off("capture")) TiltShiftCapture.installCamera(classLoader);
             if (!Skip.off("capture")) SeamlessBlurGuard.installCamera(classLoader);
+            if (!Skip.off("capture") && !Skip.off("lpsdr")) {
+                LivePhotoSdrCover.installCamera(classLoader);
+            }
             // The shutter's own 648 MB free-RAM floor, which this build sits under most of the time.
             if (!Skip.off("capture")) MemoryGate.installCamera(classLoader);
             if (!Skip.off("launch")) KeyLaunchMode.installCamera(classLoader);
@@ -179,13 +189,24 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("photoisz")) {
                 Log.guard("PhotoIzoom", "install", () -> PhotoIzoom.installCamera(classLoader));
             }
+            // X8U resolves several portrait defaults; correct the first commit to 1x once.
+            if (!Skip.off("portrait")) PortraitDefaultZoom.installCamera(classLoader);
             if (!Skip.off("natural")) NaturalMode.installCamera(classLoader);
             if (!Skip.off("unlock")) Unlock25mp.installCamera(classLoader);
             if (!Skip.off("hp200m")) HighPixel200mFace.installCamera(classLoader);
             if (!Skip.off("spoof")) ModelSpoof.installCamera(classLoader);
-            if (!Skip.off("xpan")) XpanWatermarkIsolation.installCamera(classLoader);
-            if (!Skip.off("xpan")) XpanLivePhoto.installCamera(classLoader);
-            if (!Skip.off("xpan")) XpanViewfinderClean.installCamera(classLoader);
+            if (!Skip.off("xpan") && !Skip.off("xpanwm")) {
+                XpanWatermarkIsolation.installCamera(classLoader);
+            }
+            if (!Skip.off("xpan") && !Skip.off("xpanfeature")) {
+                XpanLiveFeature.installCamera(classLoader);
+            }
+            if (!Skip.off("xpan") && !Skip.off("xpanphoto")) {
+                XpanLivePhoto.installCamera(classLoader);
+            }
+            if (!Skip.off("xpan") && !Skip.off("xpanclean")) {
+                XpanViewfinderClean.installCamera(classLoader);
+            }
             if (!Skip.off("watermark")) VideoWatermarkGuard.installCamera(classLoader);
             if (!Skip.off("softlight")) SoftLight.installCamera(classLoader);
             if (!Skip.off("master")) MasterLutSlots.installCamera(classLoader);

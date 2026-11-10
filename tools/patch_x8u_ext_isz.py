@@ -8,24 +8,40 @@ route (tools/patch_x8u_video_isz.py) proved to be dead code on this build:
     its vtable at 0x9a6b20 found zero instances). Everything that patch rewrote was inert.
   * The live decision is ``ExtensionPluginBase::IsIZoomEnableVideo`` in libextensionlayer.so
     (0xa5d70), reached through the ChiX extension layer. Its chain: zoom ratio in [2.0, 30.0],
-    modeDescriptor in {4, 6, 8, 10, 0x1e}, and ``aecIzoomState[camId] == 1`` (60fps is still
-    rejected outright).
+    modeDescriptor in {4, 6, 8, 10, 0x1e}, and ``aecIzoomState[camId] == 1``.
   * ``aecIzoomState`` is an AEC runtime state the X8U never raises: the 8-entry array stays
     all-zero while, under identical conditions, the PREVIEW path (IsIZoomEnablePreview,
     0xa5924 -- same chain minus the AEC gate) returns isTriggerIzoom=1. The gate is therefore
     pure conservatism, not a capability check.
+  * Runtime logs identify the mode reliably: professional video reports m_modeDescriptor 30,
+    while ordinary video, including ordinary video with super stabilization, reports 4. The
+    previous work guessed that ExtensionPluginBase+0x54 held an operation mode and compared it
+    with 0x830B; that field is not a reliable session discriminator and is no longer read.
 
-Patch: exactly one instruction, at vaddr 0xa632c inside IsIZoomEnableVideo::
+Patches:
+
+  1. 0xa61c8-0xa61d8 -- replace the broad descriptor/range admission test with an exact
+     professional-video and near-zoom test. s9 is the requested zoom ratio:
+
+         fmov s0, #3.0
+         fcmp s0, s9              ; compare the 3.0 ceiling with requested zoom
+         cset w11, ge             ; ordered 3.0 >= zoom; NaN is rejected
+         cmp  w7, #0x1e           ; m_modeDescriptor == professional video
+         csel w21, w11, wzr, eq   ; feed the existing range/AEC chain
+
+     This admits professional-video requests from 2.0X through 3.0X (the original lower-range
+     loop still enforces >= 2.0), rejects ordinary descriptor-4 video, and prevents the native
+     function from reporting ISZ at 4X-6X. The 6X path therefore stays on the stock telephoto
+     pipeline even if a stale configuration row exists.
+
+  2. 0xa632c -- bypass the dormant AEC gate:
 
     ccmp w16, #1, #0, ne   (0x7a411a00)   -- "is aecIzoomState[camId] == 1 ?"
     ccmp wzr, #0, #0, ne   (0x7a401be0)   -- "is 0 == 0 ?" -> always true
 
-The comparison compares equal unconditionally, so the AEC gate passes while the zoom-range,
-mode-whitelist and 60fps rejections keep working: video converges on preview behaviour and
-nothing else changes. Verified 2026-10-26 on 1080p30 pro video (opmode 0x830b) @ 2.5x:
-IsIZoomEnableVideo -> isTriggerIzoom 1 -> IZoomRequire 1 -> zoomState 2 ->
-FillScalerRawCropRegion SensorMode:13 Crop {2048,1792,4096,2560} of the 8192x6144 array
-(102 hits over one recording vs 0 before), pipeline stable at ~29fps, no crash.
+The AEC patch makes that runtime gate pass; the descriptor-plus-zoom patch supplies the missing
+professional-video scope. The original lower zoom bound and 60fps rejection stay intact unless
+``--allow-60fps`` is explicitly requested for an experiment.
 
 Deployment (module ricoh_pop_x9u, PKJ110 profile): the patched lib is bound over
 /odm/lib64/libextensionlayer.so by post-fs-data.sh with u:object_r:vendor_file:s0;
@@ -45,12 +61,34 @@ import hashlib
 import struct
 import sys
 
-# IsIZoomEnableVideo AEC-gate compare, at this vaddr (== file offset on this build:
-# every PT_LOAD has p_offset == p_vaddr, verified against the shipped .so).
-PATCH_VADDR = 0xA632C
+# IsIZoomEnableVideo. These vaddrs equal file offsets on this build: every PT_LOAD has
+# p_offset == p_vaddr, but vaddr_to_offset() below still validates that instead of assuming it.
+AEC_GATE_VADDR = 0xA632C
 
-ORIG_WORD = 0x7A411A00  # ccmp w16, #1, #0, ne
-NEW_WORD = 0x7A401BE0  # ccmp wzr, #0, #0, ne
+AEC_GATE_ORIG_WORD = 0x7A411A00  # ccmp w16, #1, #0, ne
+AEC_GATE_NEW_WORD = 0x7A401BE0   # ccmp wzr, #0, #0, ne
+
+# Original descriptor whitelist, 0xa61c8..0xa61d8:
+#   and  w11, w7, #0xfffffffd
+#   cmp  w11, #4
+#   ccmp w11, #8, #4, ne
+#   ccmp w7, #0x1e, #4, ne
+#   cset w21, eq
+MODE_GATE_VADDR = 0xA61C8
+MODE_GATE_ORIG_WORDS = (
+    0x121E78EB,  # and  w11, w7, #0xfffffffd
+    0x7100117F,  # cmp  w11, #4
+    0x7A481964,  # ccmp w11, #8, #4, ne
+    0x7A5E18E4,  # ccmp w7, #0x1e, #4, ne
+    0x1A9F17F5,  # cset w21, eq
+)
+MODE_GATE_NEW_WORDS = (
+    0x1E211000,  # fmov s0, #3.0
+    0x1E292000,  # fcmp s0, s9
+    0x1A9FB7EB,  # cset w11, ge            (ordered 3.0 >= zoom, NaN rejected)
+    0x710078FF,  # cmp  w7, #0x1e          (m_modeDescriptor == professional video)
+    0x1A9F0175,  # csel w21, w11, wzr, eq
+)
 
 # 60fps rejection, ~28 bytes later in the same function (verified 2026-10-30):
 #   0xa6354: ldr w12, [x23, #0xec]      ; configured fps
@@ -97,9 +135,24 @@ def capstone_check(word: int, expect: str) -> None:
         return
     insn = next(iter(Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN).disasm(
         struct.pack("<I", word), 0)))
-    if f"{insn.mnemonic} {insn.op_str}" != expect:
+    decoded = insn.mnemonic + (f" {insn.op_str}" if insn.op_str else "")
+    if decoded != expect:
         sys.exit(f"error: encoding {word:#x} is not '{expect}' "
-                 f"(decodes as '{insn.mnemonic} {insn.op_str}')")
+                 f"(decodes as '{decoded}')")
+
+
+def patch_word(data: bytearray, vaddr: int, orig: int, new: int, expect: str,
+               replacement: str) -> None:
+    off = vaddr_to_offset(bytes(data), vaddr)
+    actual = struct.unpack_from("<I", data, off)[0]
+    if actual != orig:
+        sys.exit(f"error: word at vaddr {vaddr:#x} (file offset {off:#x}) is "
+                 f"{actual:#x}, expected {orig:#x} -- wrong build or already patched?")
+    capstone_check(orig, expect)
+    capstone_check(new, replacement)
+    struct.pack_into("<I", data, off, new)
+    print(f"patched vaddr {vaddr:#x} (file offset {off:#x}): "
+          f"{orig:#x} -> {new:#x} ({replacement})")
 
 
 def main() -> None:
@@ -112,29 +165,40 @@ def main() -> None:
     args = ap.parse_args()
 
     data = bytearray(open(args.input, "rb").read())
-    off = vaddr_to_offset(bytes(data), PATCH_VADDR)
-    orig = struct.unpack_from("<I", data, off)[0]
-    if orig != ORIG_WORD:
-        sys.exit(f"error: word at vaddr {PATCH_VADDR:#x} (file offset {off:#x}) is "
-                 f"{orig:#x}, expected {ORIG_WORD:#x} -- wrong build?")
 
-    capstone_check(orig, "ccmp w16, #1, #0, ne")
-    capstone_check(NEW_WORD, "ccmp wzr, #0, #0, ne")
+    off = vaddr_to_offset(bytes(data), MODE_GATE_VADDR)
+    actual = struct.unpack_from(f"<{len(MODE_GATE_ORIG_WORDS)}I", data, off)
+    if actual != MODE_GATE_ORIG_WORDS:
+        printable = ", ".join(f"{word:#x}" for word in actual)
+        expected = ", ".join(f"{word:#x}" for word in MODE_GATE_ORIG_WORDS)
+        sys.exit(f"error: mode gate at vaddr {MODE_GATE_VADDR:#x} (file offset {off:#x}) is "
+                 f"({printable}), expected ({expected}) -- wrong build or already patched?")
+    for expect, word in zip(
+        ("and w11, w7, #0xfffffffd", "cmp w11, #4", "ccmp w11, #8, #4, ne",
+         "ccmp w7, #0x1e, #4, ne", "cset w21, eq"),
+        MODE_GATE_ORIG_WORDS,
+    ):
+        capstone_check(word, expect)
+    for expect, word in zip(
+        ("fmov s0, #3.00000000", "fcmp s0, s9", "cset w11, ge", "cmp w7, #0x1e",
+         "csel w21, w11, wzr, eq"),
+        MODE_GATE_NEW_WORDS,
+    ):
+        capstone_check(word, expect)
+    struct.pack_into(f"<{len(MODE_GATE_NEW_WORDS)}I", data, off, *MODE_GATE_NEW_WORDS)
+    print(f"patched {args.input} vaddr {MODE_GATE_VADDR:#x} (file offset {off:#x}): "
+          f"descriptor whitelist -> professional video within 3.0x")
 
-    struct.pack_into("<I", data, off, NEW_WORD)
-    print(f"patched {args.input} vaddr {PATCH_VADDR:#x} (file offset {off:#x}): "
-          f"{ORIG_WORD:#x} -> {NEW_WORD:#x} (AEC izoom gate permanently passes)")
+    patch_word(
+        data, AEC_GATE_VADDR, AEC_GATE_ORIG_WORD, AEC_GATE_NEW_WORD,
+        "ccmp w16, #1, #0, ne", "ccmp wzr, #0, #0, ne",
+    )
 
     if args.allow_60fps:
-        foff = vaddr_to_offset(bytes(data), FPS_VADDR)
-        forig = struct.unpack_from("<I", data, foff)[0]
-        if forig != FPS_ORIG_WORD:
-            sys.exit(f"error: word at vaddr {FPS_VADDR:#x} (file offset {foff:#x}) is "
-                     f"{forig:#x}, expected {FPS_ORIG_WORD:#x} -- wrong build?")
-        capstone_check(forig, "csel w21, wzr, w21, eq")
-        struct.pack_into("<I", data, foff, NOP_WORD)
-        print(f"patched vaddr {FPS_VADDR:#x} (file offset {foff:#x}): "
-              f"{FPS_ORIG_WORD:#x} -> {NOP_WORD:#x} (60fps rejection NOPed)")
+        patch_word(
+            data, FPS_VADDR, FPS_ORIG_WORD, NOP_WORD,
+            "csel w21, wzr, w21, eq", "nop",
+        )
 
     blob = bytes(data)
     with open(args.output, "wb") as fh:  # binary mode: no CRLF translation ever
