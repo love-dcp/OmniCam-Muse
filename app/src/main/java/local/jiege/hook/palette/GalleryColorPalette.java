@@ -39,6 +39,8 @@ public final class GalleryColorPalette {
         new java.util.concurrent.atomic.AtomicBoolean();
     private static final java.util.concurrent.atomic.AtomicBoolean OUT_FAILED =
         new java.util.concurrent.atomic.AtomicBoolean();
+    /** Last output-geometry state logged, so steady preview rendering stays quiet. */
+    private static String lastOutputGeometry;
     private static final java.util.concurrent.atomic.AtomicBoolean SRC_LOGGED =
         new java.util.concurrent.atomic.AtomicBoolean();
     private static final java.util.concurrent.atomic.AtomicBoolean SRC_FAILED =
@@ -79,6 +81,7 @@ public final class GalleryColorPalette {
             GalleryPaletteScope.install(classLoader);
             rotateSrcImageBlock(classLoader);
             rotateSidewaysSrcDecode();
+            alignPaletteOutputGeometry(classLoader);
             swapOutputWrite(classLoader);
             replacePassThrough(classLoader);
             Log.i(TAG, "gallery palette editor enabled");
@@ -568,6 +571,94 @@ public final class GalleryColorPalette {
     }
 
     /**
+     * Gallery builds the palette output from the source image's sideways geometry.  The input
+     * bitmap is replaced by the upright rendered photo later in execute(), so changing only the
+     * output texture at write-back leaves the host with a portrait texture and a landscape
+     * width/height contract.  Gallery 17.10.41 then paints that mismatch as first a stretched
+     * square and, after the next filter rebuild, a correctly shaped but half-size image.
+     *
+     * Align the primary output dimensions with the finished photo before Gallery allocates the
+     * output texture.  The stock palette manager can then copy the portrait result as a normal
+     * same-size write instead of relying on the late texture reroute.
+     */
+    private static void alignPaletteOutputGeometry(ClassLoader galleryLoader) {
+        try {
+            Class<?> accessorType = XposedHelpers.findClass(
+                "com.oplus.tbluniformeditor.plugins.pool.export.inst.IPluginArgumentsAccessor", galleryLoader);
+            XposedHelpers.findAndHookMethod(
+                "com.oplus.tbluniformeditor.plugins.colorpalette.ColorPaletteAlgoImpl", galleryLoader,
+                "getOutputInfo", accessorType, new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (!Boolean.TRUE.equals(param.getResult())) return;
+                        Object accessor = param.args[0];
+                        String before = describeOutputGeometry(accessor);
+                        boolean changed = alignPrimaryOutputToPhoto(accessor);
+                        logOutputGeometry((changed ? "aligned " : "stock ") + before
+                            + " -> " + describeOutputGeometry(accessor));
+                    }
+                });
+            Log.i(TAG, "palette output geometry alignment enabled");
+        } catch (Throwable error) {
+            Log.e(TAG, "palette output geometry hook failed", error);
+        }
+    }
+
+    /** Swaps only the primary map dimensions; HDR gainmap companions keep their own size. */
+    private static boolean alignPrimaryOutputToPhoto(Object accessor) {
+        if (!GalleryPaletteScope.mainPortrait) return false;
+        try {
+            int[] widths = (int[]) XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_map_width", null);
+            int[] heights = (int[]) XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_map_height", null);
+            if (widths == null || heights == null || widths.length == 0 || heights.length == 0) {
+                return false;
+            }
+            int width = widths[0], height = heights[0];
+            if (width <= 0 || height <= 0 || height > width) return false;
+            int[] uprightWidths = widths.clone();
+            int[] uprightHeights = heights.clone();
+            uprightWidths[0] = height;
+            uprightHeights[0] = width;
+            XposedHelpers.callMethod(accessor, "setTemporaryArg",
+                "global_key_output_source_map_width", uprightWidths);
+            XposedHelpers.callMethod(accessor, "setTemporaryArg",
+                "global_key_output_source_map_height", uprightHeights);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static String describeOutputGeometry(Object accessor) {
+        try {
+            Object widths = XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_map_width", null);
+            Object heights = XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_map_height", null);
+            Object roads = XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_road_map_count", null);
+            Object index = XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_road_map_index", null);
+            Object map = XposedHelpers.callMethod(
+                accessor, "getArg", "global_key_output_source_map", null);
+            int maps = map instanceof Object[] ? ((Object[]) map).length : -1;
+            return "w=" + java.util.Arrays.toString((int[]) widths)
+                + " h=" + java.util.Arrays.toString((int[]) heights)
+                + " roads=" + roads + " index=" + java.util.Arrays.deepToString((Object[]) index)
+                + " maps=" + maps + " portraitPhoto=" + GalleryPaletteScope.mainPortrait;
+        } catch (Throwable error) {
+            return "unreadable(" + error.getClass().getSimpleName() + ')';
+        }
+    }
+
+    private static synchronized void logOutputGeometry(String state) {
+        if (state.equals(lastOutputGeometry)) return;
+        lastOutputGeometry = state;
+        Log.i(TAG, "palette output geometry " + state);
+    }
+
+    /**
      * The editor's palette write-back (BitmapColorPaletteManager.writeResultToOutput) copies the
      * result into the output texture object it holds: same size is a plain GL copy, any size
      * difference goes through scaleCopyTexture/scaleBitmapExact, which stretch to the texture's
@@ -603,8 +694,22 @@ public final class GalleryColorPalette {
                             int bw = result.getWidth(), bh = result.getHeight();
                             int tw = XposedHelpers.getIntField(outputTexture, "l");
                             int th = XposedHelpers.getIntField(outputTexture, "k");
+                            logOutputGeometry("write result=" + bw + "x" + bh
+                                + " target=" + tw + "x" + th + ' ' + describeOutputGeometry(param.args[0]));
                             if (bw == tw && bh == th) return;    // straight copy: the stock path is correct
-                            if (bw > 0 && bh > 0 && tw > 0 && th > 0 && bw * th == bh * tw) return;  // same aspect: a plain scale is faithful
+                            if (bw > 0 && bh > 0 && tw > 0 && th > 0
+                                    && (long) bw * th == (long) bh * tw) {
+                                // A same-aspect downscale is normally faithful, but Gallery 17.10.41
+                                // can hand the standard palette entry a small display texture
+                                // (276x368 for a portrait photo). Returning here leaves that small
+                                // texture in the output map, so the editor paints a thumbnail-sized
+                                // image even though the result bitmap is full working size. Only
+                                // promote truly undersized targets; near-size proxy textures keep
+                                // the stock copy path and avoid unnecessary full-size allocations.
+                                if (Math.max(tw, th) * 2L >= Math.max(bw, bh)) return;
+                                Log.i(TAG, "palette output triggered reroute from small same-aspect texture "
+                                    + tw + "x" + th + " for result " + bw + "x" + bh);
+                            }
                             Object accessor = param.args[0];
                             boolean rerouted = rerouteOutputTexture(param, accessor, result);
                             android.graphics.Bitmap shaped = letterbox(result, tw, th);

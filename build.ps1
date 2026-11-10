@@ -201,6 +201,17 @@ foreach ($sentinel in $requiredLogLutStrings) {
     }
 }
 Write-Output "APK direct-output probes verified: $($requiredLogLutStrings.Count) strings"
+$requiredGalleryPaletteStrings = @(
+    'palette output write guard enabled',
+    'palette output triggered reroute from small same-aspect texture ',
+    'palette output geometry alignment enabled'
+)
+foreach ($sentinel in $requiredGalleryPaletteStrings) {
+    if (-not $dexAll.Contains($sentinel)) {
+        Stop-Build "Stale or incomplete APK: missing gallery palette probe string '$sentinel'."
+    }
+}
+Write-Output "APK gallery palette probes verified: $($requiredGalleryPaletteStrings.Count) strings"
 $requiredPortraitZoomStrings = @(
     'PortraitDefaultZoom',
     'portrait initial 1x armed',
