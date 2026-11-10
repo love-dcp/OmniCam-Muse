@@ -212,29 +212,6 @@ is_ours_source() {
     return 1
 }
 
-# True when a module bind is hidden under the /odm/lib64 overlay. On PKJ110 these show up
-# with root /adb/modules/... or /adb/omnicam_muse/... in mountinfo, while /proc/mounts only
-# reports /dev/block/dm-37; that is why source-only matching misses them.
-mountinfo_has_ours_under_lib64() {
-    while read -r _id _parent _majmin _root _tgt _opts _rest; do
-        case "$_root" in
-            /adb/modules/ricoh_pop_x9u/*) ;;
-            /adb/modules_update/ricoh_pop_x9u/*) ;;
-            /adb/omnicam_muse/*) ;;
-            /adb/ricoh_pop_x9u/*) ;;
-            /data/adb/modules/ricoh_pop_x9u/*) ;;
-            /data/adb/modules_update/ricoh_pop_x9u/*) ;;
-            /data/adb/omnicam_muse/*) ;;
-            /data/adb/ricoh_pop_x9u/*) ;;
-            *) continue ;;
-        esac
-        case "$_tgt" in
-            /odm/lib64/*) return 0 ;;
-        esac
-    done < /proc/self/mountinfo
-    return 1
-}
-
 # Unmounts every bind whose source lives in the module or its scratch trees. This catches
 # normal boot state as well as the PKJ110 soft-reboot case, where the kernel keeps the old
 # mounts while userspace (and the module directory) has been replaced.
@@ -280,37 +257,10 @@ unmount_ours() {
     done
 }
 
-# The X9/X10 BasicTone backends exist only as files created by mountify's overlay of
-# /odm/lib64. Their presence after the module directory is gone means the overlay survived
-# (typical on PKJ110, which can only soft-reboot). Detach it so the stock libraries are seen.
-detach_stale_lib_overlay() {
-    _need=0
-    if [ -e /odm/lib64/libBasicTonePhotoX9.so ] || [ -e /odm/lib64/libBasicTonePhotoX10.so ]; then
-        _need=1
-    fi
-    if mountinfo_has_ours_under_lib64; then
-        _need=1
-    fi
-    [ "$_need" = "1" ] || return 0
-    if is_mounted /odm/lib64; then
-        # Only detach an in-memory overlay/tmpfs. If /odm/lib64 is a real partition mount,
-        # leave it alone; a mount must never be turned into a partition write.
-        _fstype=$(awk '$2 == "/odm/lib64" { print $3; exit }' /proc/self/mounts 2>/dev/null)
-        case "$_fstype" in
-            overlay|tmpfs) ;;
-            *) warn "跳过 /odm/lib64：不是模块 overlay（$_fstype）"; return 0 ;;
-        esac
-        say "  移除 /odm/lib64 的模块覆盖层"
-        _n=0
-        while is_mounted /odm/lib64 && [ "$_n" -lt 4 ]; do
-            umount -l /odm/lib64 >/dev/null 2>&1 || umount /odm/lib64 >/dev/null 2>&1 || break
-            _n=$((_n + 1))
-        done
-    fi
-    if [ -e /odm/lib64/libBasicTonePhotoX9.so ] || [ -e /odm/lib64/libBasicTonePhotoX10.so ]; then
-        warn "/odm/lib64 仍显示模块库，重启后由系统恢复"
-    fi
-}
+# Never detach /odm/lib64 itself. mountify builds one merged overlay for every module in that
+# directory, so detaching it would also remove OPlusHapticsEnhancer's vibration library and other
+# modules' files until the next boot. This module only owns the X9/X10 BasicTone files under their
+# own names; leaving those harmless extra files behind is safer than breaking a foreign module.
 
 # Merged trees are bind sources. Removing them while still mounted would leave empty
 # directories behind the mount, so defer to the boot phase when that happens.
@@ -636,9 +586,7 @@ cleanup_module_full() {
 
     say "- 卸载模块挂载"
     unmount_ours
-    detach_stale_lib_overlay
-    # The overlay can hide per-file binds; after detaching it they become visible and are
-    # unmounted by this second pass.
+    # Run a second pass for per-file binds that became visible after the first scan.
     unmount_ours
 
     say "- 卸载设置应用"

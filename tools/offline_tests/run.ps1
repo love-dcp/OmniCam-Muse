@@ -57,3 +57,19 @@ if ($LASTEXITCODE -ne 0) { throw 'store tests failed' }
 
 & java -cp $out MasterLooksOfflineTest
 if ($LASTEXITCODE -ne 0) { throw "master colour tests failed" }
+
+# The /odm/lib64 overlay is shared by every module. Detaching it while removing OmniCam also
+# unmounts OPlusHapticsEnhancer's vibration library until the next boot, which is forbidden on
+# this temporary-root device. Keep the removal path limited to OmniCam-owned per-file binds.
+$uninstallFull = Get-Content -Raw (Join-Path $project 'module/uninstall_full.sh')
+if ($uninstallFull -match '(?m)^\s*umount(?:\s+-[^\s]+)*\s+/odm/lib64(?:\s|[|&;]|$)') {
+    throw 'uninstall_full.sh must not detach the shared /odm/lib64 overlay'
+}
+if ($uninstallFull -match 'detach_stale_lib_overlay') {
+    throw 'uninstall_full.sh still contains the shared-overlay detach helper'
+}
+$postMount = Get-Content -Raw (Join-Path $project 'module/post-mount.sh')
+if ($postMount -notmatch '(?m)^restore_foreign_lib64\(\)\s*\{' -or
+        $postMount -notmatch '(?m)^restore_foreign_lib64\s*$') {
+    throw 'post-mount.sh must preserve and restore foreign /odm/lib64 files'
+}

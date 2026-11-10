@@ -168,7 +168,10 @@ MODULE_SCRIPTS = {
     # installs the APK; apply-now.sh binds the native patches without a reboot.
     "service.sh": (16767, "3bed65f8b25645677f535a758ae96c63"),
     "uninstall.sh": (7776, "ca7085838c1d3c2da5f8cbced767a50e"),
-    "uninstall_full.sh": (28772, "ac8ddb66cece6c162ff78959ce9afdb4"),
+    # r232: never detach the shared /odm/lib64 overlay during removal. mountify merges every
+    # module into that overlay, so detaching it would also unmount OPlusHapticsEnhancer's
+    # vibration library. Only this module's per-file binds are removed now.
+    "uninstall_full.sh": (26744, "71c5bf3d7d2e034aae0830976b890375"),
     "action.sh": (2741, "75ddeb3ab87ac843eea37eda70c7b73d"),
     "customize.sh": (14467, "93c32c4a337a5a396b7641ba8c3079cf"),
     "apply-now.sh": (3455, "ec898c2aec9c54f6a34f59cb73f67082"),
