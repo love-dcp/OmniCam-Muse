@@ -44,4 +44,10 @@ g(
  MasterVM__onImagePack=M(**{"in": MVM}, strings=["[addWatermarkForStyleSync] styleId:"]),
  MasterVM__applyStyle=M(**{"in": MVM}, static=True, params=[MVM, S, WMS, None, WEP, "int"], ret="void"),
  StyleData__source=M(**{"in": WSDP}, static=True, params=[S], invokes=["Lcom/oplus/gallery/framework/abilities/watermark/masterstyle/WatermarkMasterStyle$Companion;->getStyleFileNameById(Ljava/lang/String;)Ljava/lang/String;"]),
+ # Video editor over-4K gate: TranscodingManager keeps the decision in one boolean the constructor
+ # sets from two config reads; the detect pass reads it and drops clips whose long edge is over 3840.
+ VideoTranscode=K(strings=["[loadScaleAndSaveBitmap] both uri and filePath are null or empty"]),
+ VideoTranscode__limit=F(**{"in": "@VideoTranscode"}, type="boolean"),
+ VideoTranscodeDetector=K(strings=["limitTo4k, transformChannel is null"]),
+ VideoTranscode__detect=M(**{"in": "@VideoTranscodeDetector"}, params=["java.util.List", None, None, "kotlin.jvm.functions.Function0"], ret="java.util.List"),
 )

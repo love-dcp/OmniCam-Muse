@@ -20,6 +20,7 @@ import local.jiege.hook.gr.GrEffectValues;
 import local.jiege.hook.gr.GrPort;
 import local.jiege.hook.gallery.AddressNavigation;
 import local.jiege.hook.gallery.BatchWatermark;
+import local.jiege.hook.gallery.VideoEditorOver4k;
 import local.jiege.hook.gallery.WatermarkSeriesUnlock;
 import local.jiege.hook.guard.UnmountedGuard;
 import local.jiege.hook.highpixel.HighPixel200mFace;
@@ -103,6 +104,9 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
         } else if (GALLERY.equals(param.packageName)) {
             Symbols.install("gallery", classLoader, param.appInfo.sourceDir, param.appInfo.dataDir);
             AddressNavigation.installGallery(classLoader);
+            // The video editor drops a clip over 3840 px on its long edge, which is what a pro-video
+            // open gate recording (4096x3072) is. No /odm file is involved, so it goes before the guard.
+            if (!Skip.off("videoedit")) VideoEditorOver4k.installGallery(classLoader);
             if (!UnmountedGuard.filesMounted()) {
                 UnmountedGuard.installGallery();
                 return;

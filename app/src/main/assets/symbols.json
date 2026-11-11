@@ -2370,6 +2370,34 @@
    "invokes": [
     "Lcom/oplus/gallery/framework/abilities/watermark/masterstyle/WatermarkMasterStyle$Companion;->getStyleFileNameById(Ljava/lang/String;)Ljava/lang/String;"
    ]
+  },
+  "VideoTranscode": {
+   "kind": "class",
+   "strings": [
+    "[loadScaleAndSaveBitmap] both uri and filePath are null or empty"
+   ]
+  },
+  "VideoTranscode.limit": {
+   "kind": "field",
+   "in": "@VideoTranscode",
+   "type": "boolean"
+  },
+  "VideoTranscodeDetector": {
+   "kind": "class",
+   "strings": [
+    "limitTo4k, transformChannel is null"
+   ]
+  },
+  "VideoTranscode.detect": {
+   "kind": "method",
+   "in": "@VideoTranscodeDetector",
+   "params": [
+    "java.util.List",
+    null,
+    null,
+    "kotlin.jvm.functions.Function0"
+   ],
+   "ret": "java.util.List"
   }
  }
 }
