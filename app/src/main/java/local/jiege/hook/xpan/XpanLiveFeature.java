@@ -6,6 +6,7 @@ import android.graphics.Rect;
 import android.util.Size;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -61,6 +62,13 @@ public final class XpanLiveFeature {
     private static final String XPAN_EXPOSURE_WHEEL =
         "com.oplus.camera.feature.xpan.view.widget.XPanExposureWheel";
     private static final String LIVE_PHOTO_VIEW_ID = "live_photo";
+    /**
+     * The two stock menu strips that the exposure wheel is drawn over. Their resource ids are the
+     * only stable way to find them: the items inside are added and removed per mode.
+     */
+    private static final String[] TOP_BAR_VIEW_IDS = {
+        "oplus_setting_bar_left", "oplus_setting_bar_right"
+    };
     private static final String MENU_CAMERA_FIELD = "d";
     private static final String MENU_LIST_FIELD = "h";
     private static final String SHOWN_MENU_LIST_FIELD = "i";
@@ -119,8 +127,8 @@ public final class XpanLiveFeature {
     private static volatile boolean menuCacheAdoptedLogged;
     private static volatile boolean menuRestoreLogged;
     private static volatile boolean menuVisibilityBlockedLogged;
-    private static volatile View exposureWheelLiveGestureTarget;
-    private static volatile boolean exposureWheelLiveGestureConsumed;
+    private static volatile View exposureWheelGestureTarget;
+    private static volatile boolean exposureWheelGestureConsumed;
     private static volatile boolean gyroFallbackLogged;
     private static volatile boolean eisBypassLogged;
     private static volatile boolean xpanEisBypassActive;
@@ -1956,13 +1964,18 @@ public final class XpanLiveFeature {
     }
 
     /**
-     * The stock XPAN exposure wheel is drawn above and consumes every gesture in the top strip,
-     * including taps over the restored live-photo button. Returning false from onTouchEvent is not
-     * enough: the wheel already owns the gesture and still returns true unconditionally. Claim a
-     * DOWN on the visible live-photo view in the wheel's onTouchEvent, then forward the complete
-     * gesture to that view so ImageView can perform its normal click handling without the wheel
-     * also moving. XPanExposureWheel declares onTouchEvent, while dispatchTouchEvent is inherited
-     * from View and therefore cannot be resolved with findMethodExact on the wheel class.
+     * The stock XPAN exposure wheel is laid out over the top menu strip and consumes every gesture
+     * in its rectangle: it returns true unconditionally, so a child underneath never hears the tap.
+     * That rectangle is wider than the strip's meaningful area, and stock only survives it because
+     * every stock item happens to sit outside the wheel's horizontal span. Restoring the live-photo
+     * item widens the left strip from one slot to two, which pushes the stock camera icon
+     * ({@code xpan_switch_to_physical_ui}) from x 42..138 into x 138..234 -- inside the wheel's
+     * 145..934 span -- and that icon goes dead. So whitelisting the live-photo view alone is not
+     * enough: resolve whichever top-strip item is actually under the finger, then forward the whole
+     * gesture to it so it performs its normal click handling while the wheel stays put.
+     *
+     * <p>{@code XPanExposureWheel} declares {@code onTouchEvent}, while {@code dispatchTouchEvent} is
+     * inherited from {@code View} and therefore cannot be resolved with findMethodExact.
      */
     private static void hookExposureWheelTouchYield(ClassLoader classLoader) {
         Class<?> wheelClass = XposedHelpers.findClass(XPAN_EXPOSURE_WHEEL, classLoader);
@@ -1981,77 +1994,121 @@ public final class XpanLiveFeature {
                 View wheel = (View) param.thisObject;
                 int action = event.getActionMasked();
                 if (action == MotionEvent.ACTION_DOWN) {
-                    exposureWheelLiveGestureTarget = null;
-                    exposureWheelLiveGestureConsumed = false;
+                    exposureWheelGestureTarget = null;
+                    exposureWheelGestureConsumed = false;
 
-                    View live = findLivePhotoView(wheel);
-                    if (!isUsableTouchTarget(live) || !containsRawPoint(live, event)) return;
+                    View target = findTopStripTargetUnder(wheel, event);
+                    if (!isUsableTouchTarget(target)) return;
 
-                    exposureWheelLiveGestureTarget = live;
-                    exposureWheelLiveGestureConsumed = dispatchLiveGesture(live, wheel, event);
+                    exposureWheelGestureTarget = target;
+                    exposureWheelGestureConsumed = dispatchGestureTo(target, wheel, event);
                     param.setResult(Boolean.TRUE);
-                    Log.i(TAG, "XPAN wheel gesture forwarded to live"
+                    Log.i(TAG, "XPAN wheel gesture forwarded to top strip item"
                         + ", x=" + (int) event.getRawX()
                         + ", y=" + (int) event.getRawY()
                         + ", wheel=" + visibleBounds(wheel)
-                        + ", live=" + visibleBounds(live)
-                        + ", visible=" + live.isShown()
-                        + ", clickable=" + live.isClickable()
-                        + ", consumed=" + exposureWheelLiveGestureConsumed);
+                        + ", target=" + target.getClass().getName()
+                        + " " + visibleBounds(target)
+                        + ", visible=" + target.isShown()
+                        + ", clickable=" + target.isClickable()
+                        + ", consumed=" + exposureWheelGestureConsumed);
                     return;
                 }
 
-                View live = exposureWheelLiveGestureTarget;
-                if (live == null) return;
+                View target = exposureWheelGestureTarget;
+                if (target == null) return;
 
-                boolean consumed = dispatchLiveGesture(live, wheel, event);
-                exposureWheelLiveGestureConsumed |= consumed;
+                boolean consumed = dispatchGestureTo(target, wheel, event);
+                exposureWheelGestureConsumed |= consumed;
                 param.setResult(Boolean.TRUE);
 
                 if (action == MotionEvent.ACTION_UP) {
                     /*
-                     * ImageView normally consumes DOWN and clicks itself on UP. This fallback only
-                     * covers a custom child that declines the gesture, and cannot double-toggle the
-                     * already handled ImageView path.
+                     * A stock option view normally consumes DOWN and clicks itself on UP. This
+                     * fallback only covers a custom child that declines the gesture, and cannot
+                     * double-toggle the already handled path.
                      */
-                    if (!exposureWheelLiveGestureConsumed
-                        && isUsableTouchTarget(live)
-                        && containsRawPoint(live, event)) {
-                        live.performClick();
+                    if (!exposureWheelGestureConsumed
+                        && isUsableTouchTarget(target)
+                        && containsRawPoint(target, event)) {
+                        target.performClick();
                     }
-                    Log.i(TAG, "XPAN wheel live gesture completed"
-                        + ", consumed=" + exposureWheelLiveGestureConsumed
-                        + ", endedInside=" + containsRawPoint(live, event));
-                    exposureWheelLiveGestureTarget = null;
-                    exposureWheelLiveGestureConsumed = false;
+                    Log.i(TAG, "XPAN wheel top strip gesture completed"
+                        + ", consumed=" + exposureWheelGestureConsumed
+                        + ", endedInside=" + containsRawPoint(target, event));
+                    exposureWheelGestureTarget = null;
+                    exposureWheelGestureConsumed = false;
                 } else if (action == MotionEvent.ACTION_CANCEL) {
-                    Log.i(TAG, "XPAN wheel live gesture completed"
-                        + ", consumed=" + exposureWheelLiveGestureConsumed
+                    Log.i(TAG, "XPAN wheel top strip gesture completed"
+                        + ", consumed=" + exposureWheelGestureConsumed
                         + ", cancelled=true");
-                    exposureWheelLiveGestureTarget = null;
-                    exposureWheelLiveGestureConsumed = false;
+                    exposureWheelGestureTarget = null;
+                    exposureWheelGestureConsumed = false;
                 }
             }
         });
-        Log.i(TAG, "XPAN exposure-wheel live gesture router armed");
+        Log.i(TAG, "XPAN exposure-wheel top strip gesture router armed");
     }
 
-    private static boolean dispatchLiveGesture(View live, View wheel, MotionEvent event) {
+    /**
+     * Finds the clickable top-strip item under the finger, ignoring the wheel rectangle that the
+     * touch was actually delivered to. The restored live-photo item is used as a fallback for the
+     * short window before it is attached to a strip.
+     */
+    private static View findTopStripTargetUnder(View wheel, MotionEvent event) {
+        for (String idName : TOP_BAR_VIEW_IDS) {
+            View strip = findViewByResourceName(wheel, idName);
+            View hit = findTopmostClickableUnder(strip, event);
+            if (hit != null) return hit;
+        }
+        View live = findLivePhotoView(wheel);
+        return isUsableTouchTarget(live) && containsRawPoint(live, event) ? live : null;
+    }
+
+    /**
+     * Depth-first search for the frontmost usable item containing the raw point. Children are
+     * visited back to front because the last child is the one drawn on top and therefore the one
+     * that would have received the touch had the wheel not been in the way.
+     */
+    private static View findTopmostClickableUnder(View view, MotionEvent event) {
+        if (!(view instanceof ViewGroup)) return null;
+        ViewGroup group = (ViewGroup) view;
+        for (int index = group.getChildCount() - 1; index >= 0; index--) {
+            View child = group.getChildAt(index);
+            if (child.getVisibility() != View.VISIBLE) continue;
+            View deeper = findTopmostClickableUnder(child, event);
+            if (deeper != null) return deeper;
+            if (isUsableTouchTarget(child) && containsRawPoint(child, event)) return child;
+        }
+        return null;
+    }
+
+    private static View findViewByResourceName(View anchor, String idName) {
+        try {
+            int id = anchor.getResources().getIdentifier(
+                idName, "id", anchor.getContext().getPackageName());
+            return id == 0 ? null : anchor.getRootView().findViewById(id);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean dispatchGestureTo(View target, View wheel, MotionEvent event) {
         MotionEvent copy = MotionEvent.obtain(event);
         try {
             /*
-             * onTouchEvent receives coordinates in the wheel's local space. The live-photo button
-             * is a sibling inside the same parent, so forwarding the event unchanged shifts every
-             * touch by the difference between the two view origins.
+             * onTouchEvent receives coordinates in the wheel's local space. The strip item is a
+             * sibling inside another parent, so forwarding the event unchanged shifts every touch
+             * by the difference between the two view origins.
              */
             int[] wheelLocation = new int[2];
-            int[] liveLocation = new int[2];
+            int[] targetLocation = new int[2];
             wheel.getLocationOnScreen(wheelLocation);
-            live.getLocationOnScreen(liveLocation);
+            target.getLocationOnScreen(targetLocation);
             copy.offsetLocation(
-                wheelLocation[0] - liveLocation[0],
-                wheelLocation[1] - liveLocation[1]);
-            return live.dispatchTouchEvent(copy);
+                wheelLocation[0] - targetLocation[0],
+                wheelLocation[1] - targetLocation[1]);
+            return target.dispatchTouchEvent(copy);
         } finally {
             copy.recycle();
         }
