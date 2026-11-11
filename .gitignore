@@ -34,3 +34,23 @@ __pycache__/
 /*.jpg
 
 /shots/
+
+# ad-hoc probe dumps (screen xml / png / log) — regenerable, never part of the source
+/.tmp-*
+/*.tmp
+
+# pulled from the device or produced by decompilers during one investigation
+/output/
+/null/
+/classes*/
+/log
+/HAL
+/preview
+/hs_err_pid*.log
+
+# tool-local runtimes and caches
+/.android-user-home/
+/.gradle-user-home/
+/.android/
+/PowerShell 7*/
+/tools/workbuddy-codex-plugin/
