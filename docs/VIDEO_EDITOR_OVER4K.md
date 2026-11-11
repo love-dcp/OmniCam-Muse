@@ -83,27 +83,42 @@ a.e = phj.x4.get()  ||  z9b.c(6, "is_camera_support_8k", false)
 `TranscodingManager` 实例本身**按类型从检测器实例的字段里扫出来**，不依赖字段名 `d`。
 `VideoTranscode.limit` 也不用名字 `e`。开关组 `persist.omnicam.aura.skip` 加 `videoedit` 可单独关掉。
 
-## 6. 上机验证步骤（下次手机连上先做这个）
+## 6. 上机验证（2026-11-11 19:47，r234/674，已通过）
 
 ```bash
 adb install -r app/build/outputs/apk/release/app-release.apk       # r234/674
 adb shell am force-stop com.coloros.gallery3d
-adb shell "logcat -G 16M; logcat -c"                              # 相机/相册日志掉得快
+adb shell "logcat -G 16M; logcat -c"                              # 相册日志掉得快
 # 打开相册 → 那个 OG 视频 → 铅笔
-adb logcat -s LSPosed-Bridge | grep -E "Symbols: gallery|VideoEditorOver4k"
+adb shell "logcat -d | grep -a 'LSPosedFramework: (com.coloros.gallery3d)'"
 ```
 
-判据（三条都要满足）：
+实测结果：
 
-1. `Symbols: gallery: N resolved` 里 **missing 不含** `VideoTranscode*`（否则指纹没匹配上）；
-2. `VideoEditorOver4k: detect pass over 1 item(s), over-4K limit true` —— 说明门是真的开着的；
-3. `VideoEditorOver4k: detect pass returned 1 entr(y|ies)` —— 项没被丢掉，编辑器应该能进。
+| 判据 | 结果 |
+|---|---|
+| `Symbols: gallery: 36 resolved, 0 missing` | ✅ 4 条 `VideoTranscode*` 全命中 |
+| `VideoEditorOver4k: detect pass over 1 item(s), over-4K limit true` | ✅ 门确实开着，说明 hook 打在真方法上 |
+| `unsupported over 4K video` 不再出现 | ✅ 全日志零命中 |
+| 焦点落到 `EditorActivity` | ✅ 编辑器进得去，不再是 toast 后立即退出 |
 
-随后**回归**：1080p60 / 4K60 两段还能编辑（它们本来就到不了那道门，理论上无影响）。
+**注意**：`detect pass returned N entr(y|ies)` 这条 after 日志没打出来。不影响结论（before 打到了、
+`unsupported over 4K` 消失、Activity 起来了），推测是该检测方法本身是 suspend 链、方法体没在抓日志的窗口里返回。
+下次要看返回值就直接看编辑器是否起来，不必依赖那行。
+
+**免手动点的直达命令**（跳过网格和播放页，等价于点铅笔）：
+
+```bash
+adb shell "am start -n com.coloros.gallery3d/com.oplus.gallery.videoeditorpage.video.app.EditorIntroActivity \
+  -a android.intent.action.VIEW -d content://media/external/video/media/<_id> -t video/mp4"
+```
+
+`_id` 用 `content query --uri content://media/external/video/media --projection _id:_display_name:width:height` 查。
+`am start` 会打一段 `SecurityException` 栈——那是 URI 授权检查的噪声，不影响拉起。
 
 ## 7. 还没验证 / 风险
 
-- **降规格这一步没在设备上跑过**。若日志显示「返回 1 项」但编辑器仍闪退，下一步查 `[checkTranscodeInfo]` 与 Meicam 的转码日志，
-  那时的方向是：把 `NvsFileInfo` 的长边按 3840 等比夹一下（对 4:3 无裁切、只缩），或者直接从 SDK 侧 `NvsAVFileInfo.getVideoStreamDimension` 动手。
 - 降规格后的**成片导出分辨率**大概率是 1080p（原厂对超 4K 的处理就是这样）。若要求原尺寸导出，得另找路。
+- **回归未做**：1080p60 / 4K60 两段没在 r234 上重测编辑。它们本来就到不了那道门（3840 不大于 3840），
+  逻辑上无影响，但严格说起来是未验项。
 - 相册升级换版本后，指纹若失配，`VideoEditorOver4k` 只会打一行 `unavailable`，不会影响其它功能。
