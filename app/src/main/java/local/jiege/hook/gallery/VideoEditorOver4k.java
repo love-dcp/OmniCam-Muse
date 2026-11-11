@@ -26,6 +26,10 @@ import local.jiege.hook.common.Symbols;
  * <p>The editor then works on a resized copy, so a 4096x3072 open gate clip exports as 2160x2880:
  * the 4K cap is 3840x2160 and for a 4:3 source it is applied to the short edge. Opening the gate
  * above only gets the clip accepted; the second hook here keeps its size.
+ *
+ * <p>An export made before this hook existed is 2160x2880 on disk. Editing that file again returns
+ * 2160x2880 because that really is its size, and upscaling it would only add pixels: the band the
+ * second hook watches starts above 3840. Test the behaviour on a camera original.
  */
 public final class VideoEditorOver4k {
     private static final String TAG = "VideoEditorOver4k";
@@ -87,7 +91,8 @@ public final class VideoEditorOver4k {
                     if (computed instanceof Size) {
                         Size scaled = (Size) computed;
                         Log.i(TAG, "resolution " + scaled.getWidth() + "x" + scaled.getHeight()
-                                + " from " + describe(param.args) + " key=" + requested);
+                                + " from " + describe(param.args) + " key=" + requested
+                                + " flag=" + param.args[3]);
                     }
                     if (openGate == null || !(computed instanceof Size)) return;
                     if (!is4k(requested)) return;
