@@ -50,4 +50,8 @@ g(
  VideoTranscode__limit=F(**{"in": "@VideoTranscode"}, type="boolean"),
  VideoTranscodeDetector=K(strings=["limitTo4k, transformChannel is null"]),
  VideoTranscode__detect=M(**{"in": "@VideoTranscodeDetector"}, params=["java.util.List", None, None, "kotlin.jvm.functions.Function0"], ret="java.util.List"),
+ # Editor input resolution: maps the source size onto a 4K/2K/1080p/720p/480p cap. For a 4:3
+ # source the 4K cap is applied to the short edge, so 3072x4096 comes back as 2160x2880. The
+ # method also carries the open-gate special case (OPPO's own "don't rescale 3840..4096" rule).
+ VideoResolution__target=M(static=True, params=["android.util.Size", None, "java.lang.String", "boolean", "android.util.Size"], ret="android.util.Size", strings=["feature_is_support_camera_opengate"]),
 )

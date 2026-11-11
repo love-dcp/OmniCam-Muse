@@ -2398,6 +2398,21 @@
     "kotlin.jvm.functions.Function0"
    ],
    "ret": "java.util.List"
+  },
+  "VideoResolution.target": {
+   "kind": "method",
+   "static": true,
+   "params": [
+    "android.util.Size",
+    null,
+    "java.lang.String",
+    "boolean",
+    "android.util.Size"
+   ],
+   "ret": "android.util.Size",
+   "strings": [
+    "feature_is_support_camera_opengate"
+   ]
   }
  }
 }

@@ -1,5 +1,6 @@
 package local.jiege.hook.gallery;
 
+import android.util.Size;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import java.lang.reflect.Field;
@@ -21,9 +22,18 @@ import local.jiege.hook.common.Symbols;
  *
  * Everything past the 3840 comparison is the stock code: the target of the downscale, the source
  * dimensions and the frame rate stay as reported, so the timeline geometry is unaffected.
+ *
+ * <p>The editor then works on a resized copy, so a 4096x3072 open gate clip exports as 2160x2880:
+ * the 4K cap is 3840x2160 and for a 4:3 source it is applied to the short edge. Opening the gate
+ * above only gets the clip accepted; the second hook here keeps its size.
  */
 public final class VideoEditorOver4k {
     private static final String TAG = "VideoEditorOver4k";
+
+    /** Long edge of 16:9 4K; anything up to this is taken as is by the stock code. */
+    private static final int LONG_EDGE_4K = 3840;
+    /** Long edge of DCI/open-gate 4K: the top of the range the stock code calls open gate. */
+    private static final int LONG_EDGE_OPEN_GATE = 4096;
 
     private VideoEditorOver4k() {}
 
@@ -59,6 +69,64 @@ public final class VideoEditorOver4k {
                 }
             });
         });
+
+        // The editor sizes its working copy, and later its export, through this call. A 4:3 source
+        // is handed back at 2160x2880 (the 4K cap applied to the short edge), so an export can never
+        // be larger than that. Two callers matter: the input pass passes the source size, the export
+        // pass passes the size the editor already holds plus the clip's own size as the last
+        // argument. Either way the open-gate size wins, which is what the stock code would do if the
+        // camera advertised the open-gate feature.
+        Log.guard(TAG, "open-gate clips keep their own size", () -> {
+            Method target = Symbols.get().method("VideoResolution.target");
+            XposedBridge.hookMethod(target, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.getThrowable() != null) return;
+                    Size openGate = openGateSize(param.args);
+                    Object requested = param.args[2];
+                    Object computed = param.getResult();
+                    if (computed instanceof Size) {
+                        Size scaled = (Size) computed;
+                        Log.i(TAG, "resolution " + scaled.getWidth() + "x" + scaled.getHeight()
+                                + " from " + describe(param.args) + " key=" + requested);
+                    }
+                    if (openGate == null || !(computed instanceof Size)) return;
+                    if (!is4k(requested)) return;
+                    if (openGate.equals(computed)) return;
+                    Size scaled = (Size) computed;
+                    Log.i(TAG, "open-gate clip keeps its size: " + scaled.getWidth() + "x" + scaled.getHeight()
+                            + " -> " + openGate.getWidth() + "x" + openGate.getHeight());
+                    param.setResult(openGate);
+                }
+            });
+        });
+    }
+
+    /** The largest of the size arguments that sits in the open-gate band, or null. */
+    private static Size openGateSize(Object[] args) {
+        Size found = null;
+        for (Object arg : args) {
+            if (!(arg instanceof Size)) continue;
+            Size size = (Size) arg;
+            int longEdge = Math.max(size.getWidth(), size.getHeight());
+            if (longEdge <= LONG_EDGE_4K || longEdge > LONG_EDGE_OPEN_GATE) continue;
+            if (found == null || longEdge > Math.max(found.getWidth(), found.getHeight())) found = size;
+        }
+        return found;
+    }
+
+    private static boolean is4k(Object key) {
+        return key instanceof String && ((String) key).toUpperCase().startsWith("4K");
+    }
+
+    /** Every size argument, so one line says which branch of the caller fired. */
+    private static String describe(Object[] args) {
+        StringBuilder out = new StringBuilder();
+        for (Object arg : args) {
+            if (!(arg instanceof Size)) continue;
+            if (out.length() > 0) out.append('/');
+            out.append(((Size) arg).getWidth()).append('x').append(((Size) arg).getHeight());
+        }
+        return out.length() == 0 ? "no size" : out.toString();
     }
 
     /** The TranscodingManager instance the detector keeps -- looked up by type, not by field name. */

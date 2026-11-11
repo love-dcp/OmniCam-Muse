@@ -118,7 +118,84 @@ adb shell "am start -n com.coloros.gallery3d/com.oplus.gallery.videoeditorpage.v
 
 ## 7. 还没验证 / 风险
 
-- 降规格后的**成片导出分辨率**大概率是 1080p（原厂对超 4K 的处理就是这样）。若要求原尺寸导出，得另找路。
 - **回归未做**：1080p60 / 4K60 两段没在 r234 上重测编辑。它们本来就到不了那道门（3840 不大于 3840），
   逻辑上无影响，但严格说起来是未验项。
 - 相册升级换版本后，指纹若失配，`VideoEditorOver4k` 只会打一行 `unavailable`，不会影响其它功能。
+
+## 8. 原尺寸导出（r236 / 676）
+
+能编辑之后导出还是 2160×2880。原片 3072×4096，缩放比 2160/3072 = 0.703125 —— **短边被压到 2160**，
+也就是「4K 按短边算」。
+
+### 出口不在转码，在导出
+
+先排除了上一节那条转码路径：整个编辑会话里 `TranscodingManager` 一行日志都没有，
+`/data/user/0/com.coloros.gallery3d` 下也没有 `limit4K_*` 文件。真正的证据是导出瞬间：
+
+```
+I meicam : Compile video with size=2160x2880
+```
+
+压缩尺寸是 App 交给 Meicam 的，所以得看 Java 侧谁算的。
+
+### 算尺寸的是 od20（V 表：ResolutionUtil）
+
+导出按钮走 `EditorSaveUIController.N()`：
+
+```java
+Size   src    = kfe.B();                      // 编辑器自己的画布尺寸
+cn10   ratio  = timeline.getRatioOption();
+String key    = timeline.getNodeResolution(); // "4K" / "2K" / "1080p" / "720p" / "480p"
+Size   out    = od20.e(timeline, src, ratio, key);
+```
+
+`od20.e` 先从时间线取唯一片段的真实尺寸（`htc0.h/i`），再转手调
+`od20.d(src, ratio, key, true, clipSize)`。`od20.d` 的逻辑：
+
+```
+cap   = od20.b(key)      // "4K"→3840x2160, "2K"→2560x1440, "1080p"→1920x1080 ...
+size  = od20.f(aspect, cap)
+        // aspect≤1 先把 cap 转成 (min,max)，再用 it50.c 按 aspect 重算：
+        //   w2 = cap.w/aspect, h2 = cap.h*aspect;
+        //   w2<=cap.h ? (cap.w, w2) : (h2, cap.h)
+        // 3:4 代入 cap=(2160,3840)：w2=2880、h2=2880，取 (2160, 2880) ← 就是这个数
+```
+
+### OPPO 自己留了「片门全开不缩放」
+
+`od20.a(srcSize, z, key, opengateSupport)` 里写着：
+
+```
+opengateSupport && z && key=="4K" && src!=null && 3840 < max(w,h) <= 4096  →  true
+```
+
+为真时 `d` 直接返回 `sizeRef`（或调用方传进来的 target），不套 4K cap。
+`opengateSupport` 来自 `z9b.c(4, "feature_is_support_camera_opengate", false)`，
+调用方传的 `z` 也常年是 false —— 两道门都关着，所以永远走不到。
+
+### 修法
+
+`VideoEditorOver4k` 加第二个钩子，挂在 `od20.d` 的 after：把入参里**所有 Size** 扫一遍，
+取长边落在 (3840, 4096] 的那个（`e` 分支里那是片段的真实尺寸，输入分支里是源尺寸），
+在 `key` 以 `4K` 开头且与返回值不同的时候把返回值换成它。
+
+`symbols.json` / `sym_gallery.py` 各加一条 `VideoResolution.target`：`static`、
+参数 `(Size, ?, String, boolean, Size)`、返回 `Size`、方法内串 `feature_is_support_camera_opengate`。
+**不给 `in`**（全 dex 搜）：该串在 classes18 只出现在 `od20.d`、在 classes2 出现在两个签名完全不同的方法里，
+靠「参数表 + 方法内串」唯一命中，比用 `ResolutionUtil` 当类指纹稳（那个串跨 3 个 dex）。
+
+实机验证（r236）：打开 OG 片段即出现
+
+```
+resolution 2160x2880 from 1080x1440/3072x4096 key=4K
+open-gate clip keeps its size: 2160x2880 -> 3072x4096
+```
+
+`1080x1440` 是编辑器预览画布（3:4 的 1080 档），`3072x4096` 是片段真实尺寸。
+改完之后**导出成片尺寸待确认**（设备在验证时锁屏了）。
+
+### 仍未做
+
+- 导出成片是否真是 3072×4096、以及编码耗时/码率是否正常 —— 待一次完整导出。
+- 编辑器预览画布仍是 1080x1440（那是另一档，预览不跟着放大不影响成片）。
+
