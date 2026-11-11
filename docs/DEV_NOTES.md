@@ -72,3 +72,63 @@ pop_port=90  jiege=408  ricoh_gr=77  merged=470   /   9 keys staged
 4. **柔光 A/B 先弃一张**：相机重启或长时间空闲后的第一张走 `4096×3072` 全尺寸，之后才是 `1280×960` 代理帧。四档都要落在代理帧上再比，否则量到的是 1280×960 上采样到 3072×4096 的损失（曾把 9% 的高频损失读成 64%）。跨族比较之前先看两张 JPEG 的字节数是否同族。
 5. **重装模块前先存快照**：`sh tools/snap.sh before` / `sh tools/snap.sh after`，再 `python tools/snapshot_diff.py <before>.txt <after>.txt`。快照记录模块树、`/data/adb/omnicam_muse/merged`、相机 `files/pop_port`、`files/jiege`、`files/odm`、`shared_prefs` 的逐个 md5，外加现场 bind 挂载、`omnicam`/`persist.*camera` 属性、SELinux 标签；小的几个目录同时打成 tar 存在 `work/snapshot/<name>/`。重装后"说不清哪里变了"时，这一步能直接把差异指出来（见过属性残留、merged 树残留、某个 staging 文件没重建三种）。
 
+
+## 固件解包 / 反编译工具链踩坑
+
+从 `.workbuddy/memory/MEMORY.md` 迁入，主记忆只留索引。
+
+### `tools/erofs_extract.py`（纯 Python EROFS，无 root 解包）
+
+用法 `<img> {list,tree,find,grep,cat,dump,info}`，**镜像路径在前、动作在后**，路径必须是盘符形式（`G:/...`），
+`cat` 靠 shell 重定向取输出。三处硬 bug 已修：
+
+1. `decode_bits` 必须用 `<Q`（u64），否则高位块号读错；
+2. 多块 pcluster 的**首块必然解失败** → 判据是「失败就再加一块」，不要当错误退出；
+3. **起始块不能用 NONHEAD delta 累加**（会偏），改成顺序推进：`下一个 = 上一个 + 实耗块数`，pack base 只作种子。
+
+### 其它工具
+
+- `arsc_arrays.py` 直读资源表（aapt2 读不了 OPPO 的表），key 名会乱码 → 「资源到底存不存在」改用字符串池判据；
+  坏 zip 不要修 EOCD，直接扫 `PK\x03\x04` 单条取。
+- `elf_deps.py` 判断厂商 so 能不能搬；`dex_strref.py` / `dex_fieldref.py` 用来判「死资源」——
+  只有字段定义、没有任何方法命中 = 从来没接线。
+- 另有 `elf_symbols.py`、`elf_exports.py`、`elf_disasm.py`、`elf_arm64_xrefs.py`、`dex_classes.py`。
+
+### dex 反编译（本机没有 jadx / baksmali）
+
+用 androguard 4.1.4：
+
+```python
+from loguru import logger; logger.remove()          # 不摘掉会刷几万行 debug
+from androguard.core.dex import DEX
+d = DEX(open('.muse_tmp/dump/classes13.dex','rb').read())
+for c in d.get_classes():
+    if c.get_name().endswith('container/r;'):
+        for m in c.get_methods():
+            for ins in m.get_instructions():
+                print(ins.get_name(), ins.get_output())
+```
+
+相机全套 dex 在 `.muse_tmp/dump/`；先定位类在哪个 dex：
+`python tools/dex_classes.py grep <类名片段> .muse_tmp/dump/classes*.dex`。
+
+### ELF / 结构体读取
+
+`struct.unpack_from` 逐字段读，别整体 unpack；extended inode 布局 `uid@24 gid@28 mtime@32 nlink@44`；
+`datalayout 3` = COMPRESSED_COMPACT；`lz4.block.decompress` **输入不足不报错、只返回短结果**，
+要按 span 逐步加长重试。APEX 就是个 zip：`apex_payload.img`(EROFS) + `apex_manifest.pb`。
+
+## 视图树排查：别信相对坐标
+
+`adb shell dumpsys activity top` 打印的是**相对父容器的坐标**，直接看会误判谁盖住谁。
+把缩进当层级、逐层累加偏移还原成绝对矩形，才能看出遮挡关系——判断「点击被谁吞掉」全靠这一步
+（实例见 `docs/XPAN_LIVE_PHOTO.md`）。**不要用 `uiautomator dump`**，它会把相机顶到后台。
+
+## 两条易丢的定案（从主记忆迁入）
+
+- **ChiX 日志开关**：tag = `ChiX [INFO][CORE]`，受 `g_enableChxLogs[9]` 门控；
+  `gate_once.sh` 热写 `base+49160`，provider 重启后要重写。
+  防抖 desc 取值：专业视频 30fps = 4、专业视频 60fps = 8、普通+超级防抖 60fps = 4、普通无防抖 30fps = 30。
+- **6X 预览变形**：`oplus_eis_camera.vcfg` 的 SuperEIS 节缺 cam3/cam4，
+  复制 `SAT_Super_EIS_30FPS` 节点即可。SAT 变焦表在 `mvg_sat_config.json`：
+  `sat_zoom_ranges = [[0.6,1],[1,3],[3,6],[6,120]]`。
