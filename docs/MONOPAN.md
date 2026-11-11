@@ -225,3 +225,41 @@ adb logcat -d | grep -E "MonoPan|MonoPanHelper|pass host"
 * 有 `variant` 但 `no output` / `the helper did not answer` → helper 没起或 `/data/local/tmp/monopan` 里的库缺失。
 * `buffer rejected` → host buffer 布局与 `HostBufferInfo` 不一致。
 * 整项关掉：`setprop persist.omnicam.aura.skip monopan` 后重启相机；只想去暗角：`setprop persist.omnicam.monopan.vig 0`。
+
+### 5.5 反查留档：Meishe 导出与缓冲布局
+
+从 `.workbuddy/memory/MEMORY.md` 迁入，避免主记忆超限被截断。
+
+`/odm/lib64/libmsnativefilter.so`（7,992,584 B）导出入口（VA）：
+
+```
+MsRender                     0x64d494
+MsRenderHostBuffer           0x64d57c
+MsRenderHDRHostBuffer        0x64e9ac
+MsRenderHDRTexture           0x64ec1c
+MsRenderHardwareBuffer       0x64eca0
+MsDownloadHotBufferFromGPU   0x64def0
+MsConvertHostBuffer          0x64daf0
+MsUploadHotBufferToGPU       0x64dbc4
+
+CNvComputeRenderer::DoProcessEffects     0x6536f8
+CNvComputeRenderer::Tiled                0x65458c
+CNvComputeRenderer::WithHarewareBuffer   0x656ebc
+CNvComputeRenderer::YUV                  0x65c088
+```
+
+`MsRender*HostBuffer` 是薄壳：打 tag 后 tail-call 到 `MsDoRender*HostBuffer`，返回 `ret & 1`。
+
+`SMsHostBufferInfo` 布局：
+
+| 字段 | 偏移 |
+| --- | --- |
+| plane[4] | 0x00 |
+| stride[4] | 0x20 |
+| width | 0x30 |
+| height | 0x34 |
+| pixFmt | 0x38 |
+| primaries | 0x3c |
+| transfer（2 = HLG） | 0x40 |
+| matrix | 0x44 |
+| range（1 = full） | 0x48 |
