@@ -78,3 +78,100 @@ XPAN wheel top strip gesture completed, consumed=true, endedInside=true
 现在改成 `$project = Split-Path -Parent $PSScriptRoot`，跟着脚本自身位置走。
 判断有没有踩这个坑：构建日志末尾的 `APK ready: ... (versionName / versionCode)` 应与
 `module/module.prop` 一致；不一致就是编译了别的树。
+
+## 3. 2026-11-11 修复：开「水印」后 XPAN 实况的动态附件又变回 Log 灰（r240 真机通过）
+
+### 现象
+
+- 只拍实况（水印关）：动态附件颜色正常（r201–r210 那套 BasicTone 补丁生效）。
+- 实况 + 照片水印：封面正常，**动态附件整幅发灰**、黑位抬起（背景由黑变浅灰）、色彩发闷。
+- 实测同一场景：封面 HSV 平均饱和度 `95.2`，附件 `20.7`（与 r199 的 Log 灰一致）。
+
+日志（`work/xpan_wm_full.log`，21:46 那次拍摄）关键三行：
+
+```
+OCAM_LivePhoto.VideoEncoder[..][PAUSING]: onPrepare, mCropPreviewSize: 1920x864, mbIsWatermarkOpen: true, ...
+OCAM_LivePhoto.VideoEncoder[..][STARTED]: initGLContext, sharedContext: ...
+OCAM_WatermarkProcessor: WatermarkProcessor create.
+XPAN main frame path, seq=1, path=common, ... watermarkOpen=true, ... lutType=1, rendererPrepared=false
+```
+
+`mbIsWatermarkOpen=true` 让编码器在 `p3` 之外**多建一个水印合成器**（`gh.s4` → 渲染器 `ch.h`）。
+
+### 根因：水印那一遍画的是**原始未显影画面**，而且 `LutParameters` 被写死成 null
+
+先说结论：不是「LUT 套了两遍」，而是「第二遍重画时**根本没做 BasicTone**」。
+
+反编译证据（`work/p3_r_full.txt` / `work/s4_b.txt` / `work/chh_p.txt`）：
+
+1. `gh.p3.r(ImageData)` 先把这一帧画进 HW buffer（本模块的 BasicTone 桥就挂在这里，见 r208/r210）。
+2. 随后 `if (image_is_watermark_open)` → `p3.P0(gh.s4)->b(u0 frame, ImageData)`（`p3_r` 第 663 行）。
+   注意传进去的 `u0` 是 **p3 的输入纹理**，不是 p3 画完的结果。
+3. `gh.s4.g(u0, Z, Z)` 把这个输入纹理 `f()` 拷到自己的目标 `s4.v`，再交给渲染器 `ch.h`：
+   `s4.j`（`Lch/h;`）就是水印合成器。
+4. `s4.b` 调 `ch.h.p(ArrayList, [F, [F, [F, I, I, I, Lbh/o, Lm9/c)` 时，
+   `LutParameters` 参数是**写死的 null**（`const/16 v18, 0`）。`ch.h.p` 第 85 行：
+   ```java
+   if (lutParameters != null && lutParameters.g) { uNeedBasicTone = 1; ... }
+   else                                          { uNeedBasicTone = 0; }
+   ```
+   → 合成这一遍 `uNeedBasicTone = 0`，BasicTone 与影调表全部不做。
+5. 于是输出 = **原始（未显影）画面 + 水印**。封面走 APS/HAL 不经过这条链，所以封面一直是好的。
+
+一句话：**第一遍已经显影了，但水印那遍把显影前的原料重画了一遍。**
+
+> 反汇编里 `ch.h.p` 的 `if (a0.q) uNeedLut=1` 只能决定有没有 look LUT，
+> 补不回 BasicTone。实测 `ch.h` 的 `q` 为 true（见下方日志 `rendererLut=true`），
+> 所以 r239 那版「关掉 q」不但没修好，还原样保留了 Log 灰。
+
+### 修法：把主绘制这一帧的 `LutParameters` 交给水印合成器
+
+`XpanLiveFeature.hookXpanLiveWatermarkCopy()`：
+
+1. `p3.r` 入口处（`beginMainFrame` 之后）把 `pipeline.o0`（本帧真正使用的 `LutParameters`）记到
+   `activeLutParameters`。
+2. hook `gh.s4.b`，在 XPAN、实况、`image_is_watermark_open=true` 时打开一个线程内的
+   「合成窗口」标记，方法返回即清除。
+3. 在这个窗口内 hook `ch.h.p`，把第 8 个参数（`LutParameters`，原厂传 null）
+   替换成 `activeLutParameters`。合成那遍于是自己把 BasicTone、影调表、look LUT 全走一遍，
+   结果与「水印关」那条已知正常的链路一致。
+
+- 只作用于 XPAN + 实况 + 水印开的这一帧；其它模式、普通视频水印、封面拍照都不受影响。
+- 参数替换走 `param.args[7]`，原厂对象不被修改；窗口结束即失效，不会污染后续帧。
+- `persist.omnicam.xpan.livewm=0` 可退回原厂行为（排查用）。
+- 新增日志：
+  - `XPAN live watermark composite armed, renderer=ch.h, rendererLut=..., gradedParams=...`
+  - `XPAN watermark composite regraded with the frame's LutParameters, stock=null, paramsG=true, ...`
+
+### 陷阱：`LutParameters.e` 是空的，强行 `uNeedBasicTone=1` 会画出纯白
+
+r241 第一版直接把参数塞过去，结果**成片开头约 0.9 秒纯白**（26 帧，HSV `V=190 / S=3 / std=10.7`），之后才正常。
+探针（`XPAN watermark composite #N`）给出答案：
+
+```
+composite #1, stock=null, basicTexture=null, g=true, lutSize=64.0, avgLuma=0.0
+```
+
+`g=true` 让 `ch.h.p` 置 `uNeedBasicTone=1`，但它随后执行 `this.s = params.e` 再 `a0.b(slot, shader)`；
+XPAN 的 `LutParameters.e`（BasicTone 三维贴图）**本来就是 null**——主绘制用的是渲染器字段
+`gh.g.s`，由本模块 `ensureXpanLiveBasicToneTexture()` 现场建好。贴图槽绑了空对象，
+着色器就采到默认值 → 整幅纯白。
+
+所以合成前必须先解决贴图来源，顺序为：
+
+1. `params.e` 非空 → 直接用；
+2. 否则借 `pipeline.w.s`（主绘制刚建好的那张 BasicTone 纹理）；
+3. 两者都没有 → **不替换参数**，退回原厂（宁可这一帧 Log，也不出白帧）。
+
+借来的贴图是临时写进 `params.e` 的，`ch.h.p` 返回后立刻置回 null，避免影响下一帧主绘制。
+实测 r242：`#6 basicTexture=borrowed`，随后 `#7+` 变成 `own`（原厂也补上了），全片无白帧。
+
+### 验证要点
+
+1. XPAN、开实况、开水印，拍一段有运动、且**画面里有大片纯黑**的场景（黑位最容易看出来）。
+2. 日志应出现上面两条（`stock=null`、`paramsG=true`）；`XPAN main frame path` 里 `watermarkOpen=true` 照旧。
+3. 抽出附件逐帧看：**第 0 帧就该有颜色**（r242 实测 `S 44.8 / std 62.2`，此前白帧段为 `S 3 / std 10.7`）。
+4. 回归：水印关的实况、人像/大师的普通实况、普通视频水印。
+5. 对照手段：`setprop persist.omnicam.xpan.livewm 0` 后重拍，应回到 Log 灰（`S ≈ 21`）。
+   注意附件是**延迟落盘**的（先写 1.8MB 静图，约 1 分钟后才追加视频），别看到小文件就以为没合成。
+

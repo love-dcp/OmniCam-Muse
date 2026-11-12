@@ -49,6 +49,13 @@ public final class XpanLiveFeature {
     private static final String LUT_MANAGER_HOLDER = LUT_MANAGER + "$b";
     private static final String CAMERA_METADATA_KEY = "bb.s";
     private static final String LIVE_PHOTO_FEATURE_FLAGS = "fh.a";
+    /** The encoder's watermark compositor (WatermarkProcessor) and the renderer it owns. */
+    private static final String WATERMARK_PROCESSOR = "gh.s4";
+    private static final String WATERMARK_PROCESSOR_RENDERER = "j";
+    /** The GL renderer the watermark processor composites the frame and the bitmap with. */
+    private static final String WATERMARK_COMPOSITE = "ch.h";
+    private static final String LUT_PARAMETERS = "bh.o";
+    private static final String XPAN_LIVE_WATERMARK_PROPERTY = "persist.omnicam.xpan.livewm";
     private static final String XPAN_GYRO_KEY =
         "com.oplus.camera.gyro.value.gyrotoeis";
     private static final String BASE_MODE_NAME_FIELD = "U0";
@@ -142,6 +149,17 @@ public final class XpanLiveFeature {
     private static volatile boolean basicToneDirectShaderLogged;
     private static volatile boolean basicToneDirectFrameLogged;
     private static volatile boolean commonBasicToneBridgeLogged;
+    private static volatile boolean watermarkCopyLogged;
+    private static volatile boolean watermarkCopyErrorLogged;
+    private static volatile boolean watermarkCompositeLogged;
+    private static volatile boolean watermarkCompositeSkippedLogged;
+    private static volatile int watermarkCompositeProbe;
+    /** LutParameters of the frame currently being drawn, reused by the watermark composite. */
+    private static volatile Object activeLutParameters;
+    /** Pipeline of the frame currently being drawn; its renderer holds the BasicTone texture. */
+    private static volatile Object activePipeline;
+    /** Set while the stock watermark processor re-composites the frame on the GL thread. */
+    private static final ThreadLocal<Boolean> WATERMARK_COMPOSITE_ACTIVE = new ThreadLocal<>();
     private static volatile boolean liveTransformBypassLogged;
     private static volatile boolean liveTransformCaptureProbeLogged;
     private static volatile boolean liveTransformDrawProbeLogged;
@@ -278,6 +296,11 @@ public final class XpanLiveFeature {
             hookXpanLiveBasicTone(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN live BasicTone binding unavailable", error);
+        }
+        try {
+            hookXpanLiveWatermarkCopy(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live watermark copy unavailable", error);
         }
         try {
             hookXpanLiveLutDiagnostics(classLoader);
@@ -1126,6 +1149,17 @@ public final class XpanLiveFeature {
                     }
                     Object pipeline = param.thisObject;
                     beginMainFrame(param, pipeline, param.args[0]);
+                    /*
+                     * The watermark processor later re-composites this same frame from the raw
+                     * input texture. Hand it the LutParameters that the graded draw is about to
+                     * use, so the composite can restore BasicTone instead of emitting Log.
+                     */
+                    activePipeline = pipeline;
+                    try {
+                        activeLutParameters = XposedHelpers.getObjectField(pipeline, "o0");
+                    } catch (Throwable ignored) {
+                        activeLutParameters = null;
+                    }
                     Object renderer = null;
                     boolean rendererPrepared = false;
                     int lutType = -1;
@@ -1457,6 +1491,167 @@ public final class XpanLiveFeature {
             }
         });
         Log.i(TAG, "XPAN live BasicTone binding armed");
+    }
+
+    /**
+     * With the photo watermark open the attachment turns Log-gray again even though the
+     * BasicTone workaround above already graded it.
+     *
+     * <p>The encoder does not stop at the frame {@code gh.p3.r()} draws: when
+     * {@code image_is_watermark_open} is set it also calls
+     * {@code WatermarkProcessor.b(frame, imageData)}. That copies the <em>raw</em> input texture
+     * into its own target ({@code gh.s4.g}) and draws it a second time, together with the
+     * watermark bitmaps, through {@code ch.h.p(...)}. Stock hands that composite renderer a
+     * {@code null} LutParameters, so {@code uNeedBasicTone} stays 0: the second pass repaints the
+     * picture without the tone mapping that makes it look right, and the clip reads as Log again.
+     *
+     * <p>The composite is a complete draw of the same frame, so the fix is to let it grade exactly
+     * like the first pass: while the processor is inside {@code b(...)}, {@code ch.h.p} gets the
+     * {@link #activeLutParameters} instance the graded draw already used. BasicTone, its vignette
+     * table and the ordinary look LUT then land on the composite as well.
+     * Property {@code persist.omnicam.xpan.livewm=0} restores the stock behaviour.
+     */
+    private static void hookXpanLiveWatermarkCopy(ClassLoader classLoader) {
+        final Class<?> processor =
+            XposedHelpers.findClass(WATERMARK_PROCESSOR, classLoader);
+        final Class<?> composite =
+            XposedHelpers.findClass(WATERMARK_COMPOSITE, classLoader);
+        final Class<?> lutParameters =
+            XposedHelpers.findClass(LUT_PARAMETERS, classLoader);
+        XposedBridge.hookAllMethods(processor, "b", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length != 2
+                    || !XPAN_MODE.equals(currentCameraMode)
+                    || property(XPAN_LIVE_WATERMARK_PROPERTY, 1) == 0) {
+                    return;
+                }
+                XpanMainFrame frame = XPAN_MAIN_FRAME.get();
+                if (frame == null || !frame.watermarkOpen) return;
+                WATERMARK_COMPOSITE_ACTIVE.set(Boolean.TRUE);
+                if (!watermarkCopyLogged) {
+                    watermarkCopyLogged = true;
+                    Object renderer = null;
+                    try {
+                        renderer = XposedHelpers.getObjectField(
+                            param.thisObject, WATERMARK_PROCESSOR_RENDERER);
+                    } catch (Throwable ignored) {
+                        // Diagnostics only.
+                    }
+                    Log.i(TAG, "XPAN live watermark composite armed"
+                        + ", renderer=" + (renderer == null
+                            ? "null" : renderer.getClass().getName())
+                        + ", rendererLut=" + (renderer == null ? "?"
+                            : XposedHelpers.getBooleanField(renderer, "q"))
+                        + ", gradedParams=" + (activeLutParameters == null
+                            ? "null" : "present")
+                        + ", mode=" + currentCameraMode);
+                }
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                WATERMARK_COMPOSITE_ACTIVE.remove();
+            }
+        });
+        XposedBridge.hookAllMethods(composite, "p", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length != 9
+                    || !Boolean.TRUE.equals(WATERMARK_COMPOSITE_ACTIVE.get())
+                    || param.method == null
+                    || !WATERMARK_COMPOSITE.equals(
+                        param.method.getDeclaringClass().getName())) {
+                    return;
+                }
+                try {
+                    Object graded = activeLutParameters;
+                    if (graded == null || !lutParameters.isInstance(graded)) return;
+                    Object stock = param.args[7];
+                    if (stock == graded) return;
+                    /*
+                     * The XPAN LutParameters carries no BasicTone texture of its own: the graded
+                     * draw gets one from the renderer field the workaround above fills in. Hand
+                     * the same texture to the composite, otherwise uNeedBasicTone=1 samples an
+                     * unbound unit and the frame comes out white.
+                     */
+                    Object basicTexture = XposedHelpers.getObjectField(graded, "e");
+                    if (basicTexture == null) {
+                        basicTexture = rendererBasicToneTexture();
+                    }
+                    if (basicTexture == null) {
+                        if (!watermarkCompositeSkippedLogged) {
+                            watermarkCompositeSkippedLogged = true;
+                            Log.i(TAG, "XPAN watermark composite left stock"
+                                + ", no BasicTone texture yet"
+                                + ", mode=" + currentCameraMode);
+                        }
+                        return;
+                    }
+                    if (watermarkCompositeProbe < 40) {
+                        watermarkCompositeProbe++;
+                        Log.i(TAG, "XPAN watermark composite #" + watermarkCompositeProbe
+                            + ", stock=" + (stock == null ? "null" : "present")
+                            + ", basicTexture=" + (XposedHelpers.getObjectField(graded, "e")
+                                == null ? "borrowed" : "own")
+                            + ", g=" + XposedHelpers.getBooleanField(graded, "g")
+                            + ", vigSize=" + XposedHelpers.getIntField(graded, "d")
+                            + ", lutSize=" + XposedHelpers.getFloatField(graded, "a")
+                            + ", avgLuma=" + XposedHelpers.getFloatField(graded, "b")
+                            + ", frameDraws=" + (XPAN_MAIN_FRAME.get() == null
+                                ? -1 : XPAN_MAIN_FRAME.get().commonDraws));
+                    }
+                    if (XposedHelpers.getObjectField(graded, "e") == null) {
+                        XposedHelpers.setObjectField(graded, "e", basicTexture);
+                        param.setObjectExtra(
+                            "xpanCompositeBorrowedBasicTone", Boolean.TRUE);
+                    }
+                    param.args[7] = graded;
+                    if (!watermarkCompositeLogged) {
+                        watermarkCompositeLogged = true;
+                        Log.i(TAG, "XPAN watermark composite regraded with the frame's"
+                            + " LutParameters, stock=" + (stock == null ? "null" : "present")
+                            + ", paramsG=" + XposedHelpers.getBooleanField(graded, "g")
+                            + ", rendererLut=" + (param.thisObject == null ? "?"
+                                : XposedHelpers.getBooleanField(param.thisObject, "q"))
+                            + ", mode=" + currentCameraMode);
+                    }
+                } catch (Throwable error) {
+                    logWatermarkCopyError(error);
+                }
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (!Boolean.TRUE.equals(
+                    param.getObjectExtra("xpanCompositeBorrowedBasicTone"))) {
+                    return;
+                }
+                try {
+                    Object graded = param.args[7];
+                    if (graded != null) {
+                        XposedHelpers.setObjectField(graded, "e", null);
+                    }
+                } catch (Throwable error) {
+                    logWatermarkCopyError(error);
+                }
+            }
+        });
+        Log.i(TAG, "XPAN live watermark copy armed");
+    }
+
+    /** The BasicTone texture the graded draw is using, or null while it is not built yet. */
+    private static Object rendererBasicToneTexture() {
+        Object pipeline = activePipeline;
+        if (pipeline == null) return null;
+        try {
+            Object renderer = XposedHelpers.getObjectField(pipeline, "w");
+            return renderer == null ? null : XposedHelpers.getObjectField(renderer, "s");
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    private static void logWatermarkCopyError(Throwable error) {
+        if (watermarkCopyErrorLogged) return;
+        watermarkCopyErrorLogged = true;
+        Log.e(TAG, "XPAN live watermark copy failed", error);
     }
 
     private static void hookXpanLiveLutDiagnostics(ClassLoader classLoader) {
