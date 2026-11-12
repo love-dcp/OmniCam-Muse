@@ -20,6 +20,13 @@ if ($LASTEXITCODE -ne 0) { throw 'shim compile failed' }
 $sources = @(Get-ChildItem (Join-Path $project 'app/src/main/java/local/jiege/hook/filters') -Filter *.java | ForEach-Object FullName)
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Log.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Diagnostics.java')
+# Diagnostics 把大师预设的调用交给了 masterfilter（相机进程里应答 METHOD_APPLY_PRESET），
+# 这条引用是编译期的，所以那几个文件也得一起编译，否则离线测试报「程序包不存在」。
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/DataStore.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Reflection.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterPresetApply.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterPresetCreate.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterPresets.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/DiagnosticsContract.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Settings.java')
 # FilterGroupInjector reaches the camera through Symbols (DexKit-backed); compile against the DexKit AAR.

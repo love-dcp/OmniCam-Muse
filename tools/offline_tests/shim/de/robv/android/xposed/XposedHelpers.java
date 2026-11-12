@@ -35,6 +35,22 @@ public final class XposedHelpers {
         throw new NoSuchMethodError(obj.getClass().getName() + "#" + name);
     }
 
+    /** Static twin of {@link #callMethod}: DataStore reads the camera's DataManager through it. */
+    public static Object callStaticMethod(Class<?> clazz, String name, Object... args) {
+        for (Class<?> type = clazz; type != null; type = type.getSuperclass()) {
+            for (Method method : type.getDeclaredMethods()) {
+                if (!method.getName().equals(name) || !matches(method.getParameterTypes(), args)) continue;
+                try {
+                    method.setAccessible(true);
+                    return method.invoke(null, args);
+                } catch (ReflectiveOperationException error) {
+                    throw new RuntimeException(error);
+                }
+            }
+        }
+        throw new NoSuchMethodError(clazz.getName() + "#" + name);
+    }
+
     // Hook installation is not exercised offline.
     public static Class<?> findClass(String className, ClassLoader classLoader) {
         throw new UnsupportedOperationException("offline");

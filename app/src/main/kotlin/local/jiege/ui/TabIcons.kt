@@ -3,6 +3,8 @@ package local.jiege.ui
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
@@ -57,6 +59,36 @@ val CameraIcon: ImageVector = ImageVector.Builder(
     }
 }.build()
 
+/** Bottom bar icon for 预设: stacked cards (a preset library). */
+val PresetIcon: ImageVector = ImageVector.Builder(
+    name = "Preset", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+        // Front card (with the hole, so the outline reads at small sizes).
+        moveTo(4f, 8f)
+        horizontalLineTo(20f)
+        verticalLineTo(21f)
+        horizontalLineTo(4f)
+        close()
+        moveTo(6f, 10f)
+        verticalLineTo(19f)
+        horizontalLineTo(18f)
+        verticalLineTo(10f)
+        close()
+        // Two cards behind it.
+        moveTo(5f, 5.2f)
+        horizontalLineTo(19f)
+        verticalLineTo(6.8f)
+        horizontalLineTo(5f)
+        close()
+        moveTo(6f, 2.4f)
+        horizontalLineTo(18f)
+        verticalLineTo(4f)
+        horizontalLineTo(6f)
+        close()
+    }
+}.build()
+
 /** Home info row icon for the module version: a box. */
 val InfoModuleIcon: ImageVector = ImageVector.Builder(
     name = "InfoModule", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
@@ -94,6 +126,61 @@ val PhoneIcon: ImageVector = ImageVector.Builder(
         verticalLineTo(17f)
         horizontalLineTo(17f)
         verticalLineTo(5f)
+        close()
+    }
+}.build()
+
+/** 预设详情页的返回箭头。 */
+val PresetBackIcon: ImageVector = ImageVector.Builder(
+    name = "Back", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(
+        stroke = SolidColor(Color.Black),
+        strokeLineWidth = 2f,
+        strokeLineCap = StrokeCap.Round,
+        strokeLineJoin = StrokeJoin.Round,
+    ) {
+        moveTo(15f, 4.5f)
+        lineTo(8f, 12f)
+        lineTo(15f, 19.5f)
+    }
+}.build()
+
+/** 收藏（空心）。 */
+val HeartIcon: ImageVector = ImageVector.Builder(
+    name = "Heart", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(
+        stroke = SolidColor(Color.Black),
+        strokeLineWidth = 1.8f,
+        strokeLineCap = StrokeCap.Round,
+        strokeLineJoin = StrokeJoin.Round,
+    ) {
+        moveTo(12f, 20f)
+        curveTo(12f, 20f, 3.5f, 15f, 3.5f, 9.4f)
+        curveTo(3.5f, 6.6f, 5.7f, 4.4f, 8.4f, 4.4f)
+        curveTo(10.1f, 4.4f, 11.3f, 5.3f, 12f, 6.4f)
+        curveTo(12.7f, 5.3f, 13.9f, 4.4f, 15.6f, 4.4f)
+        curveTo(18.3f, 4.4f, 20.5f, 6.6f, 20.5f, 9.4f)
+        curveTo(20.5f, 15f, 12f, 20f, 12f, 20f)
+        close()
+    }
+}.build()
+
+/** 收藏（实心）。 */
+val HeartFilledIcon: ImageVector = ImageVector.Builder(
+    name = "HeartFilled", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(12f, 20.4f)
+        curveTo(11.6f, 20.4f, 11.2f, 20.25f, 10.9f, 20f)
+        curveTo(9.6f, 18.9f, 3f, 14.1f, 3f, 9.4f)
+        curveTo(3f, 6.4f, 5.4f, 4f, 8.4f, 4f)
+        curveTo(10.1f, 4f, 11.3f, 4.8f, 12f, 5.9f)
+        curveTo(12.7f, 4.8f, 13.9f, 4f, 15.6f, 4f)
+        curveTo(18.6f, 4f, 21f, 6.4f, 21f, 9.4f)
+        curveTo(21f, 14.1f, 14.4f, 18.9f, 13.1f, 20f)
+        curveTo(12.8f, 20.25f, 12.4f, 20.4f, 12f, 20.4f)
         close()
     }
 }.build()

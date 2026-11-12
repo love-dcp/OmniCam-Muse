@@ -55,6 +55,23 @@ public final class Diagnostics {
         } catch (Throwable error) {
             Log.e("Diagnostics", "state request hook unavailable", error);
         }
+        // 大师预设应用 / 效果栏核对：只有相机进程有 EffectMenu。
+        if (!"camera".equals(section)) return;
+        try {
+            XposedBridge.hookMethod(callMethod(XposedHelpers.findClass(provider, loader)), new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!DiagnosticsContract.METHOD_APPLY_PRESET.equals(param.args[0])) return;
+                    if (!fromModule()) {
+                        param.setResult(Bundle.EMPTY);
+                        return;
+                    }
+                    Bundle extras = param.args.length > 2 && param.args[2] instanceof Bundle ? (Bundle) param.args[2] : null;
+                    param.setResult(local.jiege.hook.masterfilter.MasterPresetApply.handle(extras));
+                }
+            });
+        } catch (Throwable error) {
+            Log.e("Diagnostics", "preset apply hook unavailable", error);
+        }
     }
 
     /** call(String, String, Bundle) where the provider or one of its superclasses declares it. */

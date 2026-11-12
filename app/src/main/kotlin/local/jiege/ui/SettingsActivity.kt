@@ -138,12 +138,13 @@ internal fun SettingNumber(store: SettingsStore, param: MasterLooks.Param, revis
     )
 }
 
-private val TAB_TITLES = arrayOf("主页", "拍摄", "大师色彩", "大师滤镜", "杂项")
+private val TAB_TITLES = arrayOf("主页", "拍摄", "大师色彩", "大师滤镜", "大师预设", "杂项")
 private const val TAB_HOME = 0
 private const val TAB_SHOOT = 1
 private const val TAB_MASTER_COLOUR = 2
 private const val TAB_MASTER_FILTER = 3
-private const val TAB_MISC = 4
+private const val TAB_MASTER_PRESET = 4
+private const val TAB_MISC = 5
 // Second pages, opened from an entry on a tab; the back arrow returns to the tab.
 private const val PAGE_NONE = 0
 private const val PAGE_PRESETS = 1
@@ -186,6 +187,7 @@ private fun SettingsScreen(store: SettingsStore) {
                 NavigationBarItem(selected = tab == TAB_SHOOT, onClick = { select(TAB_SHOOT) }, icon = CameraIcon, label = "拍摄")
                 NavigationBarItem(selected = tab == TAB_MASTER_COLOUR, onClick = { select(TAB_MASTER_COLOUR) }, icon = MasterColorIcon, label = "大师色彩")
                 NavigationBarItem(selected = tab == TAB_MASTER_FILTER, onClick = { select(TAB_MASTER_FILTER) }, icon = MiuixIcons.Basic.ArrowUpDown, label = "大师滤镜")
+                NavigationBarItem(selected = tab == TAB_MASTER_PRESET, onClick = { select(TAB_MASTER_PRESET) }, icon = PresetIcon, label = "大师预设")
                 NavigationBarItem(selected = tab == TAB_MISC, onClick = { select(TAB_MISC) }, icon = MiuixIcons.Basic.Sidebar, label = "杂项")
             }
         },
@@ -199,6 +201,7 @@ private fun SettingsScreen(store: SettingsStore) {
             page == PAGE_XPAN_CLEAN -> XpanCleanScreen(padding, scroll, store)
             tab == TAB_MASTER_COLOUR -> MasterLookScreen(padding, scroll, store)
             tab == TAB_MASTER_FILTER -> MasterFilterScreen(padding, scroll, store)
+            tab == TAB_MASTER_PRESET -> MasterPresetScreen(padding, scroll)
             else -> LazyColumn(
                 modifier = Modifier.fillMaxSize().overScrollVertical().nestedScroll(scroll),
                 contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding()),

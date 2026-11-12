@@ -225,6 +225,12 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("softlight")) SoftLight.installCamera(classLoader);
             if (!Skip.off("master")) MasterLutSlots.installCamera(classLoader);
             if (!Skip.off("master")) MasterContrast.installCamera(classLoader);
+            // 大师预设：设置页把 OMaster 的参数组写进效果栏（MasterPresetApply）。
+            if (!Skip.off("master") && !Skip.off("presets")) {
+                Log.guard("MasterPreset", "install", () -> local.jiege.hook.masterfilter.MasterPresetApply.installCamera(classLoader));
+                Log.guard("MasterPreset", "capture params", () -> local.jiege.hook.masterfilter.MasterPresetApply.installCaptureParams(classLoader));
+                Log.guard("MasterPreset", "effect data", () -> local.jiege.hook.masterfilter.MasterPresetApply.installEffectData(classLoader));
+            }
             // MONOPAN 50 / 迫冲: the variant marker the capture pass reads (monopan.cpp).
             if (!Skip.off("monopan")) {
                 Log.guard("MonoPan", "install", () -> local.jiege.hook.masterfilter.MonoPan.installCamera(classLoader));

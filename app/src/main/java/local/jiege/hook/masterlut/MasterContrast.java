@@ -114,15 +114,17 @@ public final class MasterContrast {
     private static void arrange(Symbols symbols, Object owner, Context context) throws Throwable {
         List<Object> items = (List<Object>) symbols.get("EffectMenuBase.items", owner);
         int toneIcon = id(context, "drawable", "master_contrast_icon");
-        int grToneIcon = id(context, "drawable", "gr_mode_effect_tone_icon");
+        int contrastIcon = id(context, "drawable", "gr_mode_effect_contrast_light_icon");
         int label = id(context, "string", "camera_master_contrast");
-        if (toneIcon == 0 || grToneIcon == 0 || label == 0) throw new IllegalStateException("contrast resources missing");
+        if (toneIcon == 0 || contrastIcon == 0 || label == 0) throw new IllegalStateException("contrast resources missing");
         Constructor<?> make = symbols.cls("EffectItem").getDeclaredConstructors()[0];
         for (int i = 0; i < items.size(); i++) {
             Object tone = items.get(i);
             if ((Integer) symbols.get("EffectItem.icon", tone) != toneIcon) continue;
-            items.set(i, make.newInstance(symbols.get("EffectItem.label", tone), grToneIcon, 0, symbols.get("EffectItem.key", tone)));
-            items.add(i + 1, make.newInstance(label, toneIcon, 0, key(symbols)));
+            // 影调的图标一个字都不动：上一版把它的图标换成了 GR 模式那个（+/- 双圆），
+            // 用户一眼就看出来"以前不是这样"。对比度用自己的图标（GR 的对比度），
+            // 也不能借用 GR 的影调图标——那个正是 +/- 双圆。
+            items.add(i + 1, make.newInstance(label, contrastIcon, 0, key(symbols)));
             return;
         }
         Log.i(TAG, "影调 item not found");
