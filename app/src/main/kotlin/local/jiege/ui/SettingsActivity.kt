@@ -215,6 +215,17 @@ private fun SettingsScreen(store: SettingsStore) {
 
 /** The 拍摄 tab: settings grouped by camera mode. */
 private fun LazyListScope.shootItems(store: SettingsStore, cardModifier: Modifier, onOpenSoftLight: () -> Unit, onOpenXpanClean: () -> Unit) {
+    item(key = "palette") {
+        SmallTitle(text = "调色盘")
+        Card(modifier = cardModifier) {
+            SettingSwitch(
+                store = store,
+                key = ModuleSettings.PALETTE,
+                title = "调色盘",
+                summary = "拍照、人像的原厂调色盘，以及大师、POP、视频、哈苏超清和理光页面的调色盘入口；关闭后都不出现",
+            )
+        }
+    }
     item(key = "filter_panel") {
         // Index = ModuleSettings.FILTER_PANEL_NONE / _SWIPE_UP / _LONG_PRESS.
         var trigger by remember { mutableStateOf(store.getInt(ModuleSettings.FILTER_PANEL_TRIGGER)) }

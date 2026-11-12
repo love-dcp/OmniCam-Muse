@@ -9,6 +9,7 @@ import local.jiege.hook.capture.LivePhotoSdrCover;
 import local.jiege.hook.capture.MemoryGate;
 import local.jiege.hook.common.CameraLogMirror;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Settings;
 import local.jiege.hook.common.Skip;
 import local.jiege.hook.common.Symbols;
 import local.jiege.hook.diag.EntryButtonProbe;
@@ -58,6 +59,7 @@ import local.jiege.hook.video.OpenGate;
 import local.jiege.hook.video.VideoFilterHighSpec;
 import local.jiege.hook.x10.PaletteFeatureSwitch;
 import local.jiege.hook.x10.X10FilterPort;
+import local.jiege.settings.ModuleSettings;
 
 /**
  * LSPosed entry (assets/xposed_init). The native part is libjiege_native.so, declared in
@@ -143,12 +145,20 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("filter")) FilterGroupInjector.installCamera(classLoader);
             if (!Skip.off("filter")) LegacyFilterPanel.installCamera(classLoader);
             if (!Skip.off("filter")) X10FilterPort.installCamera(classLoader);
+            // 调色盘: one switch for every palette gate in the camera. Off means neither the stock
+            // photo / portrait palette nor the module's own entry on master / POP / video / GR is
+            // opened, i.e. the stock X8U behaviour.
+            final boolean palette = Settings.get(ModuleSettings.PALETTE);
+            if (!palette) Log.i("Palette", "off (" + ModuleSettings.PALETTE + "=false)");
             // X8U port: the palette feature switch is answered in Java (the OCS config container
             // cannot be synthesised on PKJ110) -- see x10/PaletteFeatureSwitch.
-            if (!Skip.off("filter")) {
+            if (palette && !Skip.off("filter")) {
                 Log.guard("Palette", "feature switch", () -> PaletteFeatureSwitch.installCamera(classLoader));
             }
             // X8U port: our own palette panel (master, video, POP and the GR page share it).
+            // Installed even with 调色盘 off: on 哈苏超清 that panel is also the only way into the
+            // mode's filters (the camera builds no effect page there), so the class itself decides
+            // what to open -- the dial page when the palette is on, the bare filter row when not.
             if (!Skip.off("palette")) {
                 Log.guard("Palette", "master palette", () -> MasterPalette.install(classLoader));
             }

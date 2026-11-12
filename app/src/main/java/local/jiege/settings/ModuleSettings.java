@@ -133,6 +133,19 @@ public final class ModuleSettings {
     /** Normal-mode 25MP: relaxed lux / ISO / thermal gates and decision tree (applies after the camera restarts). */
     public static final String UNLOCK_25MP = "unlock_25mp";
 
+    /**
+     * 调色盘 (colour palette) as a whole: the stock photo / portrait palette unlocked through the
+     * feature key, and the module's own palette entry on master, POP, video and the GR page.
+     *
+     * <p>On by default, because the entry only ever adds a button of its own; off means every gate
+     * that was answered for it stays at its stock answer, so the camera looks like a stock X8U
+     * again (no palette anywhere). It does not touch the gallery's 色彩风格 page, which still
+     * re-edits photos that already carry palette data.
+     *
+     * <p>Read when the camera process starts, so a change applies to the next camera launch.
+     */
+    public static final String PALETTE = "palette";
+
     /** 哈苏超清: filters and palette (menu entries and the palette capture / preview path). */
     public static final String HIGH_PIXEL_EFFECTS = "high_pixel_effects";
 
@@ -249,6 +262,7 @@ public final class ModuleSettings {
                 // The 200MP readout this switch unlocks does not exist on PKJ110, so PMA110 only.
                 return isPma110();
             case HIGH_PIXEL_EFFECTS:
+            case PALETTE:
             case SHUTTER_IN_SILENT:
             case SHUTTER_IN_VIBRATE:
             case MASTER_EFFECT_NEON:

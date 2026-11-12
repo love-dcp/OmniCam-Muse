@@ -4,7 +4,9 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Settings;
 import local.jiege.hook.x10.PaletteFeatureSwitch;
+import local.jiege.settings.ModuleSettings;
 
 /**
  * Brings the Hasselblad HI-RES entry ("哈苏超清", the {@code high_pixel_mode}) back on PKJ110.
@@ -60,6 +62,15 @@ public final class HighPixelSupport {
         "com.oplus.high_pixel.global.ev.support",
     };
 
+    /**
+     * The two entries above that only exist for the palette. They are answered true so the hi-res
+     * effect panel has a palette page, which means they also answer for photo and portrait mode --
+     * that is where the stock palette entry comes from on this platform. With 调色盘 switched off in
+     * the settings they keep their stock (false) answer and the palette is gone everywhere.
+     */
+    private static final String PALETTE_SUPPORT = "com.oplus.feature.color.palette.support";
+    private static final String PALETTE_TEXTURE = "com.oplus.ipu.color.palette.texture.support";
+
     private static final java.util.Set<String> answeredOnce =
         java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
@@ -98,6 +109,11 @@ public final class HighPixelSupport {
         Object key = param.args[0];
         if (!(key instanceof String)) return false;
         if (!HASSELBLAD_HI_RES.equals(key) && java.util.Arrays.asList(X9U_ONLY).indexOf(key) < 0) return false;
+        if ((PALETTE_SUPPORT.equals(key) || PALETTE_TEXTURE.equals(key))
+                && !Settings.get(ModuleSettings.PALETTE)) {
+            if (answeredOnce.add("off:" + key)) Log.i(TAG, "调色盘 off, " + key + " keeps its stock answer");
+            return false;
+        }
         if (answeredOnce.add(String.valueOf(key))) {
             Log.i(TAG, "answering " + key + " = true");
         }

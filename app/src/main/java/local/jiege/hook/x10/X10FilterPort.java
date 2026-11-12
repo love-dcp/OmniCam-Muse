@@ -54,10 +54,17 @@ public final class X10FilterPort {
         hookFilterMap(classLoader);
         hookDrawing(classLoader);
         hookMasterCard(classLoader);
-        hookPalette(classLoader);
-        hookPaletteColors(classLoader);
-        hookPaletteCapture(classLoader);
-        hookHighPixelPaletteStamp(classLoader);
+        // The palette half of the port follows 调色盘 in the settings: the seek-bar colours, the
+        // per-filter palette recipes, the capture algorithm and the capture stamp all exist to make
+        // the stock palette work on this platform, so they go away together with its entry.
+        if (Settings.get(ModuleSettings.PALETTE)) {
+            hookPalette(classLoader);
+            hookPaletteColors(classLoader);
+            hookPaletteCapture(classLoader);
+            hookHighPixelPaletteStamp(classLoader);
+        } else {
+            XposedBridge.log(TAG + ": palette hooks skipped (" + ModuleSettings.PALETTE + "=false)");
+        }
         hookStyleSwitchCount(classLoader);
         XposedBridge.log(TAG + ": loaded");
     }

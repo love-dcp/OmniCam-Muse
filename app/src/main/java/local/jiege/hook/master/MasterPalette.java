@@ -32,10 +32,12 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Settings;
 import local.jiege.hook.gr.GrEffectValues;
 import local.jiege.hook.gr.GrPanel;
 import local.jiege.hook.gr.GrPort;
 import local.jiege.hook.highpixel.HighPixelFilters;
+import local.jiege.settings.ModuleSettings;
 
 /**
  * Palette entry for master ("professional"), POP ("retroCamera") and video ("commonVideo") on PKJ110.
@@ -533,6 +535,15 @@ public final class MasterPalette {
         return "1".equals(prop(GR_PALETTE_PROP));
     }
 
+    /**
+     * The 调色盘 switch in the module's settings. Off means the color dial is not offered anywhere
+     * and no palette value is written -- but 哈苏超清 still gets its filter row, because that panel
+     * is the only filter UI that mode has (see {@link Session#openFiltersOnly}).
+     */
+    private static boolean paletteEnabled() {
+        return Settings.get(ModuleSettings.PALETTE);
+    }
+
     // --- reflection helpers ------------------------------------------------------------------
 
     private static Object stat(String className, String method, Object... args) {
@@ -839,6 +850,12 @@ public final class MasterPalette {
         Session current = session.get();
         if (current == null) {
             Log.i(TAG, "palette entry: no session yet");
+            return false;
+        }
+        // 调色盘 off: the dial is not offered on any page. 哈苏超清 is the exception that is not
+        // one -- there the same button is the mode's only filter entry, and it opens the row alone.
+        if (!paletteEnabled() && !isHighPixelMode(currentMode())) {
+            Log.i(TAG, "palette off: entry does nothing on " + currentMode());
             return false;
         }
         if (current.shelf != null) {
@@ -1280,6 +1297,10 @@ public final class MasterPalette {
         View previewMask;
         /** 哈苏超清's filter row, drawn separately from the dial (it sits over the picture). */
         View filterRow;
+        /** The row is up on its own, with 调色盘 switched off: no dial, nothing written to the LUT. */
+        boolean filterOnly;
+        /** Ticks in a row that reported another mode while the bare filter row was up. */
+        int foreignModeTicks;
         /** 哈苏超清's borrowed chrome: the back arrow and the 重置 button. */
         View chrome;
         View thumb;
@@ -1318,8 +1339,21 @@ public final class MasterPalette {
             this.entryId = activity.getResources().getIdentifier(
                 "camera_menu_right_enter_button", "id", activity.getPackageName());
             this.button = new ImageView(activity);
-            this.button.setContentDescription("调色板");
-            int icon = activity.getResources().getIdentifier("filter_palette", "drawable", activity.getPackageName());
+            // With 调色盘 off this button is no longer a palette entry on 哈苏超清 - it is the only
+            // way into that mode's filters, so it says 滤镜 and wears the camera's effect icon.
+            boolean paletteOn = paletteEnabled();
+            this.button.setContentDescription(paletteOn ? "调色板" : "滤镜");
+            int icon = activity.getResources().getIdentifier(
+                paletteOn ? "filter_palette" : "effect_style_entry_icon", "drawable",
+                activity.getPackageName());
+            if (icon == 0 && !paletteOn) {
+                icon = activity.getResources().getIdentifier(
+                    "effect_style_entry_icon", "drawable", "com.oplus.camera");
+            }
+            if (icon == 0) {
+                icon = activity.getResources().getIdentifier(
+                    "filter_palette", "drawable", activity.getPackageName());
+            }
             if (icon != 0) this.button.setImageResource(icon);
             this.button.setPadding(dp(8), dp(8), dp(8), dp(8));
             this.button.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -1418,10 +1452,26 @@ public final class MasterPalette {
                         // The GR palette stands on the GR rows rather than on a presenter, so the
                         // take-over itself is the write path there.
                         boolean highPixelPage = isHighPixelMode(currentMode());
-                        boolean canWrite = presenter != null || retro || grActive
-                            || (highPixelPage && lut() != null)
+                        // The bare filter row belongs to that page only. currentMode() reads the last
+                        // presenter that still exists, so it can briefly name another page while the
+                        // camera rebuilds one - only two ticks in a row that agree take the row down.
+                        if (filterOnly) {
+                            String seen = currentMode();
+                            if (seen.isEmpty() || isHighPixelMode(seen)) {
+                                foreignModeTicks = 0;
+                            } else if (++foreignModeTicks >= 2) {
+                                Log.i(TAG, "filter entry closed: mode reads " + seen);
+                                hide();
+                            }
+                        }
+                        // 调色盘 off: the class still installs (the 哈苏超清 filter entry lives here),
+                        // but the only page that keeps an entry is that mode's.
+                        boolean paletteOn = paletteEnabled();
+                        boolean canWrite = presenter != null || retro || grActive || filterOnly
+                            || (highPixelPage && (lut() != null || !paletteOn))
                             || (video && lut() != null);
-                        if (anchor != null && canWrite && decor.hasWindowFocus() && !paletteUp) {
+                        if (anchor != null && canWrite && (paletteOn || highPixelPage)
+                            && decor.hasWindowFocus() && !paletteUp) {
                             int[] anchorLoc = new int[2];
                             int[] decorLoc = new int[2];
                             anchor.getLocationOnScreen(anchorLoc);
@@ -1673,6 +1723,8 @@ public final class MasterPalette {
                 decor.removeView(filterRow);
                 filterRow = null;
             }
+            filterOnly = false;
+            foreignModeTicks = 0;
             // A switch that is still sliding must not leave the picture parked off screen.
             View preview = find("gl_root_view");
             if (preview != null && preview.getTranslationX() != 0f) {
@@ -1958,19 +2010,7 @@ public final class MasterPalette {
         View buildHighPixelChrome(int dialTop, int dialPx) {
             FrameLayout frame = new FrameLayout(activity);
 
-            TextView back = new TextView(activity);
-            back.setText("\u2190");
-            back.setTextColor(0xFFFFFFFF);
-            back.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
-            back.setGravity(Gravity.CENTER);
-            GradientDrawable backBackground = new GradientDrawable();
-            backBackground.setShape(GradientDrawable.OVAL);
-            backBackground.setColor(0x66000000);
-            back.setBackground(backBackground);
-            back.setOnClickListener(v -> {
-                Log.i(TAG, "chrome back clicked");
-                hide();
-            });
+            TextView back = backButton();
             FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(
                 dp(40), dp(40), Gravity.TOP | Gravity.START);
             backParams.leftMargin = dp(16);
@@ -1985,12 +2025,88 @@ public final class MasterPalette {
             resetParams.topMargin = dialTop + Math.max(0, (dialPx - dp(56)) / 2);
             frame.addView(reset, resetParams);
 
+            return attachChrome(frame);
+        }
+
+        /** The way back out of the palettes: photo mode's arrow in a dark circle. */
+        TextView backButton() {
+            TextView back = new TextView(activity);
+            back.setText("\u2190");
+            back.setTextColor(0xFFFFFFFF);
+            back.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+            back.setGravity(Gravity.CENTER);
+            GradientDrawable background = new GradientDrawable();
+            background.setShape(GradientDrawable.OVAL);
+            background.setColor(0x66000000);
+            back.setBackground(background);
+            back.setOnClickListener(v -> {
+                Log.i(TAG, "chrome back clicked");
+                hide();
+            });
+            return back;
+        }
+
+        /** With 调色盘 off the dial page has nothing to close but the row, so the arrow is all there is. */
+        View buildFilterChrome() {
+            FrameLayout frame = new FrameLayout(activity);
+            TextView back = backButton();
+            FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(
+                dp(40), dp(40), Gravity.TOP | Gravity.START);
+            backParams.leftMargin = dp(16);
+            backParams.topMargin = dp(34);
+            frame.addView(back, backParams);
+            return attachChrome(frame);
+        }
+
+        View attachChrome(FrameLayout frame) {
             decor.addView(frame, new FrameLayout.LayoutParams(-1, -1));
             // The scrim below takes every touch in this region; a Z above it puts the chrome first
             // in the touch dispatch (the camera's decor sorts children by Z once one has any).
             frame.setElevation(dp(2));
             decor.bringChildToFront(frame);
             return frame;
+        }
+
+        /**
+         * The click-catcher over the picture. With {@code swipe} the same region also switches
+         * filters - a horizontal drag over the picture is how photo mode picks one - and a tap still
+         * closes the panel; without it, any tap there closes.
+         */
+        View previewScrim(boolean swipe) {
+            View view = new View(activity);
+            view.setBackgroundColor(0x01000000);
+            view.setClickable(true);
+            if (!swipe) {
+                view.setOnClickListener(v -> hide());
+                return view;
+            }
+            view.setOnTouchListener(new View.OnTouchListener() {
+                private float downX;
+                private float downY;
+
+                @Override public boolean onTouch(View v, MotionEvent event) {
+                    switch (event.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            downX = event.getX();
+                            downY = event.getY();
+                            return true;
+                        case MotionEvent.ACTION_UP:
+                            float dx = event.getX() - downX;
+                            float dy = event.getY() - downY;
+                            if (Math.abs(dx) > dp(36) && Math.abs(dx) > Math.abs(dy)) {
+                                Log.i(TAG, "swipe " + (dx < 0 ? "next" : "prev") + " dx=" + (int) dx);
+                                slideSwitch(dx < 0 ? 1 : -1);
+                            } else if (Math.abs(dx) < dp(12) && Math.abs(dy) < dp(12)) {
+                                Log.i(TAG, "scrim tap");
+                                hide();
+                            }
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+            return view;
         }
 
         void disableTouch(View view) {
@@ -2543,9 +2659,59 @@ public final class MasterPalette {
             hide();
         }
 
+        /**
+         * The 哈苏超清 entry with 调色盘 switched off: the filter row, and nothing else.
+         *
+         * <p>That row is this mode's only filter UI. The camera builds no effect panel there
+         * ({@code CaptureParams.W3} is never called, both {@code l2} views stay 0x0), so the module
+         * drew the row inside its palette page - and taking the whole page down with the palette
+         * also took the filters with it. Here the row is placed exactly where it sits in the dial
+         * page (inside the preview card, just above the shutter), with the same swipe-to-switch
+         * gesture on the picture above it. No dial, no 影调/饱和度 readout, no 重置, and none of the
+         * LUT book-keeping the dial page needs: with the palette off the shot keeps whatever the
+         * filter does on its own.
+         */
+        void openFiltersOnly() {
+            View filterBar = HighPixelFilters.panel(activity, null);
+            if (filterBar == null) {
+                Log.i(TAG, "filter entry: no row (" + HighPixelFilters.describe() + ")");
+                return;
+            }
+            int filterBarH = HighPixelFilters.panelHeight(activity);
+            View card = find("frame_layout");
+            int frameBottom = card != null && card.getHeight() > 0
+                ? screenTop(card) + card.getHeight() : decor.getHeight() - dp(500);
+            int barTop = Math.max(dp(100), frameBottom - dp(HIGHPIXEL_FILTER_BOTTOM_DP) - filterBarH);
+            FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, filterBarH, Gravity.TOP);
+            barParams.leftMargin = dp(4);
+            barParams.rightMargin = dp(4);
+            barParams.topMargin = barTop;
+            decor.addView(filterBar, barParams);
+            decor.bringChildToFront(filterBar);
+            shelf = filterBar;
+            filterOnly = true;
+
+            int scrimBottom = Math.max(dp(80), barTop - dp(6));
+            View scrimView = previewScrim(true);
+            decor.addView(scrimView, new FrameLayout.LayoutParams(-1, scrimBottom, Gravity.TOP));
+            scrim = scrimView;
+
+            chrome = buildFilterChrome();
+            Log.i(TAG, "filter-only entry: row at " + barTop + " (调色盘 off)");
+        }
+
         void open() {
             if (shelf != null) {
                 hide();
+                return;
+            }
+            // 调色盘 off: no dial page anywhere. 哈苏超清 still needs its filter row -- that panel
+            // is the mode's only filter UI -- so it opens the row alone, with no dial, readout or
+            // 重置 and nothing written to the LUT manager.
+            if (!paletteEnabled()) {
+                if (isHighPixelMode(currentMode())) openFiltersOnly();
+                else Log.i(TAG, "palette off: no panel on " + currentMode());
                 return;
             }
             boolean retro = retroOpen;
@@ -2766,43 +2932,7 @@ public final class MasterPalette {
                 if (highPixelBarTop > 0) {
                     scrimBottom = Math.max(dp(80), Math.min(scrimBottom, highPixelBarTop - dp(6)));
                 }
-                View scrimView = new View(activity);
-                scrimView.setBackgroundColor(0x01000000);
-                scrimView.setClickable(true);
-                if (highPixel && filterBar != null) {
-                    // Photo mode switches filters by swiping the picture above the card, not by
-                    // touching the card itself - and the bottom strip, where the card and the dots
-                    // sit, does not switch at all. The scrim is that region, so the swipe lives
-                    // here: horizontal drags pick the next/previous filter, taps still close.
-                    scrimView.setOnTouchListener(new View.OnTouchListener() {
-                        private float downX;
-                        private float downY;
-
-                        @Override public boolean onTouch(View v, android.view.MotionEvent event) {
-                            switch (event.getActionMasked()) {
-                                case android.view.MotionEvent.ACTION_DOWN:
-                                    downX = event.getX();
-                                    downY = event.getY();
-                                    return true;
-                                case android.view.MotionEvent.ACTION_UP:
-                                    float dx = event.getX() - downX;
-                                    float dy = event.getY() - downY;
-                                    if (Math.abs(dx) > dp(36) && Math.abs(dx) > Math.abs(dy)) {
-                                        Log.i(TAG, "swipe " + (dx < 0 ? "next" : "prev") + " dx=" + (int) dx);
-                                        slideSwitch(dx < 0 ? 1 : -1);
-                                    } else if (Math.abs(dx) < dp(12) && Math.abs(dy) < dp(12)) {
-                                        Log.i(TAG, "scrim tap");
-                                        hide();
-                                    }
-                                    return true;
-                                default:
-                                    return true;
-                            }
-                        }
-                    });
-                } else {
-                    scrimView.setOnClickListener(v -> hide());
-                }
+                View scrimView = previewScrim(highPixel && filterBar != null);
                 decor.addView(scrimView, new FrameLayout.LayoutParams(-1, Math.max(dp(1), scrimBottom), Gravity.TOP));
                 scrim = scrimView;
                 // Photo mode's chrome around the dial: the back arrow and 重置. Added after the

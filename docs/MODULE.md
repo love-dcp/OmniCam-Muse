@@ -2,6 +2,21 @@
 
 Find X9 Ultra（PMA110，相机 7.006.103）上各项功能的原理与涉及文件。配置类改动在 `module/`，钩子在 `app/src/main/java/local/jiege/hook/`。设备排查方法见 [DEV_NOTES.md](DEV_NOTES.md)。
 
+## 调色盘总开关
+
+设置页「拍摄 → 调色盘」（`ModuleSettings.PALETTE`，默认开）是相机侧调色盘的唯一开关。关掉后相机里不再出现任何调色盘入口、`paletteMode()` 一律回到原厂答案（X8U 为 false）。改动在相机进程启动时读取，设置页保存时已经 `AppRestart.stopCamera()`，下次打开相机生效。
+
+调色盘在四处被打开，关的时候必须一起管住，漏一处就会“关了还在”：
+
+1. `x10/PaletteFeatureSwitch`：在 `CameraConfig.d` 回答 `com.oplus.feature.color.palette.support`（拍照/人像门的唯一活口）。
+2. `highpixel/HighPixelSupport`：`X9U_ONLY` 里的 `com.oplus.feature.color.palette.support` 和 `com.oplus.ipu.color.palette.texture.support`。这两个本来是给哈苏超清面板用的，但同一份 `CameraConfig` 缓存对拍照/人像一起生效——第一版开关只关了 1、3、4，调色盘仍在，真凶就是这里。
+3. `master/MasterPalette`：模块自建的调色盘入口（大师、POP、视频、理光 GR、哈苏超清）。这个类**照旧安装**——哈苏超清那一页的滤镜行画在它的面板里，见下面「关掉调色盘后的哈苏超清滤镜」。
+4. `x10/X10FilterPort`：`PaletteSeekbarColors`、`PaletteColors.hasPalette`（强制 true）、调色盘拍摄算法注入、`mbPaletteEnable` 盖章。
+
+关掉后 `MasterPalette` 里只有哈苏超清那一页还留入口：`open()` 先看开关，关闭时调 `openFiltersOnly()` 只画滤镜行（无圆盘、无影调/饱和度读出、无重置、不写 LUT 管理器），其它页面一律不弹。入口按钮的图标与无障碍名也随开关切换（开＝调色板图标/「调色板」，关＝相机效果图标/「滤镜」）。`filterOnly` 状态下 `canWrite` 恒真，靠「连续两次读到别的模式」或相机自身的点击（`onForeignClick`）收起，不能用 `currentMode()` 单次判定——它返回的是最后一个还活着的 presenter 的模式名，切换瞬间会短暂指错页。
+
+`persist.omnicam.aura.masterpalette=0` 仍是调试用的硬关，与设置开关取“与”。相册「色彩风格」不受这个开关影响：它只决定相机能不能产生调色盘数据，已有调色盘数据的照片照样可以重新编辑。
+
 ## 相册调色盘
 
 相册（17.10.7）的“色彩风格”页（风格列表、调色盘面板、按照片 `filter.info` 换风格）有四处：
@@ -244,6 +259,12 @@ chrome 这一层要压过 scrim：两者都是 decor 的直接子 View，只按�
 还有一处：`MasterPalette.open()` 的页面类型由 `stacked` 决定，而调色盘的 pro presenter 是相机第一次打开调色盘时才建的——同一个按钮“第一次是好页、之后都变成没有滤镜行的 master 页”。所以 `highPixel` 必须先把这个 presenter 置空（`if (highPixel) presenter = null;`），恒定走 shelf 页、经 LUT 管理器写影调与饱和度，页面才稳定。版式与页面类型是两回事：`stacked = retro || (presenter == null && !highPixel)`——哈苏超清即使没有 presenter 也用与照片模式相同的 lifted 版式，只有 POP 和视频页继续 docked（它们的预览卡片下方没有位置，抬控制栏会把快门压到滤镜条上）。
 
 滤镜序号有两套：相机 bean 的下标与 `FilterPresenter.types()` 不是同一套（差一位）。`read()` 只在用户还没点选过（`current < 0`）时才用相机的当前索引，否则界面高亮与实际生效的滤镜会错开。
+
+### 入口：只有一个，且与调色盘开关解耦
+
+这一页原本有「滤镜」和「调色盘」两个按钮，点哪个都是同一个面板（滤镜行＋圆盘），于是把滤镜按钮砍掉、只留调色盘那个（`HighPixelEffects.forceShow()` 把相机的 `camera_menu_right_enter_button` 设成 INVISIBLE 当布局锚点，图标由 `MasterPalette` 自绘）。代价是设置页「调色盘」总开关一关，连 `MasterPalette` 都不再安装，**这一页就一个入口都不剩**，滤镜也就调不出来了。
+
+现在两边分开：`MasterPalette` 无条件安装，`PALETTE` 只决定 `open()` 开哪一页——开着是圆盘＋滤镜行的完整页，关着是 `openFiltersOnly()` 的纯滤镜行（位置与完整页一致：卡片内、快门上方 78dp；画面上方的点击层负责左右划换滤镜、点一下收起；左上角留返回箭头）。纯滤镜行不写任何 LUT、不改控制栏、不遮预览，所以拍摄与原来一致（滤镜走相机自己的 filter 节点与 `HighPixelFilters` 的 apply，和调色盘无关）。
 
 ### 预览
 
