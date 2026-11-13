@@ -9,6 +9,7 @@
 // files/jiege/mastercolor/off exists.
 // Offsets are for PMA110 Camera 7.006.77 (libAlgoInterface.so / libBasicTonePhoto*.so).
 #include <android/log.h>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
@@ -108,7 +109,24 @@ bool isGrFrame(void *frame) {
     // tell a GR frame apart, so none is claimed (the GR LUT tree is not swapped).
     if (!getSettingInt) return false;
     void *settings = *reinterpret_cast<void **>(static_cast<char *>(frame) + 0x8110);
-    return getSettingInt(settings, &kGrSizeKey, 0) == 63;
+    int size = getSettingInt(settings, &kGrSizeKey, 0);
+    // One line per distinct value: this is the number the whole GR colour path hangs on, and it is
+    // the first thing to look at when GR captures look like plain master ones.
+    static std::atomic<int> lastSize{-1};
+    if (size != lastSize.load(std::memory_order_relaxed)) {
+        lastSize.store(size, std::memory_order_relaxed);
+        __android_log_print(ANDROID_LOG_INFO, kTag, "gr_effect_size=%d gr=%d", size, size == 63 ? 1 : 0);
+    }
+    return size == 63;
+}
+
+// One line per distinct capture mode, so a capture can be told apart: GR, master, or neither.
+void noteCaptureMode(uint32_t mode, bool gr, bool master) {
+    static std::atomic<uint32_t> last{0xffffffffu};
+    if (mode == last.load(std::memory_order_relaxed)) return;
+    last.store(mode, std::memory_order_relaxed);
+    __android_log_print(ANDROID_LOG_INFO, kTag, "capture mode=%u gr=%d master=%d", mode,
+                        gr ? 1 : 0, master ? 1 : 0);
 }
 
 void getLmtParams(void *parameters, void *frame, int stage) {
@@ -118,6 +136,7 @@ void getLmtParams(void *parameters, void *frame, int stage) {
     profile.profile = gr ? kGr : kHost;
     uint32_t mode = *reinterpret_cast<uint32_t *>(static_cast<char *>(frame) + 0x18);
     profile.master = !gr && mode == kMasterCaptureMode;
+    noteCaptureMode(mode, gr, profile.master);
     std::string look;
     float exposureEv = 0, toneWeight = 1, colourWeight = 1;
     std::array<float, 4> param{NAN, NAN, NAN, NAN};

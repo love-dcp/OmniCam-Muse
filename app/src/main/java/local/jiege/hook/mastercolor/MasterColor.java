@@ -155,6 +155,15 @@ public final class MasterColor {
         Log.guard(TAG, "master colour preview LUT", () -> hookPreviewLut(classLoader));
         Log.guard(TAG, "master colour preview results", MasterColor::hookResults);
         Log.guard(TAG, "master colour mode", () -> hookModeSwitch());
+        // Write the look file now, from the settings alone, instead of waiting for the first
+        // preview table load or capture result: the native capture half reads that file, and a
+        // master mode whose preview never calls Lut3d.load would otherwise keep the default look
+        // (or a stale one) no matter what was picked in the settings app. Also prints where the
+        // settings came from, so "the look does nothing" is answerable from a log.
+        Log.guard(TAG, "master colour settings", () -> {
+            Log.i(TAG, Settings.describe());
+            syncSetting();
+        });
         Log.i(TAG, "installed");
     }
 

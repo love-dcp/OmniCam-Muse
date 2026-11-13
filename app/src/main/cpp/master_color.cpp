@@ -392,6 +392,19 @@ bool masterColorLook(std::string &look, float &exposureEv, float &toneWeight, fl
         while (length > 0 && (buf[length - 1] == ' ' || buf[length - 1] == '\r')) length--;
         if (length > 0) look.assign(buf, length);
     }
+    // One line per distinct look. The native half is the only place that can say which table a
+    // capture really used, so "I switched the look and nothing changed" is settled here: no line,
+    // no switch.
+    static std::mutex logMutex;
+    static std::string logged;
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        if (look != logged) {
+            logged = look;
+            __android_log_print(ANDROID_LOG_INFO, kTag, "look=%s (%s)", look.c_str(),
+                                look == "oppo" ? "stock master LMT" : "module look table");
+        }
+    }
     return look != "oppo";
 }
 
