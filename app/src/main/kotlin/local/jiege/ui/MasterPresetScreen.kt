@@ -91,6 +91,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     var favoriteOnly by remember { mutableStateOf(false) }
     var openId by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
+    var proBusy by remember { mutableStateOf(false) }
     var dump by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(revision) {
@@ -148,8 +149,34 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
             padding = padding,
             nestedScrollConnection = nestedScrollConnection,
             busy = busy == open.id,
+            proBusy = proBusy,
             onBack = { openId = null },
             onFavorite = { toggleFavorite(open) },
+            onProRead = {
+                if (!proBusy && busy == null) {
+                    proBusy = true
+                    scope.launch {
+                        val values = withContext(Dispatchers.IO) { readProFromCamera(context) }
+                        proBusy = false
+                        if (values == null) {
+                            Toast.makeText(context, "没有读到相机 Pro 参数：确认相机已在大师 Pro 档", Toast.LENGTH_LONG).show()
+                        } else {
+                            withContext(Dispatchers.IO) {
+                                MasterPresets.library(context).setPro(
+                                    open.id,
+                                    values[DiagnosticsContract.KEY_PRESET_ISO].orEmpty(),
+                                    values[DiagnosticsContract.KEY_PRESET_SHUTTER].orEmpty(),
+                                    values[DiagnosticsContract.KEY_PRESET_EV].orEmpty(),
+                                    values[DiagnosticsContract.KEY_PRESET_FOCUS].orEmpty(),
+                                    values[DiagnosticsContract.KEY_PRESET_WHITE_BALANCE].orEmpty(),
+                                )
+                            }
+                            revision++
+                            Toast.makeText(context, "已把相机当前 Pro 参数抄进这条预设", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            },
             onApply = {
                 busy = open.id
                 scope.launch {
@@ -393,8 +420,10 @@ private fun PresetDetail(
     padding: PaddingValues,
     nestedScrollConnection: NestedScrollConnection,
     busy: Boolean,
+    proBusy: Boolean,
     onBack: () -> Unit,
     onFavorite: () -> Unit,
+    onProRead: () -> Unit,
     onApply: () -> Unit,
 ) {
     val images = preset.images()
@@ -631,6 +660,51 @@ private fun PresetDetail(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 10.dp),
             )
         }
+        item(key = "pro-title") {
+            Text(
+                text = "Pro 参数",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MiuixTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 8.dp),
+            )
+        }
+        item(key = "pro1") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                ParamTile(label = "ISO", value = preset.iso.ifEmpty { "—" }, modifier = Modifier.weight(1f))
+                ParamTile(label = "快门", value = preset.shutter.ifEmpty { "—" }, modifier = Modifier.weight(1f))
+                ParamTile(label = "EV", value = preset.exposureCompensation.ifEmpty { "—" }, modifier = Modifier.weight(1f))
+            }
+        }
+        item(key = "pro2") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                ParamTile(label = "对焦 AF", value = preset.focus.ifEmpty { "—" }, modifier = Modifier.weight(1f))
+                ParamTile(label = "白平衡", value = preset.whiteBalance.ifEmpty { "—" }, modifier = Modifier.weight(1f))
+            }
+        }
+        item(key = "pro-read") {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 10.dp)) {
+                TextButton(
+                    text = if (proBusy) "读取中" else "读取相机当前 Pro 参数",
+                    enabled = !proBusy && !busy,
+                    onClick = onProRead,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "先在大师 Pro 档把 ISO / 快门 / EV / 对焦 / 白平衡调好，再点这里抄进这条预设；" +
+                        "之后写入时这五项会一起下发。空着表示不管这一项。",
+                    fontSize = 11.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
+                )
+            }
+        }
         item(key = "apply") {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 18.dp)) {
                 TextButton(
@@ -772,7 +846,7 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset): Pr
             // 这样用户选中它时相机自己会把滤镜切过去。
             renamed != null -> {
                 args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
-                args.putString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE, renamed.id)
+                args.putString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE, FilterAliases.filterTypeOf(renamed.id))
                 hint = "「$filter」在本机叫「${renamed.title}」，已把参数绑到该滤镜并新建预设「${preset.name}」"
             }
             // 本机确实没有这个滤镜：参数写到「标准」上，落一条同名预设承载这套参数。
@@ -782,6 +856,12 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset): Pr
             }
         }
     }
+    // 大师 Pro 档的拍摄参数：预设里写了哪几项就下发哪几项，没写的保持相机当前值。
+    if (preset.iso.isNotEmpty()) args.putString(DiagnosticsContract.KEY_PRESET_ISO, preset.iso)
+    if (preset.shutter.isNotEmpty()) args.putString(DiagnosticsContract.KEY_PRESET_SHUTTER, preset.shutter)
+    if (preset.exposureCompensation.isNotEmpty()) args.putString(DiagnosticsContract.KEY_PRESET_EV, preset.exposureCompensation)
+    if (preset.focus.isNotEmpty()) args.putString(DiagnosticsContract.KEY_PRESET_FOCUS, preset.focus)
+    if (preset.whiteBalance.isNotEmpty()) args.putString(DiagnosticsContract.KEY_PRESET_WHITE_BALANCE, preset.whiteBalance)
     // 柔光「无」也要下发：相机里这是四档的第 0 档，不下发就等于保持上一次的档位，
     // 写完之后效果栏还停在「强」上 —— 用户看到的就是「参数对不上」。
     if (preset.softLight.isNotEmpty()) {
@@ -797,6 +877,31 @@ private class PresetPlan(val args: Bundle, val hint: String)
 private fun filterRows(context: Context): List<local.jiege.settings.MasterFilterStore.Row>? = try {
     MasterFilters.store(context).rows()
 } catch (_: Throwable) {
+    null
+}
+
+/**
+ * 读相机当前的 Pro 参数（ISO / 快门 / EV / 对焦 / 白平衡），返回「设置侧键 → 相机里的值」。
+ * 读不到（相机没开、没在大师 Pro 档）返回 null。
+ */
+private fun readProFromCamera(context: Context): Map<String, String>? = try {
+    val args = Bundle().apply {
+        putString(DiagnosticsContract.KEY_PRESET_ACTION, DiagnosticsContract.ACTION_PRO_READ)
+    }
+    val result = context.contentResolver.call(
+        Uri.parse("content://" + DiagnosticsContract.CAMERA_AUTHORITY),
+        DiagnosticsContract.METHOD_APPLY_PRESET, null, args,
+    )
+    val text = result?.getString(DiagnosticsContract.KEY_PRO_RESULT).orEmpty()
+    if (text.isBlank()) {
+        null
+    } else {
+        text.lines().mapNotNull { line ->
+            val eq = line.indexOf('=')
+            if (eq <= 0) null else line.substring(0, eq).trim() to line.substring(eq + 1).trim()
+        }.toMap()
+    }
+} catch (_: Exception) {
     null
 }
 
@@ -839,6 +944,15 @@ private fun omasterJsonToText(json: String): String {
         "@string/param_sharpness" to 10,
         "@string/param_vignette" to 11,
     )
+    // Pro 档的五项：OMaster 那边叫什么没有准数，常见写法都收一遍，认到哪个算哪个。
+    val proLabels = mapOf(
+        "@string/param_iso" to 17, "@string/param_iso_value" to 17,
+        "@string/param_shutter" to 18, "@string/param_shutter_speed" to 18,
+        "@string/param_exposure_time" to 18,
+        "@string/param_ev" to 19, "@string/param_exposure_compensation" to 19,
+        "@string/param_focus" to 20, "@string/param_focus_mode" to 20, "@string/param_af" to 20,
+        "@string/param_wb" to 21, "@string/param_white_balance" to 21,
+    )
     val root = JSONObject(json)
     val presets = root.optJSONArray("presets") ?: return ""
     val out = StringBuilder("v2\n")
@@ -846,7 +960,7 @@ private fun omasterJsonToText(json: String): String {
         val preset = presets.optJSONObject(i) ?: continue
         if (preset.optString("name").startsWith("_")) continue
         val fields = arrayOf("", "import_${i + 1}", preset.optString("name"), preset.optString("author"),
-            "", "", "", "", "", "", "", "", "", "", "0", "", "")
+            "", "", "", "", "", "", "", "", "", "", "0", "", "", "", "", "", "", "")
         var tips = ""
         val sections = preset.optJSONArray("sections")
         if (sections != null) {
@@ -854,7 +968,8 @@ private fun omasterJsonToText(json: String): String {
                 val items = sections.optJSONObject(s)?.optJSONArray("items") ?: continue
                 for (k in 0 until items.length()) {
                     val item = items.optJSONObject(k) ?: continue
-                    val column = labels[item.optString("label")] ?: continue
+                    val label = item.optString("label")
+                    val column = labels[label] ?: proLabels[label] ?: continue
                     fields[column] = item.optString("value")
                 }
             }

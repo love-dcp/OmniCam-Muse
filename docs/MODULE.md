@@ -296,6 +296,31 @@ item.e = value;  数字文本 = h(value);  v.a(value, key);  k2(true);
 
 ⚠️ 诊断动作 `action=barprobe`（`mapBar`/`stepMap`）会把共享刻度条连续推 9 个索引。如果这时"当前选中项"是暗角，每推一次就是一次暗角开关写入，相机每次都给触感反馈，表现出来就是**手机不停振动**。已在 `stepMap` 里先把 `menu.j` 钉到标定目标（影调）上，但这类动作别连发。
 
+## 大师预设落库：JSON 只是镜像，参数在 MMKV（r293–r298，2026-11-13）
+
+「导入成功但预设里没有参数」的真因：预设的**名字/滤镜类型/九项效果值各有一套键**，都在 DataManager（MMKV），`camera_preset/master_preset_storage.json` 只有自定义条目、是启动时的镜像。只写 JSON 会得到一张名字对、参数全 0 的卡。
+
+| 内容 | 键 | 说明 |
+|---|---|---|
+| 有哪些自定义预设 | `key_master_mode_custom_preset_ids` | `[0,1,2]`，相机每建一条就追加一个编号 |
+| 名字 | `key_master_mode_custom_preset_name_custom_N` | 预设条 UI 显示的就是这一份 |
+| 滤镜类型 | `key_master_mode_custom_preset_filter_type_custom_N` | **不是 LUT 文件名**：`kodak.cube.rgb.bin` → `kodak`、`qing_tou.bin` → `qing_tou`、`LUT65_A01.cube.rgb.bin` → `LUT65_A01` |
+| 九项效果值 | `key_master_mode_effect_{filter_intensity,soft_light,soft_light_type,contrast,saturation,cold_warm,cyan_magenta,sharpness,vignette}_custom_N` | `soft_light_type` 是字符串（0=`default`、柔美=`portrait.softlight.roumei`、梦幻=`portrait.softlight.menghuan`）；暗角仍是 0/101 |
+| 同上的副本 | 前缀换成 `custom_base_N` | 「重置」读这一份；新的预设要一起写，否则重置把参数清成 0 |
+| Pro 档索引 | `key_professional_{filter_intensity_index,soft_light_index,soft_light_type}_custom_N` | 与上面同步写 |
+
+所以 `MasterPresetCreate.create()` 的顺序是：**按名字找现有预设（同名全部更新，旧的重复卡一并修）→ 没有才登记编号 → 写整套效果键 → 用同一个键写 JSON**。登记优先交给相机的 `addCustomPreset`（编号和 ids 由它维护），相机不在前台时自己挑空号并写 ids 兜底。以前每次创建又调一次 `addCustomPreset`，于是每导一次就多一张同名空卡。
+
+滤镜名字资源按中文拼音独立命名（菲林=`camera_filter_feilin`、反差黑白=`camera_filter_fanchaheibai`），和 LUT 文件名没有对应关系，所以绑定滤镜时 `filterNameResEntry` 留空，只有 `filterType` 是准的。
+
+### Pro 参数跟着预设走（ISO / 快门 / EV / 对焦 / 白平衡）
+
+相机的 Pro 参数在 `m9.f` 的静态 preference 上：`y0`=ISO、`A0`=曝光时间、`z0`=曝光补偿、`B0`=对焦模式、`w0`=白平衡（另有 `x0`=色调）。值都是**字符串，格式由相机决定**，模块只搬运不解释：预设库末尾五列存什么就写什么。
+
+- 写：`DataStore.put(…)` 写这五个键；已经在 Pro 档时调 `CaptureParamPresenter(df.r).C2(true)` 让参数面板重读，不在 Pro 档就只写数据层（进档时相机自己读）。**模块不替用户切档**。
+- 抄：设置页「读取相机当前 Pro 参数」走 `action=proread`，把相机里现在的值原样写进这条预设——值格式不用猜。
+- 面板实例从档位按钮监听器 `df.b`（字段类型 `df.r`）里捞，见 `MasterPresetApply.installProPresenter`；`CaptureParamView.k` 是「在不在 Pro 档」。
+
 ## 哈苏超清（高像素模式）的滤镜
 
 哈苏超清与普通高像素是同一个模式（`high_pixel_mode`，应用侧键 `highPixel`），只差 `hasselblad.super.definition.support`；X8U 本来就能出 50 MP，缺的是这个模式的滤镜、调色盘与柔光入口。

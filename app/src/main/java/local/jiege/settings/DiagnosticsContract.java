@@ -66,6 +66,22 @@ public final class DiagnosticsContract {
     public static final String KEY_PRESET_CREATE = "createPreset";
     /** 诊断：只新建自定义预设（不碰效果栏），用来核对落库那一段。 */
     public static final String ACTION_CREATE = "createpreset";
+    /**
+     * 大师 Pro 参数（ISO / 快门 / 曝光补偿 / 对焦模式 / 白平衡）。
+     *
+     * <p>相机自己的值，原样搬运：预设库里的这五列是怎么存的，就怎么发给相机。写的时候落到
+     * {@code m9.f} 的 y0（ISO）、A0（快门）、z0（EV）、B0（对焦）、w0（白平衡）几个 preference 上，
+     * 已经在 Pro 档时再让参数面板重新读一遍。没有下发的项保持相机当前值。
+     */
+    public static final String KEY_PRESET_ISO = "proIso";
+    public static final String KEY_PRESET_SHUTTER = "proShutter";
+    public static final String KEY_PRESET_EV = "proEv";
+    public static final String KEY_PRESET_FOCUS = "proFocus";
+    public static final String KEY_PRESET_WHITE_BALANCE = "proWb";
+    /** 诊断：把相机当前的 Pro 参数读出来（设置页「读取相机 Pro 参数」用它抄一份）。 */
+    public static final String ACTION_PRO_READ = "proread";
+    /** 读出来的 Pro 参数，一行一个：{@code iso=800}、{@code shutter=1/125} … */
+    public static final String KEY_PRO_RESULT = "proValues";
     public static final String KEY_PRESET_RESULT = "result";
     public static final String KEY_PRESET_APPLIED = "applied";
     public static final String KEY_PRESET_ITEMS = "items";

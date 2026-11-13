@@ -60,6 +60,14 @@ public final class XposedHelpers {
         throw new UnsupportedOperationException("offline");
     }
 
+    public static boolean getBooleanField(Object obj, String name) {
+        try {
+            return field(obj.getClass(), name).getBoolean(obj);
+        } catch (IllegalAccessException error) {
+            throw new IllegalAccessError(error.getMessage());
+        }
+    }
+
     public static XC_MethodHook.Unhook findAndHookMethod(Class<?> clazz, String name, Object... args) {
         throw new UnsupportedOperationException("offline");
     }

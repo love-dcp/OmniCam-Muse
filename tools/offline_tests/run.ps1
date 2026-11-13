@@ -27,6 +27,7 @@ $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Refle
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterPresetApply.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterPresetCreate.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterPresets.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterProParams.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/DiagnosticsContract.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Settings.java')
 # FilterGroupInjector reaches the camera through Symbols (DexKit-backed); compile against the DexKit AAR.

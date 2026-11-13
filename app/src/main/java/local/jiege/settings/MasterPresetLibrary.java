@@ -25,10 +25,12 @@ import java.util.Set;
  *
  * <pre>
  * v2
- * p &lt;id&gt; &lt;名称&gt; &lt;作者&gt; &lt;滤镜&gt; &lt;柔光&gt; &lt;影调&gt; &lt;饱和度&gt; &lt;冷暖&gt; &lt;青品&gt; &lt;锐度&gt; &lt;暗角&gt; &lt;建议&gt; &lt;标签&gt; &lt;收藏&gt; &lt;封面&gt; &lt;画廊&gt;
+ * p &lt;id&gt; &lt;名称&gt; &lt;作者&gt; &lt;滤镜&gt; &lt;柔光&gt; &lt;影调&gt; &lt;饱和度&gt; &lt;冷暖&gt; &lt;青品&gt; &lt;锐度&gt; &lt;暗角&gt; &lt;建议&gt; &lt;标签&gt; &lt;收藏&gt; &lt;封面&gt; &lt;画廊&gt; [&lt;ISO&gt; &lt;快门&gt; &lt;EV&gt; &lt;AF&gt; &lt;WB&gt;]
  * </pre>
  *
  * 制表符分隔，空字段表示「不设置」（应用到相机时保持原值）。建议里的换行写成 {@code \n}。
+ * 末尾五列是大师 Pro 参数，缺列/空值都表示「这条预设不管这几项」；值是相机自己的字符串，
+ * 模块不解释它（可以用设置页的「读取相机 Pro 参数」直接从相机抄一份）。
  * 纯 Java、不依赖 Android，可离线测试（tools/offline_tests）。
  */
 public final class MasterPresetLibrary {
@@ -61,6 +63,16 @@ public final class MasterPresetLibrary {
         public Integer sharpness;
         /** 暗角：开 / 关。 */
         public String vignette = "";
+        /**
+         * 大师 Pro 参数（ISO、快门、曝光补偿、对焦模式、白平衡），存<b>相机自己的字符串</b>
+         * （例如 ISO 存 "800"、快门存 "1/125"、白平衡存 "5200"）——格式由相机决定，这里原样搬运，
+         * 不猜单位。空表示这条预设不管这一项（保持相机当前值）。
+         */
+        public String iso = "";
+        public String shutter = "";
+        public String exposureCompensation = "";
+        public String focus = "";
+        public String whiteBalance = "";
         /** 拍摄建议：环境建议 / 场景推荐 / 拍摄要点。 */
         public String tips = "";
         public String tags = "";
@@ -104,6 +116,23 @@ public final class MasterPresetLibrary {
 
         public boolean vignetteOn() {
             return "开".equals(vignette.trim());
+        }
+
+        /** 有没有 Pro 参数（ISO / 快门 / EV / 对焦 / 白平衡）。 */
+        public boolean hasPro() {
+            return !iso.isEmpty() || !shutter.isEmpty() || !exposureCompensation.isEmpty()
+                || !focus.isEmpty() || !whiteBalance.isEmpty();
+        }
+
+        /** Pro 参数摘要，例如「ISO 800 · 1/125 · EV -0.3 · AF AF-C · WB 5200」。 */
+        public String proSummary() {
+            StringBuilder out = new StringBuilder();
+            append(out, "ISO", iso.isEmpty() ? null : iso);
+            append(out, "快门", shutter.isEmpty() ? null : shutter);
+            append(out, "EV", exposureCompensation.isEmpty() ? null : exposureCompensation);
+            append(out, "AF", focus.isEmpty() ? null : focus);
+            append(out, "WB", whiteBalance.isEmpty() ? null : whiteBalance);
+            return out.toString();
         }
 
         /** 一行参数摘要，用于列表：影调 -35 · 饱和 +19 · 冷暖 -5 … */
@@ -186,6 +215,12 @@ public final class MasterPresetLibrary {
                 continue;
             }
             preset.favorite = existing.favorite;
+            // Pro 参数是用户在相机里抄回来的，内置数据里没有这一项 —— 刷新内置数据时保留。
+            preset.iso = existing.iso;
+            preset.shutter = existing.shutter;
+            preset.exposureCompensation = existing.exposureCompensation;
+            preset.focus = existing.focus;
+            preset.whiteBalance = existing.whiteBalance;
             if (!row(existing).equals(row(preset))) updated++;
             presets.set(presets.indexOf(existing), preset);
         }
@@ -199,12 +234,29 @@ public final class MasterPresetLibrary {
      */
     public void reseed(String builtinText) {
         List<String> favorites = new ArrayList<>();
-        for (Preset preset : presets) if (preset.favorite) favorites.add(preset.id);
+        // 用户在相机里抄回来的 Pro 参数不在内置数据里，重建时按 id 还原。
+        java.util.Map<String, String[]> pro = new java.util.HashMap<>();
+        for (Preset preset : presets) {
+            if (preset.favorite) favorites.add(preset.id);
+            if (preset.hasPro()) {
+                pro.put(preset.id, new String[]{preset.iso, preset.shutter, preset.exposureCompensation,
+                    preset.focus, preset.whiteBalance});
+            }
+        }
         for (int i = presets.size() - 1; i >= 0; i--) {
             if (presets.get(i).id.startsWith("omaster")) presets.remove(i);
         }
         importText(builtinText);
-        for (Preset preset : presets) preset.favorite = favorites.contains(preset.id);
+        for (Preset preset : presets) {
+            preset.favorite = favorites.contains(preset.id);
+            String[] kept = pro.get(preset.id);
+            if (kept == null) continue;
+            preset.iso = kept[0];
+            preset.shutter = kept[1];
+            preset.exposureCompensation = kept[2];
+            preset.focus = kept[3];
+            preset.whiteBalance = kept[4];
+        }
         save();
     }
 
@@ -214,6 +266,25 @@ public final class MasterPresetLibrary {
         if (preset == null || preset.favorite == on) return;
         preset.favorite = on;
         save();
+    }
+
+    /**
+     * 把一组 Pro 参数写进某条预设（设置页「读取相机 Pro 参数」抄回来时用）。
+     * 值是相机自己的字符串，这里只存不解释。
+     */
+    public void setPro(String id, String iso, String shutter, String ev, String focus, String whiteBalance) {
+        Preset preset = find(id);
+        if (preset == null) return;
+        preset.iso = clean(iso);
+        preset.shutter = clean(shutter);
+        preset.exposureCompensation = clean(ev);
+        preset.focus = clean(focus);
+        preset.whiteBalance = clean(whiteBalance);
+        save();
+    }
+
+    private static String clean(String value) {
+        return value == null ? "" : value.replace('\t', ' ').replace('\n', ' ').trim();
     }
 
     /**
@@ -342,6 +413,12 @@ public final class MasterPresetLibrary {
         preset.favorite = parts.length > 14 && "1".equals(parts[14].trim());
         preset.cover = parts.length > 15 ? unescape(parts[15]) : "";
         preset.gallery = parts.length > 16 ? unescape(parts[16]) : "";
+        // 第 18 列起是 Pro 参数（老数据没有这几列，读成空就是「不管这几项」）。
+        preset.iso = parts.length > 17 ? unescape(parts[17]).trim() : "";
+        preset.shutter = parts.length > 18 ? unescape(parts[18]).trim() : "";
+        preset.exposureCompensation = parts.length > 19 ? unescape(parts[19]).trim() : "";
+        preset.focus = parts.length > 20 ? unescape(parts[20]).trim() : "";
+        preset.whiteBalance = parts.length > 21 ? unescape(parts[21]).trim() : "";
         // 导入图片/压缩包时，二进制里的制表符会被当成分隔符拆出一堆乱码行；
         // 这里按「名字是人看得懂的文字」筛掉，顺带清掉以前写进文件的坏行。
         if (!validText(preset.name, 80) || preset.name.isEmpty()) return null;
@@ -375,11 +452,14 @@ public final class MasterPresetLibrary {
     }
 
     private static String row(Preset preset) {
+        // 末尾五列是 Pro 参数：老版本读的时候看不到它们（列数少就当没有），新版本原样保存。
         return String.join("\t",
             "p", preset.id, escape(preset.name), escape(preset.author), escape(preset.filter), escape(preset.softLight),
             text(preset.tone), text(preset.saturation), text(preset.warmCool), text(preset.cyanMagenta), text(preset.sharpness),
             escape(preset.vignette), escape(preset.tips), escape(preset.tags), preset.favorite ? "1" : "0",
-            escape(preset.cover), escape(preset.gallery));
+            escape(preset.cover), escape(preset.gallery),
+            escape(preset.iso), escape(preset.shutter), escape(preset.exposureCompensation),
+            escape(preset.focus), escape(preset.whiteBalance));
     }
 
     private static String text(Integer value) {

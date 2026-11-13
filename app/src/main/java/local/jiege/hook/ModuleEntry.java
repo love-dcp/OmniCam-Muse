@@ -230,6 +230,8 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
                 Log.guard("MasterPreset", "install", () -> local.jiege.hook.masterfilter.MasterPresetApply.installCamera(classLoader));
                 Log.guard("MasterPreset", "capture params", () -> local.jiege.hook.masterfilter.MasterPresetApply.installCaptureParams(classLoader));
                 Log.guard("MasterPreset", "effect data", () -> local.jiege.hook.masterfilter.MasterPresetApply.installEffectData(classLoader));
+                // 预设里的 Pro 参数（ISO / 快门 / EV / 对焦 / 白平衡）要在 Pro 档里让面板重读一次。
+                Log.guard("MasterPreset", "pro params", () -> local.jiege.hook.masterfilter.MasterPresetApply.installProPresenter(classLoader));
             }
             // MONOPAN 50 / 迫冲: the variant marker the capture pass reads (monopan.cpp).
             if (!Skip.off("monopan")) {

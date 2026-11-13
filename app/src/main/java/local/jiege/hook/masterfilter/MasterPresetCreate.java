@@ -59,16 +59,219 @@ final class MasterPresetCreate {
      * @param loader     相机进程的 ClassLoader
      * @param name       预设名（预设库里的名字）
      * @param extras     这次写入的参数，用来填预设内容
-     * @return 是否新建成功（已有同名预设时返回 false，不重复建）
+     * @return 是否成功（已有同名预设时改为更新它的参数，不重复新建）
      */
     static boolean create(ClassLoader loader, String name, Bundle extras) {
         if (loader == null || name == null || name.isEmpty() || extras == null) return false;
-        int id = persist(loader, name, extras);
-        if (id < 0) return false;
-        // 名字也要写进 DataManager，否则预设列表上显示的还是这个键以前的名字。
-        renameStored("custom_" + id, name);
-        Log.i(TAG, "预设已写入存储：" + name);
+        Symbols symbols = Symbols.get();
+        String filterType = stringOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_TYPE);
+        if (filterType.isEmpty()) filterType = "default";
+
+        // 同名预设已经在相机里：直接更新它，别再建一个（以前每次导入都会多出一张同名的空卡）。
+        java.util.List<String> keys = findAllByName(symbols, loader, name);
+        if (keys.isEmpty()) {
+            String key = register(symbols, loader, name, filterType);
+            if (key == null) {
+                Log.i(TAG, "没有可用的预设编号，跳过：" + name);
+                return false;
+            }
+            keys.add(key);
+        }
+        // 光有 JSON 不够：预设卡片点开后读的是 MMKV 里<b>按预设键分开</b>的那一组效果键，
+        // 没写就是全 0 —— 用户看到的就是「有这个名字的预设，但里面没有参数」。
+        // 同名卡可能不止一张（早期版本重复建过），每一张都写，用户看到的那张才一定有参数。
+        for (String key : keys) {
+            writeValues(key, name, filterType, extras);
+            persist(loader, name, key, extras);
+            Log.i(TAG, "预设已写入：" + name + " -> " + key + "（滤镜 " + filterType + "）");
+        }
         return true;
+    }
+
+    // ---- 预设键 ----------------------------------------------------------------------------------
+
+    /**
+     * 让相机自己分配编号并登记一条自定义预设，返回它的键。
+     *
+     * <p>优先走相机自己的 {@code addCustomPreset}：编号、{@code key_master_mode_custom_preset_ids}
+     * 这些登记动作都是它做的，我们只补参数。相机不在前台（没有 EffectData）时退回到自己挑编号。
+     */
+    private static String register(Symbols symbols, ClassLoader loader, String name, String filterType) {
+        if (symbols == null) return null;
+        java.util.List<Integer> before = customIds(symbols, loader);
+        Object data = MasterPresetApply.effectDataOrNull();
+        if (data != null) {
+            addNow(symbols, data, name, filterType);
+            for (Integer id : customIds(symbols, loader)) {
+                if (!before.contains(id)) {
+                    Log.i(TAG, "相机分配了预设编号 custom_" + id);
+                    return "custom_" + id;
+                }
+            }
+            java.util.List<String> found = findAllByName(symbols, loader, name);
+            if (!found.isEmpty()) return found.get(found.size() - 1);
+        }
+        int id = firstFreeId(before);
+        if (id < 0) return null;
+        Log.i(TAG, "相机没分配编号，自己用 custom_" + id + " 并登记");
+        appendId(symbols, loader, before, id);
+        return "custom_" + id;
+    }
+
+    /** MMKV 里已登记的自定义预设编号（{@code key_master_mode_custom_preset_ids}，形如 "[0,1,2]"）。 */
+    private static java.util.List<Integer> customIds(Symbols symbols, ClassLoader loader) {
+        java.util.List<Integer> ids = new java.util.ArrayList<>();
+        try {
+            Object key = symbols.call("DataKeys.prefs", null, String.class, "key_master_mode_custom_preset_ids");
+            Object raw = DataStore.get(symbols, loader, key, "");
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\d+")
+                .matcher(String.valueOf(raw));
+            while (matcher.find()) ids.add(Integer.valueOf(matcher.group()));
+        } catch (Throwable error) {
+            Log.e(TAG, "读自定义预设编号失败", error);
+        }
+        return ids;
+    }
+
+    /** 相机里所有同名预设的键（按 MMKV 里的名字找）。 */
+    private static java.util.List<String> findAllByName(Symbols symbols, ClassLoader loader, String name) {
+        java.util.List<String> keys = new java.util.ArrayList<>();
+        if (symbols == null) return keys;
+        for (Integer id : customIds(symbols, loader)) {
+            String key = "custom_" + id;
+            if (!name.equals(readString(symbols, loader, "key_master_mode_custom_preset_name_" + key))) continue;
+            Log.i(TAG, "相机里已有同名预设：" + name + " -> " + key);
+            keys.add(key);
+        }
+        return keys;
+    }
+
+    private static String readString(Symbols symbols, ClassLoader loader, String preference) {
+        try {
+            Object key = symbols.call("DataKeys.prefs", null, String.class, preference);
+            Object value = DataStore.get(symbols, loader, key, "");
+            return value == null ? "" : String.valueOf(value);
+        } catch (Throwable error) {
+            return "";
+        }
+    }
+
+    private static int firstFreeId(java.util.List<Integer> used) {
+        for (int id = 0; id < MAX_PRESETS; id++) if (!used.contains(Integer.valueOf(id))) return id;
+        return -1;
+    }
+
+    /** 把新编号写回 ids 列表（相机自己登记失败时的兜底，格式与它自己写的一致："[0,1,2]"）。 */
+    private static void appendId(Symbols symbols, ClassLoader loader, java.util.List<Integer> ids, int id) {
+        StringBuilder text = new StringBuilder("[");
+        for (Integer each : ids) text.append(each).append(',');
+        text.append(id).append(']');
+        putString(symbols, loader, "key_master_mode_custom_preset_ids", text.toString());
+    }
+
+    // ---- 每个预设自己的效果值 ---------------------------------------------------------------------
+
+    /**
+     * 把一组参数写进这个预设键对应的效果值（DataManager → MMKV）。
+     *
+     * <p>相机把效果栏的每个值按<b>预设键</b>分开存：
+     * {@code key_master_mode_effect_<项>_<presetKey>}（例如 saturation → custom_2），
+     * 另有一套 {@code ..._custom_base_<n>} 和 {@code key_professional_*_<presetKey>} 的副本。
+     * 预设卡片选中时，效果栏就是按这一组键恢复的；只写 master_preset_storage.json 的话，
+     * 名字、滤镜都对，参数却全是 0。
+     *
+     * <p>每一项单独 try：某一项类型不对（例如相机把它当字符串存）不能把整组带崩。
+     *
+     * @return 写成功的项数
+     */
+    static int writeValues(String presetKey, String name, String filterType, Bundle extras) {
+        if (presetKey == null || presetKey.isEmpty() || extras == null) return 0;
+        Symbols symbols = Symbols.get();
+        ClassLoader loader = MasterPresetApply.cameraLoader();
+        if (symbols == null || loader == null) return 0;
+
+        int intensity = clamp(intOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_STRENGTH, 100), 0, 100);
+        int softLight = softLightIndex(extras.getString(DiagnosticsContract.KEY_PRESET_SOFT_LIGHT));
+        String softType = softLightType(softLight);
+        int saturation = intOf(extras, DiagnosticsContract.KEY_PRESET_SATURATION, 0);
+        int coldWarm = intOf(extras, DiagnosticsContract.KEY_PRESET_WARM_COOL, 0);
+        int cyanMagenta = intOf(extras, DiagnosticsContract.KEY_PRESET_CYAN_MAGENTA, 0);
+        int sharpness = intOf(extras, DiagnosticsContract.KEY_PRESET_SHARPNESS, 0);
+        int vignette = intOf(extras, DiagnosticsContract.KEY_PRESET_VIGNETTE, 0) >= 50 ? 101 : 0;
+
+        int ok = 0;
+        // 主键（预设自己）：名字、滤镜类型 + 9 项效果值。
+        if (name != null && !name.isEmpty()) ok += putString(symbols, loader, "key_master_mode_custom_preset_name_" + presetKey, name);
+        if (filterType != null && !filterType.isEmpty()) {
+            ok += putString(symbols, loader, "key_master_mode_custom_preset_filter_type_" + presetKey, filterType);
+        }
+        ok += putEffects(symbols, loader, presetKey, intensity, softLight, softType,
+            saturation, coldWarm, cyanMagenta, sharpness, vignette);
+        // 同一套值在 custom_base_<n> 上也存一份：相机「重置」拿的是这一份，留 0 会把参数清掉。
+        if (presetKey.startsWith("custom_")) {
+            ok += putEffects(symbols, loader, "custom_base_" + presetKey.substring("custom_".length()),
+                intensity, softLight, softType, saturation, coldWarm, cyanMagenta, sharpness, vignette);
+        }
+        Log.i(TAG, "预设效果值已写入：" + presetKey + " 共 " + ok + " 项"
+            + "（饱和 " + saturation + " 冷暖 " + coldWarm + " 青品 " + cyanMagenta
+            + " 锐度 " + sharpness + " 强度 " + intensity + " 柔光 " + softLight + "/" + softType
+            + " 暗角 " + vignette + "）");
+        return ok;
+    }
+
+    /** 一整套效果键（主键或 base 键都长一个样）。 */
+    private static int putEffects(Symbols symbols, ClassLoader loader, String presetKey,
+                                  int intensity, int softLight, String softType,
+                                  int saturation, int coldWarm, int cyanMagenta,
+                                  int sharpness, int vignette) {
+        String p = "key_master_mode_effect_";
+        String prof = "key_professional_";
+        int ok = 0;
+        ok += putInt(symbols, loader, p + "filter_intensity_" + presetKey, intensity);
+        ok += putInt(symbols, loader, p + "soft_light_" + presetKey, softLight);
+        ok += putString(symbols, loader, p + "soft_light_type_" + presetKey, softType);
+        ok += putInt(symbols, loader, p + "contrast_" + presetKey, 0);
+        ok += putInt(symbols, loader, p + "saturation_" + presetKey, saturation);
+        ok += putInt(symbols, loader, p + "cold_warm_" + presetKey, coldWarm);
+        ok += putInt(symbols, loader, p + "cyan_magenta_" + presetKey, cyanMagenta);
+        ok += putInt(symbols, loader, p + "sharpness_" + presetKey, sharpness);
+        ok += putInt(symbols, loader, p + "vignette_" + presetKey, vignette);
+        ok += putInt(symbols, loader, prof + "filter_intensity_index_" + presetKey, intensity);
+        ok += putInt(symbols, loader, prof + "soft_light_index_" + presetKey, softLight);
+        ok += putString(symbols, loader, prof + "soft_light_type_" + presetKey, softType);
+        return ok;
+    }
+
+    /**
+     * 柔光档位 → 相机自己的类型串（MMKV 里实测到两个：柔美 roumei、梦幻 menghuan）。
+     * 0 档是 {@code default}；「中」没有单独的类型串，按梦幻的强度档处理。
+     */
+    private static String softLightType(int level) {
+        switch (level) {
+            case 1: return "portrait.softlight.roumei";
+            case 2: return "portrait.softlight.menghuan";
+            case 3: return "portrait.softlight.menghuan";
+            default: return "default";
+        }
+    }
+
+    private static int putInt(Symbols symbols, ClassLoader loader, String preference, int value) {
+        return put(symbols, loader, preference, value);
+    }
+
+    private static int putString(Symbols symbols, ClassLoader loader, String preference, String value) {
+        return put(symbols, loader, preference, value);
+    }
+
+    private static int put(Symbols symbols, ClassLoader loader, String preference, Object value) {
+        try {
+            Object key = symbols.call("DataKeys.prefs", null, String.class, preference);
+            DataStore.put(symbols, loader, key, value);
+            return 1;
+        } catch (Throwable error) {
+            Log.e(TAG, "写 " + preference + " 失败", error);
+            return 0;
+        }
     }
 
     // ---- 名字 ------------------------------------------------------------------------------------
@@ -99,13 +302,22 @@ final class MasterPresetCreate {
 
     // ---- 文件 ------------------------------------------------------------------------------------
 
-    /** 读改写 master_preset_storage.json：追加一个绑标准滤镜、参数取 extras 的预设。返回编号，失败 -1。 */
-    private static int persist(ClassLoader loader, String name, Bundle extras) {
+    /**
+     * 读改写 master_preset_storage.json：写入（或替换）{@code presetKey} 这一条，参数取 extras。
+     *
+     * <p>JSON 是相机启动时重建列表用的镜像，参数也从它读；MMKV 那一组效果键才是日常读写的来源，
+     * 两处都要写。同一个键再导入一次就覆盖，不再新增一条同名的。
+     *
+     * @return 写入的编号，失败 -1
+     */
+    private static int persist(ClassLoader loader, String name, String presetKey, Bundle extras) {
         File file = storageFile(loader);
         if (file == null || !file.isFile()) {
-            Log.i(TAG, "找不到相机预设存储文件，跳过新建");
+            Log.i(TAG, "找不到相机预设存储文件，跳过写 JSON");
             return -1;
         }
+        int id = idOf(presetKey);
+        if (id < 0) return -1;
         try {
             String text = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
             JSONObject root = new JSONObject(text);
@@ -114,24 +326,19 @@ final class MasterPresetCreate {
                 presets = new JSONArray();
                 root.put("presets", presets);
             }
+            JSONObject fresh = content(presets, id, name, extras);
+            boolean replaced = false;
             for (int i = 0; i < presets.length(); i++) {
                 JSONObject preset = presets.optJSONObject(i);
-                if (preset != null && name.equals(preset.optString("presetName"))) {
-                    Log.i(TAG, "预设已存在，不再新建：" + name);
-                    return -1;
-                }
+                if (preset == null || !presetKey.equals(preset.optString("presetKey"))) continue;
+                presets.put(i, fresh);
+                replaced = true;
+                break;
             }
-            int id = nextId(presets);
-            if (id < 0) {
-                Log.i(TAG, "自定义预设已满 " + MAX_PRESETS + " 个，跳过新建");
-                return -1;
-            }
-            presets.put(content(presets, id, name, extras));
+            if (!replaced) presets.put(fresh);
             root.put("timestamp", System.currentTimeMillis());
             write(file, root.toString(2));
-            String bound = stringOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_TYPE);
-            Log.i(TAG, "已新建预设「" + name + "」custom_" + id
-                + "（滤镜 " + (bound.isEmpty() ? "default" : bound) + "）");
+            Log.i(TAG, "JSON 已" + (replaced ? "更新" : "新增") + "：「" + name + "」" + presetKey);
             return id;
         } catch (Throwable error) {
             Log.e(TAG, "写预设存储失败：" + name, error);
@@ -153,15 +360,20 @@ final class MasterPresetCreate {
         preset.put("presetKey", "custom_" + id);
         preset.put("presetName", name);
         if (template == null) {
-            preset.put("filterType", "default");
+            // 没有现成模板时名字资源只能留空：它是按中文名拼音独立命名的（菲林=camera_filter_feilin），
+            // 和 LUT 文件名对不上，猜不出来。预设名另外由 DataManager 提供，卡片显示不受影响。
             preset.put("filterNameResEntry", "camera_filter_none");
-        } else {
-            preset.put("filterType", filterType);
+        }
+        // filterType 是滤镜类型（LUT 文件名去掉扩展名，如 kodak / natural），不是列表里的 id。
+        preset.put("filterType", filterType.isEmpty() ? "default" : filterType);
+        if (template != null) {
             if (preset.optString("filterNameResEntry").isEmpty()) {
                 preset.put("filterNameResEntry", "camera_filter_none");
             }
             Log.i(TAG, "预设「" + name + "」绑到滤镜 " + filterType
                 + "（模板 " + template.optString("presetKey") + "）");
+        } else if (!filterType.isEmpty() && !"default".equalsIgnoreCase(filterType)) {
+            Log.i(TAG, "预设「" + name + "」绑到滤镜 " + filterType + "（无模板，名字资源留空）");
         }
         preset.put("filterIntensity", clamp(intOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_STRENGTH, 100), 0, 100));
         preset.put("softLightIndex", softLightIndex(extras.getString(DiagnosticsContract.KEY_PRESET_SOFT_LIGHT)));
@@ -215,23 +427,14 @@ final class MasterPresetCreate {
         }
     }
 
-    /** 0..19 里第一个没被占用的编号，都占了返回 -1。 */
-    private static int nextId(JSONArray presets) {
-        boolean[] used = new boolean[MAX_PRESETS];
-        for (int i = 0; i < presets.length(); i++) {
-            JSONObject preset = presets.optJSONObject(i);
-            if (preset == null) continue;
-            String key = preset.optString("presetKey");
-            if (!key.startsWith("custom_")) continue;
-            try {
-                int id = Integer.parseInt(key.substring("custom_".length()));
-                if (id >= 0 && id < MAX_PRESETS) used[id] = true;
-            } catch (NumberFormatException ignored) {
-                // 不是我们认识的键，跳过
-            }
+    /** {@code custom_7} → 7；不是自定义键返回 -1。 */
+    private static int idOf(String presetKey) {
+        if (presetKey == null || !presetKey.startsWith("custom_")) return -1;
+        try {
+            return Integer.parseInt(presetKey.substring("custom_".length()));
+        } catch (NumberFormatException ignored) {
+            return -1;
         }
-        for (int id = 0; id < MAX_PRESETS; id++) if (!used[id]) return id;
-        return -1;
     }
 
     private static void write(File file, String text) throws Throwable {

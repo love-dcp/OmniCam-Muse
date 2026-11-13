@@ -202,8 +202,7 @@ public final class MasterPresetApply {
     }
 
     /** 相机把一次拍摄要用的参数都收在 CaptureParams 里；写完整栏的值要让它重收一次。 */
-    public static void installCaptureParams(ClassLoader classLoader) {
-        try {
+    public static void installCaptureParams(ClassLoader classLoader) {        try {
             XposedBridge.hookAllConstructors(Symbols.get().cls("CaptureParams"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     captureParams = param.thisObject;
@@ -218,6 +217,55 @@ public final class MasterPresetApply {
     private static volatile Object captureParams;
     private static volatile Object effectData;
     private static volatile boolean presetDumped;
+    /** Pro 参数面板（CaptureParamPresenter df.r）：改完 Pro 参数要让面板重读一次。 */
+    private static volatile Object proPresenter;
+
+    /**
+     * 抓住 Pro 参数面板实例。
+     *
+     * <p>相机的档位按钮监听器（df.b）里挂着它（字段类型是 df.r）。只在构造时记一下，
+     * 不碰相机的档位逻辑：模块不会替用户切档，只在已经处于 Pro 档时让面板重读参数。
+     */
+    public static void installProPresenter(ClassLoader classLoader) {
+        try {
+            final Class<?> presenter = de.robv.android.xposed.XposedHelpers.findClass("df.r", classLoader);
+            XposedBridge.hookAllConstructors(de.robv.android.xposed.XposedHelpers.findClass("df.b", classLoader),
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            for (java.lang.reflect.Field field : param.thisObject.getClass().getDeclaredFields()) {
+                                if (!presenter.isAssignableFrom(field.getType())) continue;
+                                field.setAccessible(true);
+                                Object found = field.get(param.thisObject);
+                                if (found == null) continue;
+                                if (proPresenter == null) Log.i(TAG, "Pro 参数面板已捕获");
+                                proPresenter = found;
+                                return;
+                            }
+                        } catch (Throwable error) {
+                            Log.e(TAG, "取 Pro 参数面板失败", error);
+                        }
+                    }
+                });
+        } catch (Throwable error) {
+            Log.e(TAG, "Pro 参数面板 hook 失败（Pro 参数仍会写进数据层）", error);
+        }
+    }
+
+    /** 已捕获的 Pro 参数面板；不在 Pro 档或还没建好时返回 null。 */
+    static Object proPresenter(ClassLoader loader) {
+        Object presenter = proPresenter;
+        if (presenter == null) return null;
+        try {
+            // CaptureParamView 的 k 字段就是「当前是不是 Pro 档」。
+            Object view = de.robv.android.xposed.XposedHelpers.getObjectField(presenter, "P");
+            boolean pro = de.robv.android.xposed.XposedHelpers.getBooleanField(view, "k");
+            return pro ? presenter : null;
+        } catch (Throwable error) {
+            Log.e(TAG, "判断 Pro 档失败", error);
+            return null;
+        }
+    }
 
     /** 相机的大师参数存在 EffectData 的当前预设里（EffectPresetDataV2）；记下实例备用。 */
     public static void installEffectData(ClassLoader classLoader) {
@@ -340,13 +388,24 @@ public final class MasterPresetApply {
                         } else if (request != null && DiagnosticsContract.ACTION_CREATE.equals(request.getString(DiagnosticsContract.KEY_PRESET_ACTION))) {
                             // 只建预设：不需要效果栏，所以放在这一支，相机没打开大师效果栏也能落库。
                             String name = request.getString(DiagnosticsContract.KEY_PRESET_NAME);
-                            boolean created = MasterPresetCreate.create(cameraLoader(), name, request);
-                            if (created) MasterPresetCreate.addNow(Symbols.get(), effectData, name, null);
-                            Log.i(TAG, "create via queue: " + created + " " + name);
-                            markApplied(request);
-                            deletePending();
+                            String key = request.getString(DiagnosticsContract.KEY_PRESET_KEY);
+                            if (key != null && !key.isEmpty()) {
+                                // 带了 presetKey：只往这个现成的预设里补参数（核对用，不新建）。
+                                int wrote = MasterPresetCreate.writeValues(key, name,
+                                    request.getString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE), request);
+                                Log.i(TAG, "fill via queue: " + key + " " + wrote + " item(s)");
+                                markApplied(request);
+                                deletePending();
+                            } else {
+                                boolean created = MasterPresetCreate.create(cameraLoader(), name, request);
+                                Log.i(TAG, "create via queue: " + created + " " + name);
+                                markApplied(request);
+                                deletePending();
+                            }
                         } else {
                             Menu menu = masterMenu();
+                            // Pro 参数不依赖效果栏：效果栏还没建好时也先写进去（重复写是幂等的）。
+                            if (request != null && MasterProParams.has(request)) MasterProParams.apply(request);
                             if (menu != null && request != null) apply(menu, request);
                         }
                     }
@@ -370,6 +429,11 @@ public final class MasterPresetApply {
             // 下面兜底
         }
         return Thread.currentThread().getContextClassLoader();
+    }
+
+    /** 预设列表的管理对象（EffectData）；相机没开大师效果栏时为 null。 */
+    static Object effectDataOrNull() {
+        return effectData;
     }
 
     private static Menu menuFor(Object instance) {
@@ -475,7 +539,13 @@ public final class MasterPresetApply {
                 if (DiagnosticsContract.KEY_PRESET_FILTER.equals(key) || DiagnosticsContract.KEY_PRESET_SOFT_LIGHT.equals(key)
                     || DiagnosticsContract.KEY_PRESET_VIGNETTE.equals(key)
                     || DiagnosticsContract.KEY_PRESET_NAME.equals(key)
+                    || DiagnosticsContract.KEY_PRESET_KEY.equals(key)
                     || DiagnosticsContract.KEY_PRESET_FILTER_TYPE.equals(key)
+                    || DiagnosticsContract.KEY_PRESET_ISO.equals(key)
+                    || DiagnosticsContract.KEY_PRESET_SHUTTER.equals(key)
+                    || DiagnosticsContract.KEY_PRESET_EV.equals(key)
+                    || DiagnosticsContract.KEY_PRESET_FOCUS.equals(key)
+                    || DiagnosticsContract.KEY_PRESET_WHITE_BALANCE.equals(key)
                     || DiagnosticsContract.KEY_PRESET_ACTION.equals(key)) {
                     extras.putString(key, value);
                 } else if (DiagnosticsContract.KEY_PRESET_CREATE.equals(key)) {
@@ -607,10 +677,26 @@ public final class MasterPresetApply {
                 out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, 0);
                 return out;
             }
+            if (DiagnosticsContract.ACTION_PRO_READ.equals(action)) {
+                // 只读相机当前的 Pro 参数：设置页用它把「相机现在的 ISO / 快门 / EV / 对焦 / 白平衡」
+                // 抄进预设里，值格式原样保留，模块不解释。
+                out.putString(DiagnosticsContract.KEY_PRO_RESULT, MasterProParams.read());
+                out.putString(DiagnosticsContract.KEY_PRESET_RESULT, "");
+                out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, 0);
+                return out;
+            }
             Menu menu = masterMenu();
             if (DiagnosticsContract.ACTION_CREATE.equals(action)) {
                 // 只建预设、不碰效果栏：效果栏没打开时也能核对落库这一段。
                 String name = extras.getString(DiagnosticsContract.KEY_PRESET_NAME);
+                String key = extras.getString(DiagnosticsContract.KEY_PRESET_KEY);
+                if (key != null && !key.isEmpty()) {
+                    int wrote = MasterPresetCreate.writeValues(key, name,
+                        extras.getString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE), extras);
+                    out.putString(DiagnosticsContract.KEY_PRESET_RESULT, "已补参数：" + key + " " + wrote + " 项");
+                    out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, wrote);
+                    return out;
+                }
                 boolean created = MasterPresetCreate.create(cameraLoader(), name, extras);
                 out.putString(DiagnosticsContract.KEY_PRESET_RESULT,
                     created ? "已新建预设：" + name : "没有新建：" + name);
@@ -618,6 +704,9 @@ public final class MasterPresetApply {
                 return out;
             }
             if (menu == null) {
+                // Pro 参数（ISO / 快门 / EV / 对焦 / 白平衡）不依赖效果栏：数据层写进去后，
+                // 相机进 Pro 档就会用上，所以这一支也要写。
+                if (MasterProParams.has(extras)) MasterProParams.apply(extras);
                 // 设置 App 已经把参数排进待写入文件：进大师模式时效果栏一建好就会写进去。
                 out.putString(DiagnosticsContract.KEY_PRESET_RESULT,
                     DiagnosticsContract.ACTION_APPLY.equals(action)
@@ -626,6 +715,8 @@ public final class MasterPresetApply {
                 out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, 0);
                 return out;
             }
+            // Pro 参数先写：效果栏那一步失败也不影响它们，用户至少拿得到拍摄参数。
+            if (MasterProParams.has(extras)) MasterProParams.apply(extras);
             return apply(menu, extras);
         } catch (Throwable error) {
             Log.e(TAG, "preset call failed", error);
@@ -974,7 +1065,6 @@ public final class MasterPresetApply {
                         if (MasterPresetCreate.create(data.getClass().getClassLoader(), name, extras)) {
                             createdName = name;
                             createdAt = System.currentTimeMillis();
-                            MasterPresetCreate.addNow(Symbols.get(), data, name, null);
                             Log.i(TAG, "预设已落库：" + name);
                             // 建完立刻把相机眼里的预设列印一遍：明天核对「建了看不见」时，
                             // 这条日志直接说明是没落库、还是落了但列表没刷新。

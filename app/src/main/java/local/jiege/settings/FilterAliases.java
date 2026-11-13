@@ -1,6 +1,7 @@
 package local.jiege.settings;
 
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -36,5 +37,26 @@ public final class FilterAliases {
     public static boolean renamed(String name) {
         if (name == null) return false;
         return RENAMED.containsKey(name);
+    }
+
+    /**
+     * 滤镜列表里的 id（LUT 文件名）→ 相机预设用的滤镜类型。
+     *
+     * <p>相机按滤镜类型存每一项的效果值（{@code key_master_mode_effect_saturation_kodak}），
+     * 而这个类型就是 LUT 文件名去掉扩展名：{@code kodak.cube.rgb.bin} → {@code kodak}、
+     * {@code qing_tou.bin} → {@code qing_tou}、{@code LUT65_A01.cube.rgb.bin} → {@code LUT65_A01}
+     * （MMKV 里的键名逐个对得上）。预设 JSON 的 {@code filterType} 用的是这一个，
+     * 不是列表里的文件名 —— 写错就会变成另一条不存在的滤镜。
+     */
+    public static String filterTypeOf(String id) {
+        if (id == null || id.isEmpty()) return "default";
+        String type = id;
+        for (String suffix : new String[]{".cube.rgb.bin", ".bin"}) {
+            if (type.toLowerCase(Locale.ROOT).endsWith(suffix)) {
+                type = type.substring(0, type.length() - suffix.length());
+                break;
+            }
+        }
+        return type;
     }
 }
