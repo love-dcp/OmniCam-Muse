@@ -118,6 +118,8 @@ final class MasterPresetCreate {
         java.util.List<Integer> before = customIds(symbols, loader);
         Object data = MasterPresetApply.effectDataOrNull();
         if (data != null) {
+            // 编号由相机自己分配：它的 add 会把 presetKey 一起填上（实测我们事先填 custom_1，
+            // 它照样改成 custom_0），硬用自己挑的编号，内存里那张卡和落盘那条就对不上了。
             addNow(symbols, data, name, filterType);
             for (Integer id : customIds(symbols, loader)) {
                 if (!before.contains(id)) {
@@ -125,8 +127,15 @@ final class MasterPresetCreate {
                     return "custom_" + id;
                 }
             }
-            java.util.List<String> found = findAllByName(symbols, loader, name);
-            if (!found.isEmpty()) return found.get(found.size() - 1);
+            // 相机没动 ids 表时，从列表里按名字找回它刚加的那条。
+            for (Object preset : MasterPresets.list()) {
+                String key = MasterPresets.key(preset);
+                if (key == null || !key.startsWith("custom_")) continue;
+                if (!name.equals(MasterPresets.name(preset))) continue;
+                Log.i(TAG, "从预设列表取到编号：" + key);
+                ensureId(symbols, loader, idOf(key));
+                return key;
+            }
         }
         int id = firstFreeId(before);
         if (id < 0) return null;
@@ -135,12 +144,54 @@ final class MasterPresetCreate {
         return "custom_" + id;
     }
 
+    /** 相机自己加进了列表但没写 ids 表时补一笔（否则下次按名字找不到这张卡）。 */
+    private static void ensureId(Symbols symbols, ClassLoader loader, int id) {
+        if (id < 0) return;
+        try {
+            java.util.List<Integer> ids = customIds(symbols, loader);
+            if (ids.contains(Integer.valueOf(id))) return;
+            ids.add(Integer.valueOf(id));
+            writeIds(symbols, loader, ids);
+        } catch (Throwable error) {
+            Log.e(TAG, "补登记预设编号失败：" + id, error);
+        }
+    }
+
     /** MMKV 里已登记的自定义预设编号（{@code key_master_mode_custom_preset_ids}，形如 "[0,1,2]"）。 */
+    /**
+     * 已占用的自定义预设编号：MMKV 的登记表 {@code key_master_mode_custom_preset_ids} 与
+     * 存储文件里真实存在的 {@code custom_<n>} 取并集。
+     *
+     * <p>只看登记表会出事：早期版本自己写编号，表里剩 {@code [0,1]} 而文件里其实是
+     * {@code custom_1 / custom_2}，按表挑编号会挑到 2，把用户的「假日清新」直接覆盖掉。
+     */
     private static java.util.List<Integer> customIds(Symbols symbols, ClassLoader loader) {
         java.util.List<Integer> ids = new java.util.ArrayList<>();
         String raw = readString(symbols, loader, "key_master_mode_custom_preset_ids");
         java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\d+").matcher(raw);
         while (matcher.find()) ids.add(Integer.valueOf(matcher.group()));
+        for (Integer id : storedIds(loader)) if (!ids.contains(id)) ids.add(id);
+        return ids;
+    }
+
+    /** 存储文件里真实存在的自定义预设编号。读不到就返回空表。 */
+    private static java.util.List<Integer> storedIds(ClassLoader loader) {
+        java.util.List<Integer> ids = new java.util.ArrayList<>();
+        File file = storageFile(loader);
+        if (file == null || !file.isFile()) return ids;
+        try {
+            String text = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            JSONArray presets = new JSONObject(text).optJSONArray("presets");
+            if (presets == null) return ids;
+            for (int i = 0; i < presets.length(); i++) {
+                JSONObject preset = presets.optJSONObject(i);
+                if (preset == null) continue;
+                int id = idOf(preset.optString("presetKey"));
+                if (id >= 0 && !ids.contains(Integer.valueOf(id))) ids.add(Integer.valueOf(id));
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "读预设存储里的编号失败", error);
+        }
         return ids;
     }
 
@@ -449,9 +500,10 @@ final class MasterPresetCreate {
         preset.put("presetKey", "custom_" + id);
         preset.put("presetName", name);
         if (template == null) {
-            // 没有现成模板时名字资源只能留空：它是按中文名拼音独立命名的（菲林=camera_filter_feilin），
-            // 和 LUT 文件名对不上，猜不出来。预设名另外由 DataManager 提供，卡片显示不受影响。
-            preset.put("filterNameResEntry", "camera_filter_none");
+            // 存储里只有自定义预设（原厂那些按滤镜现生成，不落文件），所以模板基本都找不到。
+            // 名字资源是拼音独立命名的（菲林=camera_filter_feilin），和 LUT 文件名对不上、猜不出来 ——
+            // 改成从内存里「绑同一个滤镜的原厂预设」身上抄，卡片那行才会显示「复古」而不是「标准」。
+            preset.put("filterNameResEntry", filterNameResEntryFor(filterType));
         }
         // filterType 是滤镜类型（LUT 文件名去掉扩展名，如 kodak / natural），不是列表里的 id。
         preset.put("filterType", filterType.isEmpty() ? "default" : filterType);
@@ -621,8 +673,10 @@ final class MasterPresetCreate {
     // ---- 当前会话（可选） --------------------------------------------------------------------------
 
     /**
-     * 调相机的 addCustomPreset 让这次会话立刻出现；落盘已经做过，失败也不影响重启后的结果。
-     * 它的参数来自当前预设对象，字段值未必等于这次写入的值，所以只当「让列表多一项」用。
+     * 调相机的 addCustomPreset 让这次会话立刻出现；落盘由调用方另外做，失败也不影响重启后的结果。
+     *
+     * <p>编号由相机自己分配（它会把 {@code presetKey} 填上），所以这里不再自己塞键 ——
+     * 硬塞的话内存里那张卡是 custom_1、落盘那条是 custom_0，用户会看到一张没参数的重复卡。
      */
     static void addNow(Symbols symbols, Object effectData, String name, String filterType) {
         if (symbols == null || effectData == null || name == null || name.isEmpty()) return;
@@ -648,8 +702,8 @@ final class MasterPresetCreate {
             Method add = addMethod(repository, copy.getClass());
             if (add == null) return;
             add.invoke(null, copy);
-            Log.i(TAG, "当前会话已加入预设：" + name
-                + "（模板 " + (template == current ? "当前预设" : type) + "）");
+            Log.i(TAG, "当前会话已加入预设：" + name + "（模板 "
+                + (template == current ? "当前预设" : type) + "）" + copy);
         } catch (Throwable error) {
             Log.e(TAG, "写入当前会话失败（不影响重启后生效）", error);
         }
@@ -664,6 +718,158 @@ final class MasterPresetCreate {
             if (filterType.equals(MasterPresets.filterType(preset))) return preset;
         }
         return null;
+    }
+
+    /**
+     * 滤镜类型 → 卡片那行滤镜名的资源名；从内存里同滤镜的原厂预设上抄（拿不到就读上次缓存的）。
+     * 抄不到（标准、或相机还没建过预设列表）就用 {@code camera_filter_none}，也就是显示「标准」。
+     */
+    private static String filterNameResEntryFor(String filterType) {
+        if (filterType == null || filterType.isEmpty() || "default".equalsIgnoreCase(filterType)) {
+            return "camera_filter_none";
+        }
+        String res = filterNames().get(filterType);
+        if (res == null) {
+            // 老版本写的是去掉扩展名的短名（fuji-nc），按短名再认一次。
+            String id = filterIdOf(filterType);
+            if (!id.equals(filterType)) res = filterNames().get(id);
+        }
+        if (res == null || res.isEmpty()) {
+            Log.i(TAG, "没有滤镜 " + filterType + " 的名字资源，卡片滤镜名按「标准」显示");
+            return "camera_filter_none";
+        }
+        return res;
+    }
+
+    /** 短名 / id 都认：把 {@code fuji-nc} 这种补成滤镜列表里的 id（{@code fuji-nc.bin}）。 */
+    private static String filterIdOf(String filterType) {
+        if (filterType == null || filterType.isEmpty()) return "";
+        if (filterType.contains(".")) return filterType;
+        for (String id : filterNames().keySet()) {
+            if (local.jiege.settings.FilterAliases.filterTypeOf(id).equals(filterType)) return id;
+        }
+        return filterType;
+    }
+
+    /** 滤镜名对照表的缓存：只有相机进程读写，放在相机自己的数据目录。 */
+    private static final String NAME_CACHE = "muse_filter_names.txt";
+
+    private static File nameCacheFile() {
+        try {
+            android.content.Context context = android.app.AndroidAppHelper.currentApplication();
+            if (context == null) return null;
+            return new File(context.getFilesDir(), NAME_CACHE);
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /** 当前能拿到的「滤镜类型 → 滤镜名资源」：内存里有就用内存的，没有读缓存。 */
+    private static java.util.Map<String, String> filterNames() {
+        java.util.Map<String, String> names = learnedNames();
+        if (!names.isEmpty()) return names;
+        File cache = nameCacheFile();
+        if (cache == null || !cache.isFile()) return names;
+        try {
+            String text = new String(Files.readAllBytes(cache.toPath()), StandardCharsets.UTF_8);
+            for (String line : text.split("\r?\n")) {
+                int tab = line.indexOf('\t');
+                if (tab <= 0 || tab >= line.length() - 1) continue;
+                names.put(line.substring(0, tab).trim(), line.substring(tab + 1).trim());
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "读滤镜名缓存失败", error);
+        }
+        return names;
+    }
+
+    /** 从相机当前预设列表里抄一份「滤镜类型 → 滤镜名资源」。列表没建时返回空表。 */
+    private static java.util.Map<String, String> learnedNames() {
+        java.util.Map<String, String> names = new java.util.LinkedHashMap<>();
+        for (Object preset : MasterPresets.list()) {
+            String key = MasterPresets.key(preset);
+            if (key == null || key.startsWith("custom_")) continue;
+            String type = MasterPresets.filterType(preset);
+            String res = MasterPresets.filterNameResEntry(preset);
+            if (type == null || type.isEmpty() || res == null || res.isEmpty()) continue;
+            names.put(type, res);
+        }
+        return names;
+    }
+
+    /**
+     * 把「滤镜类型 → 滤镜名资源」存下来，并顺手补正已落库的自定义预设：
+     * 设置页写入时相机常常还没进大师模式，那时抄不到名字，卡片滤镜名会落成 {@code camera_filter_none}。
+     */
+    static void learnFilterNames(ClassLoader loader) {
+        java.util.Map<String, String> names = learnedNames();
+        if (names.isEmpty()) return;
+        File cache = nameCacheFile();
+        if (cache != null) {
+            StringBuilder text = new StringBuilder();
+            for (java.util.Map.Entry<String, String> entry : names.entrySet()) {
+                text.append(entry.getKey()).append('\t').append(entry.getValue()).append('\n');
+            }
+            try {
+                Files.write(cache.toPath(), text.toString().getBytes(StandardCharsets.UTF_8));
+            } catch (Throwable error) {
+                Log.e(TAG, "缓存滤镜名失败", error);
+            }
+        }
+        repairNames(loader, names);
+    }
+
+    /** 已落库的自定义预设里，滤镜绑定写成短名、或滤镜名资源是空/standard 的，按对照表补上。 */
+    private static void repairNames(ClassLoader loader, java.util.Map<String, String> names) {
+        Symbols symbols = Symbols.get();
+        File file = storageFile(loader);
+        if (file == null || !file.isFile()) return;
+        try {
+            String text = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            JSONObject root = new JSONObject(text);
+            JSONArray presets = root.optJSONArray("presets");
+            if (presets == null || presets.length() == 0) return;
+            int fixed = 0;
+            for (int i = 0; i < presets.length(); i++) {
+                JSONObject preset = presets.optJSONObject(i);
+                if (preset == null) continue;
+                String key = preset.optString("presetKey");
+                if (!key.startsWith("custom_")) continue;
+                String type = preset.optString("filterType");
+                if (type.isEmpty() || "default".equalsIgnoreCase(type)) continue;
+                // 短名 → 滤镜列表里的 id（老版本写成 fuji-nc，相机认的是 fuji-nc.bin）。
+                String id = filterIdOf(type);
+                String res = id.equals(type) ? names.get(type) : names.get(id);
+                if (res == null) continue;
+                boolean dirty = false;
+                if (!id.equals(type)) {
+                    preset.put("filterType", id);
+                    dirty = true;
+                    Log.i(TAG, "补正预设滤镜绑定：" + preset.optString("presetName") + " " + type + " -> " + id);
+                }
+                // MMKV 那份才是相机运行时读的：卡片那行滤镜名按它去滤镜列表里找，
+                // 短名找不到就一路显示「标准」。
+                if (symbols != null) {
+                    String stored = readString(symbols, loader, "key_master_mode_custom_preset_filter_type_" + key);
+                    if (!id.equals(stored)) {
+                        putString(symbols, loader, "key_master_mode_custom_preset_filter_type_" + key, id);
+                        Log.i(TAG, "补正预设滤镜绑定（MMKV）：" + key + " " + stored + " -> " + id);
+                    }
+                }
+                if (!res.equals(preset.optString("filterNameResEntry"))) {
+                    preset.put("filterNameResEntry", res);
+                    dirty = true;
+                    Log.i(TAG, "补正预设滤镜名：" + preset.optString("presetName") + " " + id + " -> " + res);
+                }
+                if (dirty) fixed++;
+            }
+            if (fixed == 0) return;
+            root.put("timestamp", System.currentTimeMillis());
+            write(file, root.toString(2));
+            Log.i(TAG, "已补正 " + fixed + " 条预设的滤镜名");
+        } catch (Throwable error) {
+            Log.e(TAG, "补正预设滤镜名失败", error);
+        }
     }
 
     /** 相机里已经有同名的自定义预设。 */

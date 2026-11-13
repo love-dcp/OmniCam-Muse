@@ -64,6 +64,7 @@ internal fun DialogButtons(dismissText: String, onDismiss: () -> Unit, confirmTe
 /**
  * 带一个单行输入框的对话框：[initial] 是预填值，[onConfirm] 拿到用户输入（已去掉首尾空格）。
  * 用于导入预设时自己起名，以及给已有预设改名。
+ * [autoFocus] 为 false 时不主动弹键盘——默认值常常就是想要的，用户直接点确定更省事。
  */
 @Composable
 internal fun NameFieldDialog(
@@ -74,11 +75,13 @@ internal fun NameFieldDialog(
     confirmText: String,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
+    autoFocus: Boolean = true,
 ) {
     var value by remember { mutableStateOf(initial) }
     // 弹出来直接能打字：省掉再点一下输入框。
     val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(autoFocus) {
+        if (!autoFocus) return@LaunchedEffect
         delay(180)
         runCatching { focus.requestFocus() }
     }

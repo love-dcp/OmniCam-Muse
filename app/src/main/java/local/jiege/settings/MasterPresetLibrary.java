@@ -46,6 +46,13 @@ public final class MasterPresetLibrary {
     private final List<Preset> presets = new ArrayList<>();
     /** id → 用户起的名字。只记改过名的条目，没改过的用文件里的名字。 */
     private final java.util.Map<String, String> customNames = new java.util.LinkedHashMap<>();
+    /**
+     * id → 写进相机时用的预设名。
+     *
+     * <p>和库里的名字分开：库里那条是「这张预设叫什么」（导入来的通常就是图片名），
+     * 相机预设条上想显示什么名字是另一回事，导入时在弹窗里定，默认也是图片名。
+     */
+    private final java.util.Map<String, String> cameraNames = new java.util.LinkedHashMap<>();
 
     public MasterPresetLibrary(File dir) {
         this.file = new File(dir, FILE);
@@ -57,10 +64,11 @@ public final class MasterPresetLibrary {
 
     /** 把用户起的名字盖回列表（读盘之后、内置数据刷新之后都要再来一次）。 */
     private void applyNames() {
-        if (customNames.isEmpty()) return;
         for (Preset preset : presets) {
             String name = customNames.get(preset.id);
             if (name != null && !name.isEmpty()) preset.name = name;
+            String camera = cameraNames.get(preset.id);
+            if (camera != null) preset.cameraName = camera;
         }
     }
 
@@ -73,7 +81,16 @@ public final class MasterPresetLibrary {
                 if (line.isEmpty() || line.startsWith("#")) continue;
                 int tab = line.indexOf('\t');
                 if (tab <= 0 || tab == line.length() - 1) continue;
-                customNames.put(line.substring(0, tab).trim(), unescape(line.substring(tab + 1)));
+                String id = line.substring(0, tab).trim();
+                String rest = line.substring(tab + 1);
+                int second = rest.indexOf('\t');
+                if (second < 0) {
+                    customNames.put(id, unescape(rest));
+                    continue;
+                }
+                customNames.put(id, unescape(rest.substring(0, second)));
+                String camera = rest.substring(second + 1);
+                if (!camera.isEmpty()) cameraNames.put(id, unescape(camera));
             }
         } catch (IOException ignored) {
             // 名字文件读不出来就当没改过名，主库照常用。
@@ -83,9 +100,12 @@ public final class MasterPresetLibrary {
     private void saveNames() {
         try {
             StringBuilder out = new StringBuilder();
-            out.append("# OmniCam Muse · 自己起的预设名（id + 制表符 + 名字）\n");
-            for (java.util.Map.Entry<String, String> entry : customNames.entrySet()) {
-                out.append(entry.getKey()).append('\t').append(escape(entry.getValue())).append('\n');
+            out.append("# OmniCam Muse · 自己起的预设名（id + 制表符 + 库里的名字 + 制表符 + 相机里的名字）\n");
+            java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>(customNames.keySet());
+            ids.addAll(cameraNames.keySet());
+            for (String id : ids) {
+                out.append(id).append('\t').append(escape(customNames.getOrDefault(id, "")))
+                    .append('\t').append(escape(cameraNames.getOrDefault(id, ""))).append('\n');
             }
             Files.write(namesFile.toPath(), out.toString().getBytes(StandardCharsets.UTF_8));
             namesFile.setReadable(true, false);
@@ -98,6 +118,13 @@ public final class MasterPresetLibrary {
     public static final class Preset {
         public String id = "";
         public String name = "";
+        /**
+         * 写进相机时用的预设名（相机预设条上显示的那一个）。空表示沿用 [name]。
+         *
+         * <p>和库里的名字分开：库里的名字是这张预设在你素材库里的名字；相机里那条叫什么是
+         * 导入时在「滤镜名」弹窗里定的（默认也是图片名），两个可以不一样。
+         */
+        public String cameraName = "";
         public String author = "";
         /** 原厂滤镜名 + 强度，例如「复古 75%」；空表示不指定。 */
         public String filter = "";
@@ -372,16 +399,18 @@ public final class MasterPresetLibrary {
         for (int i = 0; i < parsed.size() && !prefix.isEmpty(); i++) {
             Preset preset = parsed.get(i);
             String name = parsed.size() == 1 ? prefix : prefix + " " + (i + 1);
-            preset.name = name;
-            customNames.put(preset.id, name);
+            // 这个名字只写进相机（预设条上显示的那一个）：库里的条目名仍是文件里的图片名。
+            preset.cameraName = name;
+            cameraNames.put(preset.id, name);
         }
         for (Preset preset : parsed) merge(preset);
+        applyNames();
         if (!prefix.isEmpty()) saveNames();
         if (!parsed.isEmpty()) save();
         return parsed.size();
     }
 
-    /** 给一条预设改名（导入后想换个名字，或导入时没起名）。空名字、名字没变都返回 false。 */
+    /** 给一条预设改名（改的是库里这条的名字）。空名字、名字没变都返回 false。 */
     public boolean rename(String id, String name) {
         Preset preset = find(id);
         if (preset == null) return false;
@@ -389,11 +418,29 @@ public final class MasterPresetLibrary {
         if (value.isEmpty()) return false;
         // 名字单独存一份：内置数据刷新时按 id 盖回来，改过的名字不会被冲掉。
         boolean changed = !value.equals(preset.name) || !value.equals(customNames.get(id));
+        // 相机里那条的名字没单独定过（或本来就跟库里同名）时一起跟着改，保持两边一致。
+        boolean followCamera = preset.cameraName.isEmpty() || preset.cameraName.equals(preset.name);
         preset.name = value;
         customNames.put(id, value);
+        if (followCamera) {
+            preset.cameraName = value;
+            cameraNames.put(id, value);
+        }
         saveNames();
         if (changed) save();
         return changed;
+    }
+
+    /** 单独改「写进相机时用的预设名」，空串表示恢复成跟库里同名。 */
+    public boolean setCameraName(String id, String value) {
+        Preset preset = find(id);
+        if (preset == null) return false;
+        String name = cut(clean(value), MAX_NAME);
+        if (name.equals(preset.cameraName)) return false;
+        preset.cameraName = name;
+        if (name.isEmpty()) cameraNames.remove(id); else cameraNames.put(id, name);
+        saveNames();
+        return true;
     }
 
     private void merge(Preset incoming) {

@@ -117,6 +117,12 @@ final class MasterPresetListSync {
         if (presets == null || types == null || types.isEmpty()) return;
         int customCount = MasterPresets.customCount(presets);
         if (presets.size() < customCount + types.size()) return;
+        // 预设列表这会儿是完整的：抄一份「滤镜类型 → 卡片滤镜名资源」，设置页写入时才有名字可用。
+        try {
+            MasterPresetCreate.learnFilterNames(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "learn filter names failed", error);
+        }
         keepSelection(symbols, classLoader, presets, customCount, types, true);
     }
 

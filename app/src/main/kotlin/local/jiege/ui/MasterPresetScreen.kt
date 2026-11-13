@@ -96,9 +96,48 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     var busy by remember { mutableStateOf<String?>(null) }
     var proBusy by remember { mutableStateOf(false) }
     var dump by remember { mutableStateOf<String?>(null) }
-    // 导入前先攒在手里：文件选完，弹窗让用户自己给这批预设起名，确认了才落库。
-    var pendingImport by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // 库里这条叫什么、写进相机那条叫什么，是两件事：renaming 改前者，namingCamera 改后者。
     var renaming by remember { mutableStateOf(false) }
+    var namingCamera by remember { mutableStateOf(false) }
+    // 点「写入相机大师模式」时先弹窗定名字：这条预设写进相机后，预设条上显示的就是它。
+    var namingForWrite by remember { mutableStateOf(false) }
+
+    /**
+     * 把一条预设写进相机大师模式。[name] 是写进相机后那条预设的名字。
+     * 先排队再直接调相机：相机没开或没进大师模式也能落地，下次进大师模式自己补写。
+     */
+    fun writeToCamera(target: MasterPresetLibrary.Preset, name: String) {
+        busy = target.id
+        scope.launch {
+            val plan = presetArgs(context, target, name)
+            val args = plan.args
+            try {
+                withContext(Dispatchers.IO) { MasterPresets.queue(context, args) }
+                // 相机那边可能在等主线程，无限期挂着会把按钮永远锁死，到点就当排队处理。
+                val answer = withTimeoutOrNull(6000) {
+                    withContext(Dispatchers.IO) { callCamera(context, args) }
+                }
+                if (answer == null) {
+                    Toast.makeText(context, "相机没有及时应答：预设已排队，进大师模式后自动写入", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                if (answer.applied > 0) {
+                    withContext(Dispatchers.IO) { MasterPresets.clearQueue(context) }
+                    // 写成功了才记住这个名字，下次进来弹窗默认还是它。
+                    withContext(Dispatchers.IO) { MasterPresets.library(context).setCameraName(target.id, name) }
+                    revision++
+                }
+                val text = when {
+                    answer.offline -> answer.text + "（预设已排队，切到大师模式后自动写入）"
+                    plan.hint.isEmpty() -> answer.text
+                    else -> plan.hint + "；" + answer.text
+                }
+                Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+            } finally {
+                busy = null
+            }
+        }
+    }
 
     LaunchedEffect(revision) {
         presets = withContext(Dispatchers.IO) { MasterPresets.library(context).presets() }
@@ -118,7 +157,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         if (uri == null) return@rememberLauncherForActivityResult
         busy = "import"
         scope.launch {
-            // 先只把文件读成行格式、数一下有几条，名字等用户在弹窗里输入后再落库。
+            // 只把文件读成行格式、数一下有几条；命名留到「写入相机」时再问。
             val prepared = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
@@ -136,49 +175,24 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                     if (rows == 0) null else converted to rows
                 }.getOrNull()
             }
-            busy = null
-            if (prepared == null) {
-                Toast.makeText(
-                    context,
-                    "这不是预设文件：支持 OMaster 的 presets.json，或本模块导出的预设文本",
-                    Toast.LENGTH_LONG,
-                ).show()
-            } else {
-                pendingImport = prepared
+            val added = if (prepared == null) -1 else withContext(Dispatchers.IO) {
+                runCatching { MasterPresets.library(context).importText(prepared.first) }.getOrDefault(0)
             }
+            busy = null
+            revision++
+            Toast.makeText(
+                context,
+                when {
+                    added > 0 -> "已导入 $added 条预设"
+                    else -> "这不是预设文件：支持 OMaster 的 presets.json，或本模块导出的预设文本"
+                },
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
     val shown = if (favoriteOnly) presets.filter { it.favorite } else presets
     val open = presets.firstOrNull { it.id == openId }
-
-    // 导入时自己起名：只有一条就直接用这个名字，多条按「名字 1 / 名字 2」编号；留空保留文件里的原名。
-    pendingImport?.let { (text, count) ->
-        NameFieldDialog(
-            title = "导入 $count 条预设",
-            summary = "给它们起个名字：只有一条时就用这个名字，多条会自动加编号；留空则用文件里的名字。",
-            initial = "",
-            placeholder = if (count == 1) "预设名（可留空）" else "名字前缀（可留空）",
-            confirmText = "导入",
-            onConfirm = { name ->
-                pendingImport = null
-                busy = "import"
-                scope.launch {
-                    val added = withContext(Dispatchers.IO) {
-                        runCatching { MasterPresets.library(context).importText(text, name) }.getOrDefault(0)
-                    }
-                    busy = null
-                    revision++
-                    Toast.makeText(
-                        context,
-                        if (added > 0) "已导入 $added 条预设" else "没有读到可识别的预设",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-            },
-            onDismiss = { pendingImport = null },
-        )
-    }
 
     if (open != null && renaming) {
         val target = open
@@ -204,6 +218,57 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         )
     }
 
+    // 写入相机前定名字：默认就是这张图的名称，确认了才写。
+    if (open != null && namingForWrite) {
+        val target = open
+        NameFieldDialog(
+            title = "滤镜名",
+            summary = "这是写进相机大师模式后，预设条上显示的名字。默认用这张图的名称，不想改直接点确定。",
+            initial = target.name,
+            placeholder = "滤镜名",
+            confirmText = "确定",
+            onConfirm = { name ->
+                namingForWrite = false
+                writeToCamera(target, name.trim().ifEmpty { target.name })
+            },
+            onDismiss = { namingForWrite = false },
+            // 默认值通常就是要用的名字，不主动弹键盘，省一步。
+            autoFocus = false,
+        )
+    }
+
+    // 只改「相机里那条」叫什么，不动库里这条的名字。
+    if (open != null && namingCamera) {
+        val target = open
+        NameFieldDialog(
+            title = "相机里的预设名",
+            summary = "改的是写进相机大师模式后预设条上显示的名字，库里这条的名字不变。下次写入相机时用新名字。",
+            initial = target.cameraName.ifEmpty { target.name },
+            placeholder = "滤镜名",
+            confirmText = "保存",
+            onConfirm = { name ->
+                namingCamera = false
+                val final = name.trim()
+                scope.launch {
+                    val changed = withContext(Dispatchers.IO) {
+                        MasterPresets.library(context).setCameraName(target.id, final)
+                    }
+                    revision++
+                    Toast.makeText(
+                        context,
+                        if (changed) {
+                            if (final.isEmpty()) "已清空：写入相机时用库里的名字" else "写入相机时用 $final"
+                        } else {
+                            "名字没有变化"
+                        },
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
+            onDismiss = { namingCamera = false },
+        )
+    }
+
     if (open != null) {
         PresetDetail(
             preset = open,
@@ -214,6 +279,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
             onBack = { openId = null },
             onFavorite = { toggleFavorite(open) },
             onRename = { renaming = true },
+            onCameraName = { namingCamera = true },
             onProRead = {
                 if (!proBusy && busy == null) {
                     proBusy = true
@@ -239,36 +305,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                     }
                 }
             },
-            onApply = {
-                busy = open.id
-                scope.launch {
-                    val plan = presetArgs(context, open)
-                    val args = plan.args
-                    try {
-                        // 先排队：相机不在大师模式也能落地，进大师模式时自己写入。
-                        withContext(Dispatchers.IO) { MasterPresets.queue(context, args) }
-                        // 相机那边可能在等主线程，无限期挂着会把按钮永远锁死，到点就当排队处理。
-                        val answer = withTimeoutOrNull(6000) {
-                            withContext(Dispatchers.IO) { callCamera(context, args) }
-                        }
-                        if (answer == null) {
-                            Toast.makeText(context, "相机没有及时应答：预设已排队，进大师模式后自动写入", Toast.LENGTH_LONG).show()
-                            return@launch
-                        }
-                        if (answer.applied > 0) {
-                            withContext(Dispatchers.IO) { MasterPresets.clearQueue(context) }
-                        }
-                        val text = when {
-                            answer.offline -> answer.text + "（预设已排队，切到大师模式后自动写入）"
-                            plan.hint.isEmpty() -> answer.text
-                            else -> plan.hint + "；" + answer.text
-                        }
-                        Toast.makeText(context, text, Toast.LENGTH_LONG).show()
-                    } finally {
-                        busy = null
-                    }
-                }
-            },
+            onApply = { namingForWrite = true },
         )
         return
     }
@@ -399,7 +436,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                 }
             }
         }
-    }
+        }
     }
 }
 
@@ -500,6 +537,7 @@ private fun PresetDetail(
     onBack: () -> Unit,
     onFavorite: () -> Unit,
     onRename: () -> Unit,
+    onCameraName: () -> Unit,
     onProRead: () -> Unit,
     onApply: () -> Unit,
 ) {
@@ -792,7 +830,28 @@ private fun PresetDetail(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    text = "改名只影响显示与写入相机时的预设名，调色参数不变。",
+                    text = "只改库里这条的名字；相机里那条叫什么是下面那一项。",
+                    fontSize = 11.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
+                )
+            }
+        }
+        item(key = "camera-name") {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 12.dp)) {
+                Text(
+                    text = "相机里的预设名：${preset.cameraName.ifEmpty { preset.name }}",
+                    fontSize = 14.sp,
+                    color = MiuixTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
+                )
+                TextButton(
+                    text = "改相机里的预设名",
+                    onClick = onCameraName,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "写入相机后，预设条上显示的就是这个名字。",
                     fontSize = 11.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     modifier = Modifier.padding(top = 8.dp, start = 4.dp),
@@ -808,7 +867,8 @@ private fun PresetDetail(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    text = "相机需要是大师模式且在前台；滤镜与柔光在部分机型上仍要手动确认。",
+                    text = "点了会先问一句「滤镜名」——那就是写进大师模式后预设条上显示的名字；"
+                        + "相机需要是大师模式且在前台，没开也能写，进大师模式时自动补上。",
                     fontSize = 11.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     modifier = Modifier.padding(top = 8.dp, start = 4.dp),
@@ -915,10 +975,16 @@ private fun countPresetRows(text: String): Int = text.lineSequence().count { raw
     line.isNotEmpty() && !line.startsWith("#") && line != "v2" && raw.count { it == '\t' } >= 13
 }
 
-/** 一条预设变成相机侧的入参；没有的项不下发，相机保持原值。 */
-private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset): PresetPlan {
+/**
+ * 一条预设变成相机侧的入参；没有的项不下发，相机保持原值。
+ * [name] 非空时用它当这条预设写进相机后的名字（预设条上显示的那一个），
+ * 空则沿用预设自己的名字。
+ */
+private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset, name: String = ""): PresetPlan {
     val args = Bundle()
     var hint = ""
+    // 写进相机的那条叫什么：弹窗里用户定的名字优先。
+    val target = name.ifEmpty { preset.cameraName.ifEmpty { preset.name } }
     args.putString(DiagnosticsContract.KEY_PRESET_ACTION, DiagnosticsContract.ACTION_APPLY)
     preset.tone?.let { args.putInt(DiagnosticsContract.KEY_PRESET_TONE, it) }
     preset.saturation?.let { args.putInt(DiagnosticsContract.KEY_PRESET_SATURATION, it) }
@@ -933,30 +999,34 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset): Pr
         args.putString(DiagnosticsContract.KEY_PRESET_FILTER, filter)
         args.putInt(DiagnosticsContract.KEY_PRESET_FILTER_STRENGTH, preset.filterStrength())
         // 预设名始终带上：本机没有这个滤镜时要靠它落一条自定义预设。
-        args.putString(DiagnosticsContract.KEY_PRESET_NAME, preset.name)
+        args.putString(DiagnosticsContract.KEY_PRESET_NAME, target)
         val rows = filterRows(context)
         val exact = rows?.firstOrNull { it.title == filter }
         // 滤镜表里的名字可能被清空，按别名登记过的 LUT 文件名再找一次。
         val lut = FilterAliases.lutOf(filter)
         val renamed = (if (exact == null) rows?.firstOrNull { it.title == FilterAliases.current(filter) } else null)
             ?: lut?.let { file -> rows?.firstOrNull { it.id == file } }
-        when {
-            // 读不到滤镜表就当有：宁可不建预设，也别往相机里塞错东西。
-            rows == null -> Unit
-            // 本机就有这个滤镜：直接改它的参数，不另建预设。
-            exact != null -> Unit
-            // 改过名（浓郁 → 菲林）：参数写到「标准」上，再落一条绑在改名后滤镜上的预设，
-            // 这样用户选中它时相机自己会把滤镜切过去。
-            renamed != null -> {
-                args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
-                args.putString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE, FilterAliases.filterTypeOf(renamed.id))
-                hint = "「$filter」在本机叫「${renamed.title.ifEmpty { filter }}」，已新建预设「${preset.name}」，在预设条里选中它就会用上"
-            }
-            // 本机确实没有这个滤镜：参数写到「标准」上，落一条同名预设承载这套参数。
-            else -> {
-                args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
-                hint = "本机没有「$filter」，已新建预设「${preset.name}」（绑标准滤镜），在预设条里选中它就会用上"
-            }
+        val bound = exact ?: renamed
+        // 一律落成一条「自定义预设」，参数只进预设自己那组键。
+        // 以前名字对得上就直接写效果栏，写的是「当前选中滤镜」那一组 —— 用户看到的
+        // 就是「内置的标准滤镜被这条预设的参数改掉了」，而且两张卡参数一样。
+        args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
+        // 相机预设里的 filterType 就是滤镜列表里的 id（fuji-nc.bin 这种，带扩展名），
+        // 不是去掉扩展名的 kodak/fuji-nc。写错的话这条预设绑不上滤镜，卡片滤镜名会落成「标准」。
+        val type = bound?.id.orEmpty()
+        // 认不到滤镜就明确绑「标准」：不传的话相机会沿用这条预设原来绑的那个，
+        // 用户改过名字/换过版本后容易莫名其妙留在别的滤镜上。
+        args.putString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE, type.ifEmpty { "default" })
+        hint = when {
+            // 本机确实没有这个滤镜：绑标准滤镜，参数用这一套，内置「标准」的参数不动。
+            bound == null ->
+                "本机没有「$filter」，已存成预设「$target」（绑标准滤镜，参数用这一套）"
+            // 改过名 / 只按 LUT 文件名认出来（浓郁 → 菲林）。
+            exact == null ->
+                "「$filter」在本机叫「${bound.title.ifEmpty { filter }}」，已存成预设「$target」"
+            // 本机就有这个滤镜：预设绑它，卡片会显示这个滤镜名，内置那条的参数不受影响。
+            else ->
+                "已存成预设「$target」（滤镜「${bound.title}」），去相机预设条里选中它就会用上"
         }
     }
     // 大师 Pro 档的拍摄参数：预设里写了哪几项就下发哪几项，没写的保持相机当前值。

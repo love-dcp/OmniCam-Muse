@@ -287,6 +287,13 @@ public final class MasterPresetApply {
                             Log.e(TAG, "自动清理预设存储失败", error);
                         }
                     }
+                    // 预设列表这会儿才建好，正好抄一份「滤镜类型 → 卡片滤镜名资源」下来：
+                    // 设置页写入时相机常常还没进大师模式，拿不到这张表，卡片滤镜名就会显示成「标准」。
+                    try {
+                        MasterPresetCreate.learnFilterNames(param.thisObject.getClass().getClassLoader());
+                    } catch (Throwable error) {
+                        Log.e(TAG, "记滤镜名对照表失败", error);
+                    }
                 }
             });
         } catch (Throwable error) {
@@ -396,6 +403,12 @@ public final class MasterPresetApply {
                             // 界面上就是「标准」「清透」各多一张，而且长按删不掉。
                             int dropped = MasterPresetCreate.cleanStorage(cameraLoader());
                             Log.i(TAG, "cleanpresets via queue: " + dropped);
+                            markApplied(request);
+                            deletePending();
+                        } else if (request != null && "fixnames".equals(request.getString(DiagnosticsContract.KEY_PRESET_ACTION))) {
+                            // 补正卡片滤镜名：写入时相机没进大师模式，抄不到「复古」这类名字，
+                            // 卡片会显示成「标准-富士NC」。
+                            MasterPresetCreate.learnFilterNames(cameraLoader());
                             markApplied(request);
                             deletePending();
                         } else if (request != null && "rename".equals(request.getString(DiagnosticsContract.KEY_PRESET_ACTION))) {
@@ -1039,7 +1052,7 @@ public final class MasterPresetApply {
                 boolean created = MasterPresetCreate.create(cameraLoader(), presetName, extras);
                 out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, created ? 1 : 0);
                 out.putString(DiagnosticsContract.KEY_PRESET_RESULT,
-                    created ? "" : "预设「" + presetName + "」没写进相机");
+                    created ? "" : "预设「" + presetName + "」没写进相机：自定义预设最多 20 个，先在相机里删掉几个");
                 if (created) {
                     markApplied(extras);
                     refreshEffectEntry(symbols);

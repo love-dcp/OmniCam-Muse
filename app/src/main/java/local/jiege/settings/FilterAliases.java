@@ -51,13 +51,12 @@ public final class FilterAliases {
     }
 
     /**
-     * 滤镜列表里的 id（LUT 文件名）→ 相机预设用的滤镜类型。
+     * 滤镜列表里的 id（LUT 文件名）→ 去掉扩展名的短名。
      *
-     * <p>相机按滤镜类型存每一项的效果值（{@code key_master_mode_effect_saturation_kodak}），
-     * 而这个类型就是 LUT 文件名去掉扩展名：{@code kodak.cube.rgb.bin} → {@code kodak}、
-     * {@code qing_tou.bin} → {@code qing_tou}、{@code LUT65_A01.cube.rgb.bin} → {@code LUT65_A01}
-     * （MMKV 里的键名逐个对得上）。预设 JSON 的 {@code filterType} 用的是这一个，
-     * 不是列表里的文件名 —— 写错就会变成另一条不存在的滤镜。
+     * <p><b>注意：预设的 {@code filterType} 不是这个</b>。相机预设（JSON 的 filterType、以及
+     * {@code key_master_mode_effect_<项>_<滤镜>} 的后缀）用的是滤镜列表里的 <b>id 原文</b>，
+     * 例如 {@code fuji-nc.bin}；写成 {@code fuji-nc} 会绑不上，卡片滤镜名就落成「标准」。
+     * 这个方法只用于需要短名的场合（MMKV 里老版本留下的键、导入文件名比对）。
      */
     public static String filterTypeOf(String id) {
         if (id == null || id.isEmpty()) return "default";

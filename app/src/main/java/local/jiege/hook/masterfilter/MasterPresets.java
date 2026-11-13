@@ -61,6 +61,22 @@ public final class MasterPresets {
         return value(text(preset, "', mFilterType=", ", mFilterNameResEntry="));
     }
 
+    /**
+     * 卡片上那行滤镜名用的资源名（如 {@code camera_filter_feilin}）。
+     *
+     * <p>自己造的预设没法凭空猜这个资源名，只能从「绑同一个滤镜的原厂预设」上抄。
+     */
+    public static String filterNameResEntry(Object preset) {
+        String raw = text(preset, ", mFilterNameResEntry=", "}");
+        if (raw == null) return null;
+        int end = raw.indexOf(',');
+        String value = (end < 0 ? raw : raw.substring(0, end)).trim();
+        if (value.length() >= 2 && value.startsWith("'") && value.endsWith("'")) {
+            value = value.substring(1, value.length() - 1).trim();
+        }
+        return value.isEmpty() || "null".equals(value) ? null : value;
+    }
+
     private static String value(String text) {
         return text == null || "null".equals(text) ? null : text;
     }
