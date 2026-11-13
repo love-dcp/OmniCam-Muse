@@ -206,21 +206,25 @@ final class MasterGrain {
                 param.setResult(null);
             }
         });
-        final Class<?> masterMode = XposedHelpers.findClass(SDK + "producer.mode.ProfessionalMode", classLoader);
-        XposedHelpers.findAndHookMethod(SDK + "producer.mode.BaseMode", classLoader, "setPositiveFilterGrain",
-            SDK + "common.util.CameraRequestTag", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam param) {
-                    Object tag = param.args[0];
-                    if (tag == null || !masterMode.isInstance(param.thisObject)) return;
-                    try {
-                        applyCapture(symbols, tag);
-                    } catch (Throwable error) {
-                        Log.e(TAG, "capture grain failed", error);
+        // 拍照侧的两段是照旧相机的 producer.mode / consumer 包写的，这版相机（7.006）里已经
+        // 没有这些类，整段包起来：装不上就记一条日志，别把前面的 UI 钩子一起带走。
+        Log.guard(TAG, "capture grain", () -> {
+            final Class<?> masterMode = XposedHelpers.findClass(SDK + "producer.mode.ProfessionalMode", classLoader);
+            XposedHelpers.findAndHookMethod(SDK + "producer.mode.BaseMode", classLoader, "setPositiveFilterGrain",
+                SDK + "common.util.CameraRequestTag", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        Object tag = param.args[0];
+                        if (tag == null || !masterMode.isInstance(param.thisObject)) return;
+                        try {
+                            applyCapture(symbols, tag);
+                        } catch (Throwable error) {
+                            Log.e(TAG, "capture grain failed", error);
+                        }
                     }
-                }
-            });
+                });
+        });
         hookHalfBars(classLoader);
-        hookStandardCapture(symbols, classLoader);
+        Log.guard(TAG, "standard capture grain", () -> hookStandardCapture(symbols, classLoader));
         Log.i(TAG, "master grain installed");
     }
 
