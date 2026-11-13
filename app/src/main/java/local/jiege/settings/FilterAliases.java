@@ -19,12 +19,23 @@ import java.util.Map;
 public final class FilterAliases {
     /** 旧名（预设库里的写法）→ 本机当前的名字。 */
     private static final Map<String, String> RENAMED = new LinkedHashMap<>();
+    /**
+     * 旧名 → 承载它的 LUT 文件名。滤镜表里的 title 可能被清空（用户改过名/导入时没填），
+     * 只按 title 找会漏，这张表按文件名兜底。只有确认过的对应关系才能往这里加。
+     */
+    private static final Map<String, String> LUT = new LinkedHashMap<>();
 
     static {
         RENAMED.put("浓郁", "菲林");
+        LUT.put("浓郁", "kodak.cube.rgb.bin");
     }
 
     private FilterAliases() {}
+
+    /** 这个名字对应的 LUT 文件；没有登记返回 null。 */
+    public static String lutOf(String name) {
+        return name == null ? null : LUT.get(name);
+    }
 
     /** 本机当前该用哪个名字：没有改名记录时原样返回。 */
     public static String current(String name) {

@@ -67,11 +67,11 @@ final class MasterPresetCreate {
         if (loader == null || name == null || name.isEmpty() || extras == null) return false;
         Symbols symbols = Symbols.get();
         String filterType = stringOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_TYPE);
-        if (filterType.isEmpty()) filterType = "default";
 
         // 同名预设已经在相机里：直接更新它，别再建一个（以前每次导入都会多出一张同名的空卡）。
         java.util.List<String> keys = findAllByName(symbols, loader, name);
         if (keys.isEmpty()) {
+            if (filterType.isEmpty()) filterType = "default";
             String key = register(symbols, loader, name, filterType);
             if (key == null) {
                 Log.i(TAG, "没有可用的预设编号，跳过：" + name);
@@ -91,9 +91,16 @@ final class MasterPresetCreate {
         // 没写就是全 0 —— 用户看到的就是「有这个名字的预设，但里面没有参数」。
         // 同名卡可能不止一张（早期版本重复建过），每一张都写，用户看到的那张才一定有参数。
         for (String key : keys) {
-            writeValues(key, name, filterType, extras);
+            // 设置页没指定滤镜（本机没有这个滤镜名）时，沿用这张预设原来绑的那个：
+            // 以前这里直接填 default，于是已有的「哈苏浓郁」（绑 kodak / 菲林）被一次次冲成「标准」。
+            String type = filterType;
+            if (type.isEmpty()) {
+                type = readString(symbols, loader, "key_master_mode_custom_preset_filter_type_" + key);
+            }
+            if (type == null || type.isEmpty()) type = "default";
+            writeValues(key, name, type, extras);
             persist(loader, name, key, extras);
-            Log.i(TAG, "预设已写入：" + name + " -> " + key + "（滤镜 " + filterType + "）");
+            Log.i(TAG, "预设已写入：" + name + " -> " + key + "（滤镜 " + type + "）");
         }
         return true;
     }
@@ -526,6 +533,53 @@ final class MasterPresetCreate {
         }
     }
 
+    /**
+     * 清掉存储里「不是自定义预设」的条目。
+     *
+     * <p>相机的大师预设列表 = 每个滤镜一条内置预设 + 存储里的自定义预设。存储里一旦出现
+     * {@code presetKey} 为空、或与 {@code filterType} 相同的条目，相机启动时会把它当成
+     * 自定义预设再加载一遍 —— 界面上就是「标准」「清透」各多出一张。这种条目长按删不掉：
+     * 相机的删除只处理 {@code custom_<n>} 这种键，找不到对应槽位就什么都不做。
+     *
+     * <p>只删「内置滤镜的副本」，键以 {@code custom_} 开头的一律保留（那是用户自己的预设）。
+     *
+     * @return 删掉的条数
+     */
+    static int cleanStorage(ClassLoader loader) {
+        File file = storageFile(loader);
+        if (file == null || !file.isFile()) return 0;
+        try {
+            String text = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            JSONObject root = new JSONObject(text);
+            JSONArray presets = root.optJSONArray("presets");
+            if (presets == null || presets.length() == 0) return 0;
+            JSONArray kept = new JSONArray();
+            int dropped = 0;
+            for (int i = 0; i < presets.length(); i++) {
+                JSONObject preset = presets.optJSONObject(i);
+                if (preset == null) continue;
+                String key = preset.optString("presetKey");
+                String type = preset.optString("filterType");
+                if (key.isEmpty() || key.equals(type) || !key.startsWith("custom_")) {
+                    dropped++;
+                    Log.i(TAG, "删掉内置预设的副本：" + key + "/" + type
+                        + "（" + preset.optString("filterNameResEntry") + "）");
+                    continue;
+                }
+                kept.put(preset);
+            }
+            if (dropped == 0) return 0;
+            root.put("presets", kept);
+            root.put("timestamp", System.currentTimeMillis());
+            write(file, root.toString(2));
+            Log.i(TAG, "预设存储已清理 " + dropped + " 条内置副本，重启相机后列表就干净了");
+            return dropped;
+        } catch (Throwable error) {
+            Log.e(TAG, "清理预设存储失败", error);
+            return 0;
+        }
+    }
+
     /** 存储文件：PresetDataRepository 里那个静态、无参、返回 File 的方法。 */
     private static File storageFile(ClassLoader loader) {
         try {
@@ -576,10 +630,15 @@ final class MasterPresetCreate {
         try {
             Object current = symbols.call("EffectData.current", effectData);
             if (current == null) return;
-            Object copy = current.getClass().getDeclaredConstructor().newInstance();
-            copyFields(current, copy);
+            // 模板优先用「绑同一个滤镜的内置预设」：卡片上的滤镜名来自 mFilterNameResEntry，
+            // 复制「当前预设」（多半是标准）会让自定义预设全显示成「标准」，和内置标准分不清。
+            Object template = current;
+            Object matched = builtinWithFilterType(filterType);
+            if (matched != null) template = matched;
+            Object copy = template.getClass().getDeclaredConstructor().newInstance();
+            copyFields(template, copy);
             setString(copy, FIELD_NAME, name);
-            String type = filterType == null ? "default" : filterType;
+            String type = filterType == null || filterType.isEmpty() ? "default" : filterType;
             setString(copy, FIELD_FILTER_TYPE, type);
             if (!name.equals(MasterPresets.name(copy))) {
                 Log.e(TAG, "预设名字段对不上，放弃写入内存: " + copy, new Throwable());
@@ -589,10 +648,22 @@ final class MasterPresetCreate {
             Method add = addMethod(repository, copy.getClass());
             if (add == null) return;
             add.invoke(null, copy);
-            Log.i(TAG, "当前会话已加入预设：" + name);
+            Log.i(TAG, "当前会话已加入预设：" + name
+                + "（模板 " + (template == current ? "当前预设" : type) + "）");
         } catch (Throwable error) {
             Log.e(TAG, "写入当前会话失败（不影响重启后生效）", error);
         }
+    }
+
+    /** 相机内置预设里绑这个滤镜的那一条（抄它的滤镜名等字段）；没有就返回 null。 */
+    private static Object builtinWithFilterType(String filterType) {
+        if (filterType == null || filterType.isEmpty() || "default".equals(filterType)) return null;
+        for (Object preset : MasterPresets.list()) {
+            String key = MasterPresets.key(preset);
+            if (key == null || key.startsWith("custom_")) continue;
+            if (filterType.equals(MasterPresets.filterType(preset))) return preset;
+        }
+        return null;
     }
 
     /** 相机里已经有同名的自定义预设。 */

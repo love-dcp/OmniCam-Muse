@@ -13,6 +13,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -276,6 +278,8 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // 五个 chip 在窄屏放不下，横着滚：挤成两行会把下面的封面顶掉一截。
+                .horizontalScroll(rememberScrollState())
                 .padding(
                     start = 12.dp, end = 12.dp,
                     top = padding.calculateTopPadding() + 6.dp,
@@ -286,7 +290,6 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         ) {
             Chip(text = "全部 ${presets.size}", selected = !favoriteOnly) { favoriteOnly = false }
             Chip(text = "收藏 ${presets.count { it.favorite }}", selected = favoriteOnly) { favoriteOnly = true }
-            Spacer(modifier = Modifier.weight(1f))
             Chip(text = if (busy == "dump") "读取中" else "核对", selected = false) {
                 if (busy != null) return@Chip
                 busy = "dump"
@@ -308,6 +311,19 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
             }
             Chip(text = if (busy == "import") "导入中" else "导入", selected = false) {
                 if (busy == null) import.launch(arrayOf("application/json", "text/plain", "*/*"))
+            }
+            // 相机存储里一旦混进「内置滤镜的副本」，预设条上「标准」「清透」就会各多一张，
+            // 而且相机自己的长按删除只认 custom_<n>，根本删不掉。这个入口让相机进程去清。
+            Chip(text = "清理", selected = false) {
+                if (busy != null) return@Chip
+                MasterPresets.queue(context, Bundle().apply {
+                    putString(DiagnosticsContract.KEY_PRESET_ACTION, "cleanpresets")
+                })
+                Toast.makeText(
+                    context,
+                    "已交给相机清理：重复的「标准」「清透」在下次启动相机后消失",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
 
@@ -920,7 +936,10 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset): Pr
         args.putString(DiagnosticsContract.KEY_PRESET_NAME, preset.name)
         val rows = filterRows(context)
         val exact = rows?.firstOrNull { it.title == filter }
-        val renamed = if (exact == null) rows?.firstOrNull { it.title == FilterAliases.current(filter) } else null
+        // 滤镜表里的名字可能被清空，按别名登记过的 LUT 文件名再找一次。
+        val lut = FilterAliases.lutOf(filter)
+        val renamed = (if (exact == null) rows?.firstOrNull { it.title == FilterAliases.current(filter) } else null)
+            ?: lut?.let { file -> rows?.firstOrNull { it.id == file } }
         when {
             // 读不到滤镜表就当有：宁可不建预设，也别往相机里塞错东西。
             rows == null -> Unit
@@ -931,12 +950,12 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset): Pr
             renamed != null -> {
                 args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
                 args.putString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE, FilterAliases.filterTypeOf(renamed.id))
-                hint = "「$filter」在本机叫「${renamed.title}」，已把参数绑到该滤镜并新建预设「${preset.name}」"
+                hint = "「$filter」在本机叫「${renamed.title.ifEmpty { filter }}」，已新建预设「${preset.name}」，在预设条里选中它就会用上"
             }
             // 本机确实没有这个滤镜：参数写到「标准」上，落一条同名预设承载这套参数。
             else -> {
                 args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
-                hint = "本机没有「$filter」，参数已落到「标准」并新建预设「${preset.name}」"
+                hint = "本机没有「$filter」，已新建预设「${preset.name}」（绑标准滤镜），在预设条里选中它就会用上"
             }
         }
     }

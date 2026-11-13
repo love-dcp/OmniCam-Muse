@@ -56,6 +56,8 @@ public final class MasterPresetApply {
     private static final long WATCH_MS = 1000L;
     private static volatile boolean watching;
     private static volatile boolean dumped;
+    /** 存储里的内置预设副本每次启动只清一遍。 */
+    private static volatile boolean storageCleaned;
     /**
      * 一次性把效果栏实例的类层次和方法表打进日志。
      *
@@ -274,6 +276,17 @@ public final class MasterPresetApply {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     effectData = param.thisObject;
                     Log.i(TAG, "effect data ready: " + param.thisObject.getClass().getName());
+                    // 每次启动顺手清一遍存储里的内置预设副本：它是「标准」「清透」重复卡的唯一来源，
+                    // 而且相机自己的删除只认 custom_<n>，用户长按也删不掉。清理只写文件，
+                    // 这次会话的列表已经建好了，下次启动才干净；删的全是副本，不会动用户预设。
+                    if (!storageCleaned) {
+                        storageCleaned = true;
+                        try {
+                            MasterPresetCreate.cleanStorage(param.thisObject.getClass().getClassLoader());
+                        } catch (Throwable error) {
+                            Log.e(TAG, "自动清理预设存储失败", error);
+                        }
+                    }
                 }
             });
         } catch (Throwable error) {
@@ -378,6 +391,13 @@ public final class MasterPresetApply {
                         } else if (request != null && "dumplist".equals(request.getString(DiagnosticsContract.KEY_PRESET_ACTION))) {
                             dumpPresetList();
                             markApplied(request);
+                        } else if (request != null && "cleanpresets".equals(request.getString(DiagnosticsContract.KEY_PRESET_ACTION))) {
+                            // 内置滤镜的副本（presetKey 为空或等于 filterType）会被当成自定义预设再加载一遍，
+                            // 界面上就是「标准」「清透」各多一张，而且长按删不掉。
+                            int dropped = MasterPresetCreate.cleanStorage(cameraLoader());
+                            Log.i(TAG, "cleanpresets via queue: " + dropped);
+                            markApplied(request);
+                            deletePending();
                         } else if (request != null && "rename".equals(request.getString(DiagnosticsContract.KEY_PRESET_ACTION))) {
                             String key = request.getString(DiagnosticsContract.KEY_PRESET_KEY);
                             String name = request.getString(DiagnosticsContract.KEY_PRESET_NAME);
@@ -1010,6 +1030,25 @@ public final class MasterPresetApply {
             return done;
         }
         Bundle out = new Bundle();
+        // 这一次是要落一条自定义预设：参数只写进预设自己的键，不去动当前滤镜那一组。
+        // 以前两支都写，于是「标准」滤镜的参数被一起改掉 —— 用户看到的就是内置「标准」
+        // 预设和他新加的预设参数一模一样，两张卡都叫「标准」，分不清谁是谁。
+        if (extras != null && extras.getBoolean(DiagnosticsContract.KEY_PRESET_CREATE, false)) {
+            String presetName = extras.getString(DiagnosticsContract.KEY_PRESET_NAME);
+            if (presetName != null && !presetName.isEmpty()) {
+                boolean created = MasterPresetCreate.create(cameraLoader(), presetName, extras);
+                out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, created ? 1 : 0);
+                out.putString(DiagnosticsContract.KEY_PRESET_RESULT,
+                    created ? "" : "预设「" + presetName + "」没写进相机");
+                if (created) {
+                    markApplied(extras);
+                    refreshEffectEntry(symbols);
+                    deletePending();
+                }
+                Log.i(TAG, "只写预设、不改当前滤镜：" + presetName + " -> " + created);
+                return out;
+            }
+        }
         int applied = 0;
         StringBuilder missed = new StringBuilder();
         // 界面上此刻选中的是哪一项：只有这一项能安全地同步刻度条（条是共用的一根）。
