@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -18,11 +20,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -57,6 +61,60 @@ internal fun DialogButtons(dismissText: String, onDismiss: () -> Unit, confirmTe
             onClick = onConfirm,
             colors = ButtonDefaults.textButtonColorsPrimary(),
             modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 一行「标签 + 单行输入框」，参数编辑用。[numeric] 为 true 时只收整数与负号。
+ */
+@Composable
+internal fun LabeledField(
+    label: String,
+    value: String,
+    placeholder: String,
+    numeric: Boolean = false,
+    onChange: (String) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            modifier = Modifier.width(58.dp),
+        )
+        BasicTextField(
+            value = value,
+            onValueChange = { raw ->
+                onChange(if (numeric) raw.filter { it.isDigit() || it == '-' } else raw.replace("\n", " "))
+            },
+            singleLine = true,
+            textStyle = TextStyle(fontSize = 15.sp, color = MiuixTheme.colorScheme.onSurface),
+            cursorBrush = SolidColor(MiuixTheme.colorScheme.primary),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = if (numeric) KeyboardType.Number else KeyboardType.Text,
+            ),
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MiuixTheme.colorScheme.surfaceContainerHigh)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (value.isEmpty()) {
+                        Text(
+                            text = placeholder,
+                            fontSize = 15.sp,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
+                    inner()
+                }
+            },
         )
     }
 }

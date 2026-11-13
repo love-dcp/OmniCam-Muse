@@ -37,13 +37,21 @@ public final class MasterPresetLibrary {
     public static final String FILE = "master_presets.txt";
     /** 用户自己起的名字单独存：内置数据刷新（syncBuiltin/reseed）时按 id 盖回去，不会被冲掉。 */
     public static final String NAMES_FILE = "master_preset_names.txt";
+    /**
+     * 用户在库里删掉的内置条目 id，一行一个。内置数据随模块升级增补时按它跳过，
+     * 否则删掉的内置预设下次启动就自己长回来了。
+     */
+    public static final String REMOVED_FILE = "master_preset_removed.txt";
     /** 内置数据的格式版本，改格式时递增，旧文件会被重新播种。 */
     private static final String VERSION = "v2";
     private static final String HEADER = "# OmniCam Muse · 大师预设库";
 
     private final File file;
     private final File namesFile;
+    private final File removedFile;
     private final List<Preset> presets = new ArrayList<>();
+    /** 被用户删掉的内置条目 id：读盘时过滤，内置数据刷新时跳过。 */
+    private final Set<String> removed = new LinkedHashSet<>();
     /** id → 用户起的名字。只记改过名的条目，没改过的用文件里的名字。 */
     private final java.util.Map<String, String> customNames = new java.util.LinkedHashMap<>();
     /**
@@ -57,9 +65,44 @@ public final class MasterPresetLibrary {
     public MasterPresetLibrary(File dir) {
         this.file = new File(dir, FILE);
         this.namesFile = new File(dir, NAMES_FILE);
+        this.removedFile = new File(dir, REMOVED_FILE);
+        loadRemoved();
         loadNames();
         load();
         applyNames();
+        if (!removed.isEmpty()) dropRemoved();
+    }
+
+    /** 过滤掉用户删过的内置条目（只在读盘后、内置数据刷新后需要）。 */
+    private void dropRemoved() {
+        for (int i = presets.size() - 1; i >= 0; i--) {
+            if (removed.contains(presets.get(i).id)) presets.remove(i);
+        }
+    }
+
+    private void loadRemoved() {
+        if (!removedFile.isFile()) return;
+        try {
+            String text = new String(Files.readAllBytes(removedFile.toPath()), StandardCharsets.UTF_8);
+            for (String raw : text.split("\r?\n")) {
+                String line = raw.trim();
+                if (!line.isEmpty() && !line.startsWith("#")) removed.add(line);
+            }
+        } catch (IOException ignored) {
+            // 读不出来就当没删过。
+        }
+    }
+
+    private void saveRemoved() {
+        try {
+            StringBuilder out = new StringBuilder();
+            out.append("# OmniCam Muse · 删掉的内置预设（内置数据刷新时跳过这些 id）\n");
+            for (String id : removed) out.append(id).append('\n');
+            Files.write(removedFile.toPath(), out.toString().getBytes(StandardCharsets.UTF_8));
+            removedFile.setReadable(true, false);
+        } catch (IOException ignored) {
+            // 写不进去只在本次运行里生效。
+        }
     }
 
     /** 把用户起的名字盖回列表（读盘之后、内置数据刷新之后都要再来一次）。 */
@@ -260,7 +303,8 @@ public final class MasterPresetLibrary {
      * 首次启动时把内置数据写进来。已有数据时不再动，避免覆盖用户的收藏与导入。
      */
     public void seedIfNeeded(String builtinText) {
-        if (!presets.isEmpty()) return;
+        // 用户把库删空过（removed 里有记录）时不要再塞回去，否则删了跟没删一样。
+        if (!presets.isEmpty() || !removed.isEmpty()) return;
         int added = importText(builtinText);
         if (added > 0) save();
     }
@@ -279,7 +323,7 @@ public final class MasterPresetLibrary {
             String[] parts = raw.split("\t", -1);
             if (parts.length < 14) continue;
             String id = parts[1].trim();
-            if (id.isEmpty() || !id.startsWith("omaster")) continue;
+            if (id.isEmpty() || !id.startsWith("omaster") || removed.contains(id)) continue;
             Preset preset = parse(parts);
             if (preset == null) continue;
             Preset existing = find(id);
@@ -323,6 +367,8 @@ public final class MasterPresetLibrary {
             if (presets.get(i).id.startsWith("omaster")) presets.remove(i);
         }
         importText(builtinText);
+        // 用户删过的内置条目不要跟着重建回来。
+        dropRemoved();
         for (Preset preset : presets) {
             preset.favorite = favorites.contains(preset.id);
             String[] kept = pro.get(preset.id);
@@ -440,6 +486,54 @@ public final class MasterPresetLibrary {
         preset.cameraName = name;
         if (name.isEmpty()) cameraNames.remove(id); else cameraNames.put(id, name);
         saveNames();
+        return true;
+    }
+
+    /**
+     * 从库里删掉一条预设。内置条目（id 以 omaster 开头）会记进黑名单，
+     * 内置数据随模块升级增补时不会再把它加回来。
+     *
+     * <p>只动库：相机里已经写入的那条预设是相机自己的数据，得在相机预设条上删。
+     */
+    public boolean remove(String id) {
+        if (id == null || id.isEmpty()) return false;
+        boolean hit = false;
+        for (int i = presets.size() - 1; i >= 0; i--) {
+            if (presets.get(i).id.equals(id)) {
+                presets.remove(i);
+                hit = true;
+            }
+        }
+        if (!hit) return false;
+        customNames.remove(id);
+        cameraNames.remove(id);
+        saveNames();
+        if (id.startsWith("omaster")) {
+            removed.add(id);
+            saveRemoved();
+        }
+        save();
+        return true;
+    }
+
+    /**
+     * 改一条预设的调色参数（详情页「改参数」用）。null 表示这一项不指定，
+     * 写进相机时保持相机当前值；[vignette] 只认「开」「关」，其它当没指定。
+     */
+    public boolean setParams(String id, String filter, String softLight, Integer tone, Integer saturation,
+                             Integer warmCool, Integer cyanMagenta, Integer sharpness, String vignette) {
+        Preset preset = find(id);
+        if (preset == null) return false;
+        preset.filter = cut(clean(filter), 60);
+        preset.softLight = cut(clean(softLight), 20);
+        preset.tone = tone;
+        preset.saturation = saturation;
+        preset.warmCool = warmCool;
+        preset.cyanMagenta = cyanMagenta;
+        preset.sharpness = sharpness;
+        String corner = clean(vignette);
+        preset.vignette = "开".equals(corner) || "关".equals(corner) ? corner : "";
+        save();
         return true;
     }
 

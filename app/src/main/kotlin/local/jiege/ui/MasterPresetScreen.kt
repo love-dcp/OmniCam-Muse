@@ -10,10 +10,13 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +27,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -69,6 +73,7 @@ import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -101,6 +106,10 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     var namingCamera by remember { mutableStateOf(false) }
     // 点「写入相机大师模式」时先弹窗定名字：这条预设写进相机后，预设条上显示的就是它。
     var namingForWrite by remember { mutableStateOf(false) }
+    // 长按封面弹操作面板；面板里的动作都先打开这条的详情页，再弹对应的对话框。
+    var actionId by remember { mutableStateOf<String?>(null) }
+    var editingParams by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
 
     /**
      * 把一条预设写进相机大师模式。[name] 是写进相机后那条预设的名字。
@@ -193,6 +202,77 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
 
     val shown = if (favoriteOnly) presets.filter { it.favorite } else presets
     val open = presets.firstOrNull { it.id == openId }
+    // 长按封面时弹面板；面板里选的动作先打开这条的详情，再弹对应的对话框。
+    val acting = presets.firstOrNull { it.id == actionId }
+
+    if (acting != null) {
+        PresetActionSheet(
+            preset = acting,
+            onAction = { action ->
+                actionId = null
+                openId = acting.id
+                when (action) {
+                    PresetAction.Write -> namingForWrite = true
+                    PresetAction.Rename -> renaming = true
+                    PresetAction.CameraName -> namingCamera = true
+                    PresetAction.Edit -> editingParams = true
+                    PresetAction.Delete -> deleting = true
+                }
+            },
+            onDismiss = { actionId = null },
+        )
+    }
+
+    if (open != null && deleting) {
+        val target = open
+        OverlayConfirmDialog(
+            title = "删除这条预设？",
+            summary = "「${target.name}」会从预设库里删掉，不能撤销。相机里已经写入的那条是相机自己的数据，不受影响。",
+            confirmText = "删除",
+            onConfirm = {
+                deleting = false
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) { MasterPresets.library(context).remove(target.id) }
+                    openId = null
+                    revision++
+                    Toast.makeText(
+                        context,
+                        if (ok) "已删除「${target.name}」" else "这条预设已经不在了",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
+            onDismiss = { deleting = false },
+        )
+    }
+
+    if (open != null && editingParams) {
+        val target = open
+        PresetParamsDialog(
+            preset = target,
+            onDismiss = { editingParams = false },
+            onConfirm = { values ->
+                editingParams = false
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        MasterPresets.library(context).setParams(
+                            target.id,
+                            values.filter,
+                            values.softLight,
+                            values.tone,
+                            values.saturation,
+                            values.warmCool,
+                            values.cyanMagenta,
+                            values.sharpness,
+                            values.vignette,
+                        )
+                    }
+                    revision++
+                    Toast.makeText(context, "参数已保存，重新「写入相机大师模式」后生效", Toast.LENGTH_LONG).show()
+                }
+            },
+        )
+    }
 
     if (open != null && renaming) {
         val target = open
@@ -280,6 +360,8 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
             onFavorite = { toggleFavorite(open) },
             onRename = { renaming = true },
             onCameraName = { namingCamera = true },
+            onEditParams = { editingParams = true },
+            onDelete = { deleting = true },
             onProRead = {
                 if (!proBusy && busy == null) {
                     proBusy = true
@@ -417,6 +499,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                 preset = preset,
                 onOpen = { openId = preset.id },
                 onFavorite = { toggleFavorite(preset) },
+                onLongPress = { actionId = preset.id },
             )
         }
 
@@ -440,12 +523,14 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     }
 }
 
-/** 一列里的封面卡片：图上盖标题与作者，右上角收藏。 */
+/** 一列里的封面卡片：图上盖标题与作者，右上角收藏；长按弹操作面板。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PresetCoverCard(
     preset: MasterPresetLibrary.Preset,
     onOpen: () -> Unit,
     onFavorite: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     val context = LocalContext.current
     val cover = rememberAssetImage(context, preset.cover)
@@ -455,7 +540,7 @@ private fun PresetCoverCard(
             .aspectRatio(0.75f)
             .clip(RoundedCornerShape(20.dp))
             .background(MiuixTheme.colorScheme.surfaceContainer)
-            .clickable(onClick = onOpen),
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress),
     ) {
         if (cover != null) {
             Image(
@@ -538,6 +623,8 @@ private fun PresetDetail(
     onFavorite: () -> Unit,
     onRename: () -> Unit,
     onCameraName: () -> Unit,
+    onEditParams: () -> Unit,
+    onDelete: () -> Unit,
     onProRead: () -> Unit,
     onApply: () -> Unit,
 ) {
@@ -822,6 +909,21 @@ private fun PresetDetail(
                 )
             }
         }
+        item(key = "edit-params") {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 12.dp)) {
+                TextButton(
+                    text = "改调色参数",
+                    onClick = onEditParams,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "直接改这条预设的滤镜、柔光、影调等；改完要重新「写入相机大师模式」才生效。",
+                    fontSize = 11.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
+                )
+            }
+        }
         item(key = "rename") {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 12.dp)) {
                 TextButton(
@@ -869,6 +971,22 @@ private fun PresetDetail(
                 Text(
                     text = "点了会先问一句「滤镜名」——那就是写进大师模式后预设条上显示的名字；"
                         + "相机需要是大师模式且在前台，没开也能写，进大师模式时自动补上。",
+                    fontSize = 11.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
+                )
+            }
+        }
+        item(key = "delete") {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 8.dp, bottom = 20.dp)) {
+                TextButton(
+                    text = "删除这条预设",
+                    enabled = !busy,
+                    onClick = onDelete,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "从预设库里删掉，不能恢复；相机里已经写入的那条是相机自己的数据，要到相机预设条上删。",
                     fontSize = 11.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     modifier = Modifier.padding(top = 8.dp, start = 4.dp),
@@ -1171,3 +1289,130 @@ private fun omasterJsonToText(json: String): String {
     }
     return out.toString()
 }
+
+/** 长按封面弹出的操作面板：写入、改名、改相机里的名字、改参数、删除。 */
+@Composable
+private fun PresetActionSheet(
+    preset: MasterPresetLibrary.Preset,
+    onAction: (PresetAction) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    OverlayDialog(
+        show = true,
+        title = preset.name,
+        summary = preset.summary(),
+        onDismissRequest = onDismiss,
+    ) {
+        Column {
+            for (action in PresetAction.values()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onAction(action) }
+                        .padding(horizontal = 8.dp, vertical = 13.dp),
+                ) {
+                    Text(
+                        text = action.label,
+                        fontSize = 15.sp,
+                        color = if (action == PresetAction.Delete) Color(0xFFE5484D)
+                        else MiuixTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            TextButton(text = "取消", onClick = onDismiss, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+private enum class PresetAction(val label: String) {
+    Write("写入相机大师模式"),
+    Rename("重命名（库里的名字）"),
+    CameraName("改相机里的预设名"),
+    Edit("改调色参数"),
+    Delete("删除这条预设"),
+}
+
+/** 改一条预设的调色参数；留空的项表示「不指定」，写进相机时保持相机当前值。 */
+@Composable
+private fun PresetParamsDialog(
+    preset: MasterPresetLibrary.Preset,
+    onConfirm: (ParamEdit) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var filter by remember { mutableStateOf(preset.filter) }
+    var softLight by remember { mutableStateOf(preset.softLight) }
+    var tone by remember { mutableStateOf(preset.tone?.toString().orEmpty()) }
+    var saturation by remember { mutableStateOf(preset.saturation?.toString().orEmpty()) }
+    var warmCool by remember { mutableStateOf(preset.warmCool?.toString().orEmpty()) }
+    var cyanMagenta by remember { mutableStateOf(preset.cyanMagenta?.toString().orEmpty()) }
+    var sharpness by remember { mutableStateOf(preset.sharpness?.toString().orEmpty()) }
+    var vignette by remember { mutableStateOf(preset.vignette) }
+
+    OverlayDialog(
+        show = true,
+        title = "改调色参数",
+        summary = "留空表示这一项不指定，写入相机时保持相机当前值。滤镜写「复古 75%」这种形式，强度缺省按 100%。",
+        onDismissRequest = onDismiss,
+    ) {
+        Column(modifier = Modifier.heightIn(max = 430.dp).verticalScroll(rememberScrollState())) {
+            LabeledField("滤镜", filter, "复古 75%") { filter = it }
+            Spacer(Modifier.height(9.dp))
+            LabeledField("柔光", softLight, "无 / 柔美 / 梦幻") { softLight = it }
+            Spacer(Modifier.height(9.dp))
+            LabeledField("影调", tone, "0", numeric = true) { tone = it }
+            Spacer(Modifier.height(9.dp))
+            LabeledField("饱和度", saturation, "0", numeric = true) { saturation = it }
+            Spacer(Modifier.height(9.dp))
+            LabeledField("冷暖", warmCool, "0", numeric = true) { warmCool = it }
+            Spacer(Modifier.height(9.dp))
+            LabeledField("青品", cyanMagenta, "0", numeric = true) { cyanMagenta = it }
+            Spacer(Modifier.height(9.dp))
+            LabeledField("锐度", sharpness, "0", numeric = true) { sharpness = it }
+            Spacer(Modifier.height(12.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = "暗角",
+                    fontSize = 14.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.width(58.dp),
+                )
+                Chip("不指定", vignette.isEmpty()) { vignette = "" }
+                Chip("开", vignette == "开") { vignette = "开" }
+                Chip("关", vignette == "关") { vignette = "关" }
+            }
+            Spacer(Modifier.height(16.dp))
+            DialogButtons("取消", onDismiss, "保存") {
+                onConfirm(
+                    ParamEdit(
+                        filter = filter.trim(),
+                        softLight = softLight.trim(),
+                        tone = tone.trim().toIntOrNull(),
+                        saturation = saturation.trim().toIntOrNull(),
+                        warmCool = warmCool.trim().toIntOrNull(),
+                        cyanMagenta = cyanMagenta.trim().toIntOrNull(),
+                        sharpness = sharpness.trim().toIntOrNull(),
+                        vignette = vignette,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+private data class ParamEdit(
+    val filter: String,
+    val softLight: String,
+    val tone: Int?,
+    val saturation: Int?,
+    val warmCool: Int?,
+    val cyanMagenta: Int?,
+    val sharpness: Int?,
+    val vignette: String,
+)
