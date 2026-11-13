@@ -62,6 +62,7 @@ final class MasterGrain {
     private static final String SIZE_KEY = "key_muse_grain_size_";
     private static final String PREF_GROUP = "com.oplus.camera_preferences_";
     private static final String PACKAGE = "com.oplus.camera";
+    private static final String CAMERA_FILES = "/data/user/0/com.oplus.camera/files";
     private static final String GLOBAL = "";
     private static final int UNSET = -1;
     private static final int LEVELS = 101;
@@ -265,6 +266,9 @@ final class MasterGrain {
 
     private static void applyCapture(Symbols symbols, Object tag) throws Throwable {
         String type = currentType(symbols);
+        // Every capture refreshes the file the native pass reads, so the sliders reach the photo even
+        // when they were never touched this session (the stored values are per filter type).
+        writeNative(symbols, type);
         int amount = stored(symbols, AMOUNT_KEY, type);
         int size = stored(symbols, SIZE_KEY, type);
         Log.i(TAG, "capture " + XposedHelpers.getObjectField(tag, "mFilterType") + " as " + type + " " + amount + "/" + size);
@@ -295,6 +299,7 @@ final class MasterGrain {
                         Object filter = XposedHelpers.getObjectField(tag, "mFilterType");
                         if (XposedHelpers.getBooleanField(tag, "mbFilterOpen") && !"default".equals(filter)) return;
                         String type = currentType(symbols);
+                        writeNative(symbols, type);
                         int amount = stored(symbols, AMOUNT_KEY, type);
                         if (amount <= 0) return;
                         int size = stored(symbols, SIZE_KEY, type);
@@ -375,6 +380,27 @@ final class MasterGrain {
 
     private static void store(Symbols symbols, String prefix, String type, int value) throws Throwable {
         symbols.call("Prefs.put", null, key(symbols, prefix + type), GLOBAL, Integer.class, value);
+        writeNative(symbols, type);
+    }
+
+    /**
+     * The capture pass draws the grain itself (grain_overlay.cpp), because camera 7.006 has no grain
+     * left in its still pipeline, so the sliders have to reach it through a file. Rewritten on every
+     * change, one line: "<amount> <size>", both 0..100.
+     */
+    private static void writeNative(Symbols symbols, String type) {
+        if (type == null || type.isEmpty()) return;
+        try {
+            int amount = stored(symbols, AMOUNT_KEY, type);
+            int size = stored(symbols, SIZE_KEY, type);
+            if (amount == UNSET) amount = defaults(type)[0];
+            if (size == UNSET) size = defaults(type)[1];
+            try (java.io.FileWriter writer = new java.io.FileWriter(CAMERA_FILES + "/master_grain", false)) {
+                writer.write(amount + " " + size);
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "grain state not written", error);
+        }
     }
 
     /** Same factory as the stock effect keys: the store type as group, the per-camera preference file. */

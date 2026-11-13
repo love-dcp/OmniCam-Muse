@@ -65,6 +65,7 @@ const char *masterColorRemapPath(const char *path, char *buf, size_t n);
 // POP fish-eye at capture (pop_fisheye.cpp): sets the renderer's fish-eye byte while the POP lens is on.
 void onLibraryLoadedForPopFisheye(HookFunction hook, const char *name, void *handle);
 
+
 // MONOPAN 50 / 迫冲 (monopan.cpp): the M3 grain, tone and vignette on the finished capture YUV.
 // Meishe renders the same shot through one of three entries depending on how the camera decided to
 // run the effect (a P010 host buffer, an 8-bit host buffer, an AHardwareBuffer), so each route in
@@ -83,3 +84,10 @@ struct MonoPanFrame {
 };
 // True when the shot was rewritten: a variant file was fresh and the helper answered.
 bool monopanApplyFrame(const MonoPanFrame &frame);
+
+// Master grain (grain_overlay.cpp): film grain drawn on the finished capture, since camera 7.006
+// has no grain left in its still pipeline. Called from the same capture hook as MONOPAN.
+bool grainApplyFrame(const MonoPanFrame &frame);
+// The same grain on the buffer that becomes the JPEG: HDRTransform's processMaster output, which is
+// where this build actually hands over the capture. Called for every library the camera loads.
+void installGrainOverlay(HookFunction hook, const char *name, void *handle);

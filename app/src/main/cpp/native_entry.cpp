@@ -19,6 +19,7 @@ constexpr char kPropNatural[] = "persist.omnicam.aura.nnat";   // natural mode: 
 constexpr char kPropGr[] = "persist.omnicam.aura.ngr";         // GR: LMT / vig / BasicTone core
 constexpr char kPropLut[] = "persist.omnicam.aura.nlut";       // master LUT slots
 constexpr char kPropSoft[] = "persist.omnicam.aura.nsl";       // soft light (MsRenderHDR*)
+constexpr char kPropGrain[] = "persist.omnicam.aura.ngrain";   // master grain on the capture buffer
 
 bool moduleOn(const char *prop) {
     char value[PROP_VALUE_MAX] = {};
@@ -45,6 +46,9 @@ void onLibraryLoaded(const char *name, void *handle) {
     if (moduleOn(kPropSoft)) onLibraryLoadedForSoftLight(installHook, name, handle);
     if (moduleOn(kPropLut)) onLibraryLoadedForLutSlots(installHook, name, handle);
     onLibraryLoadedForPopFisheye(installHook, name, handle);
+    // Ungated like the capture dump: the pass only touches the frame while the master slider is up,
+    // and it has to be in place before HDRTransform is first called.
+    if (moduleOn(kPropGrain)) installGrainOverlay(installHook, name, handle);
 }
 
 // The library is also loaded in system_server and the gallery (release license check). Patching libc
@@ -78,8 +82,8 @@ LibraryLoadedCallback native_init(const NativeApiEntries *entries) {
     const bool remap = moduleOn(kPropRemap);
     if (remap) installPopPathRemap(installHook);
     __android_log_print(ANDROID_LOG_INFO, "MuseNative",
-                        "groups: remap=%d natural=%d gr=%d lut=%d soft=%d", int(remap),
+                        "groups: remap=%d natural=%d gr=%d lut=%d soft=%d grain=%d", int(remap),
                         int(moduleOn(kPropNatural)), int(moduleOn(kPropGr)),
-                        int(moduleOn(kPropLut)), int(moduleOn(kPropSoft)));
+                        int(moduleOn(kPropLut)), int(moduleOn(kPropSoft)), int(moduleOn(kPropGrain)));
     return onLibraryLoaded;
 }

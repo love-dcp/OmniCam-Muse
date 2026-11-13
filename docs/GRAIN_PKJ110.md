@@ -210,3 +210,70 @@ newParameters: [needSimulation, 0, raw_value, none,
 | `work/pkj110_BaseMode.txt` / `pkj110_classes12_d.txt` | BaseMode 签名 / 全量反汇编（62MB） |
 | `work/pkj110_reqtag.txt` | CameraRequestTag 全部 126 个字段 |
 | `work/pkj110_camparam.txt` | CameraParameter 全部 Key |
+
+## 2026-11-13：成片颗粒落地（r330 / r331），以及参考包对照
+
+### 结论先行
+
+这台机器的**静图链路根本不经过 Meishe**。给 `libmsnativefilter.so` 的所有导出（`MsRenderHDRHostBuffer`
+等 14 个）都挂了钩，一次大师拍照里 `render entries probed` 会打出来（库确实在这时被 dlopen），
+但**没有任何一个渲染入口被调用**。所以：
+
+- 之前 r326 那套对 `libAlgoInterface.so` 的运行时补丁（amount 默认值 / gate / dispatch 三条全部生效）
+  当然看不到变化——`setMesheFilterParam` 探针计数为 0，它是这版固件上的死代码。
+- 换成参考包（X8U `V3-test160`）里那份 `libmsnativefilter.so` 也一样没有颗粒：成片 `lap var 112.8`，
+  和干净图 `88.0` 同一量级（真正的颗粒是 `1358.1`）。
+
+### 成片帧在哪儿
+
+`HDRTransformImpl::processMaster(InputImage* in, Image* out, void* param, void* bufs)`——
+`out` 就是直接变成 JPEG 的 NV21 底图（几何信息 `out+0x20` w / `+0x24` h / `+0x28` stride / `+0x2c` slice，
+输出 native handle 在 `bufs+0x28`，第一个 fd 是整图的 dma-buf，与 `hdrt_dump.cpp` 同一套偏移）。
+7.006 上 `processMasterV2` / `processMasterQuick` 已经不存在，符号只剩 `processMaster`、`process_photo`、
+`process`、`process_gallery`、`process_algo`、`process_format_convert`；
+三个 HDRTransform 库（Camera / Quick / Portrait）是同一份二进制的副本，各自独立映射，必须每个都挂。
+
+**r330 起**：`grain_overlay.cpp` 在 `processMaster` 返回后 mmap 这块 dma-buf（`PROT_READ|WRITE` +
+`DMA_BUF_SYNC_RW`），把颗粒画进 Y 平面，再 `DMA_BUF_SYNC_END` 交还给编码器。
+`processMaster` 内部会转调 `process_photo`，所以按 `out` 指针 + 400ms 窗口去重，避免画两遍。
+
+实测：`4096x3072` 与 `3072x4096` 各一次，单张 50–54ms；成片 JPEG 从 7.3MB 涨到 16.8MB，
+`lap var 88 → 1358`，1:1 裁剪下是正常的胶片颗粒，无彩色噪点（只动 Y）。
+
+### 参考包 `MUSE-X8U-V3-test160-KSU.zip` 的真相
+
+它的颗粒**不是 native 新写的**，就是本仓库的 `MasterGrain.applyFilmGrain()`：把
+`mbFilterGainAmount(-amount/100)`、`mnFilterGrainType=2`、`mFilterColorGrain=1` 等字段写进
+`CameraRequestTag`，再由相机自己的滤镜节点出颗粒。差别只有两处：
+
+1. 它的 `x8u-fix.sh` 把 `payload/x8u-fix/libmsnativefilter.so`（10.9MB，sha256 `1468143a…`）bind 到
+   `/odm/lib64/libmsnativefilter.so`；
+2. 它适配的相机是 **7.013.51**，我们的是 **7.006.123**。
+
+但两版相机的 dex 里**都没有大师颗粒代码**：7.013.51 全 APK 只有 4 处 `grain`，全是水印/贴纸 JSON 的
+参数名（`grain_amount` / `grain_highlight` / `grain_roughness` / `grain_size`，和 `gradientColors`、
+`gravity`、`grayBitmap` 排在一起）；`mbFilterGainAmount`、`mFilterGrainEnable`、`KEY_FILTER_GRAIN_*`
+在两版 APK 里都是 0 次——这些都在 `/product/framework/com.oplus.camera.unit.sdk.jar` 里，
+是**系统侧**的，不随相机 APK 变。
+
+我们这台机器的相关哈希与参考包脚本的对照：
+
+| 文件 | 本机 sha256 | 参考包脚本要求 |
+|---|---|---|
+| `libAlgoInterface.so` | `1e030b2d…` | 必须是 `1e030b2d…` ✅ 完全一致 |
+| `libmsnativefilter.so` | `7ce658e8…` | 在 target 白名单第 1 条 ✅ |
+| `libBasicTonePhoto.so` | `56ef6991…` | 要求 `a93f40de…` ❌ 不同 |
+
+`/odm/etc/camera/filters_res/film_grain_small.bin` 本来就在，原厂库里也有 `GetNoiseTexture`——
+即这套库本来就能出颗粒，只是静图链路走不到那里。**换库实测无效，已 umount 回滚**（md5 恢复，
+`/proc/1/mountinfo` 计数 0）。这条路在本机不成立，不必再试。
+
+### 现在的状态
+
+- 颗粒 = `grain_overlay.cpp` 自绘，读 `/data/user/0/com.oplus.camera/files/master_grain`（`<amount> <size>`）。
+- 该文件**每张照片拍摄时**由 Java 侧重写（`applyCapture` / `hookStandardCapture` 都调 `writeNative`），
+  所以没拖过滑条也会生效，且不会和 Prefs 里的值脱节。
+- 权重按原厂颗粒的分布来（原厂 shadows 0.89 / midtones 0.90 / highlights 0.85 近乎均匀），
+  本实现取 `0.55 + 0.45·4t(1-t)`；`cell = 1 + round(size·6)`，幅度上限 0.18。
+- 开关：`persist.omnicam.aura.ngrain=0` 关掉这一半（日志里 `groups: ... grain=0`）。
+- 已知不足：**预览不出颗粒**，只有成片有（预览侧要另做 GL 合成，未做）。

@@ -25,6 +25,7 @@ add_library(jiege_native SHARED
     monopan.cpp
     master_lut_slots.cpp
     pop_fisheye.cpp
+    grain_overlay.cpp
     hardware_buffer_read.cpp)
 
 target_compile_options(jiege_native PRIVATE -O2 -fvisibility=hidden)

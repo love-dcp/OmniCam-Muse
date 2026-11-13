@@ -1631,6 +1631,8 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
         // it does nothing unless the app wrote a variant for the shot (monopan.cpp).
         const int plain = origRenderHdrHostBuffer(core, effect, in, n, out, param, metadata, flags);
         if ((plain & 1) && monoPanRoute("hdr")) monopanApplyFrame(monoPanFrameOf(*out, "hdr"));
+        // Master grain is drawn on the same finished frame (grain_overlay.cpp).
+        if (plain & 1) grainApplyFrame(monoPanFrameOf(*out, "hdr"));
         return plain;
     }
     int ret;
@@ -1644,6 +1646,8 @@ int hookRenderHdrHostBuffer(void *core, void *effect, const HostBufferInfo *in, 
     // MONOPAN 50 / 迫冲: the M3 grain, tone and vignette on the same finished frame (monopan.cpp).
     // It consumes the variant the app wrote for this shot, so it does nothing for other filters.
     if (monoPanRoute("hdr")) monopanApplyFrame(monoPanFrameOf(*out, "hdr"));
+    // Master grain on the same finished frame, after the MONOPAN pass (grain_overlay.cpp).
+    grainApplyFrame(monoPanFrameOf(*out, "hdr"));
     if (sameFrameAgain(out->width, out->height, out->plane[0])) {
         __android_log_print(ANDROID_LOG_WARN, TAG, "capture: %ux%u scattered already, skipping", out->width, out->height);
         return ret;
