@@ -51,6 +51,10 @@ public final class MasterFilterStore {
         CAMERA_NAMES.put(MasterLayout.STANDARD, "标准");
         CAMERA_NAMES.put("qing_tou.bin", "清透");
         CAMERA_NAMES.put("hu_po.bin", "琥珀");
+        // 模块自带的两支理光 LUT（module/payload/meishe_lut）：相机只报 id、没有名字，
+        // 滤镜表里会显示成文件名。大师预设「理光正片 / 理光负片」按名字绑这两支滤镜。
+        CAMERA_NAMES.put("JG_RICOH_POSITIVE.cube.rgb.bin", "正片");
+        CAMERA_NAMES.put("JG_RICOH_NEGATIVE.cube.rgb.bin", "负片");
     }
 
     /** One line of the master filter list in the settings app. */

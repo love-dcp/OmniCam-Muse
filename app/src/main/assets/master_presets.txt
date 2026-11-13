@@ -35,3 +35,10 @@ p	omaster22	晴天复古	@屋顶橙子味	复古 100%	柔美	-20	0	15	-25	5	开	
 p	omaster23	霓虹灯	@屋顶橙子味	浓郁 100%	柔美	17	4	7	3	10	开	【环境建议】夜晚城市、霓虹灯招牌、繁华街道\n【场景推荐】夜景、街景、人像、城市风光\n【拍摄要点】霓虹灯风格，浓郁滤镜增强色彩饱和度，柔美柔光营造梦幻感，轻微欠曝保留霓虹细节，适合拍摄夜晚城市霓虹灯场景	Pro	0	master_presets/omaster23_a.webp	master_presets/omaster23_g1.webp,master_presets/omaster23_g2.webp
 p	omaster24	复古怀旧	@屋顶橙子味	复古 65%	无	-45	-6	15	-4	7	开	【环境建议】老城区、复古场景、室内怀旧场景\n【场景推荐】老物件、街景、人像、故事性场景\n【拍摄要点】复古怀旧风格，65%复古滤镜营造怀旧感，低影调增加复古氛围，降低饱和度模拟老照片质感，适合拍摄怀旧主题照片	Pro	0	master_presets/omaster24_a.webp	master_presets/omaster24_g1.webp
 p	omaster25	春日清新	@屋顶橙子味	清新 90%	柔美	12	4	-10	4	15	开	【环境建议】春日户外，光线柔和的场景\n【场景推荐】花卉、人像、风景、日常记录\n【拍摄要点】清新明亮的色调，适合表现春天的生机与活力	Auto	0	master_presets/omaster25_a.webp	
+# 下面两条来自 OMaster 的「Realme GR预设」包（作者 @尼克lin），是理光 GR 的图像控制：
+# 正片 / 负片。相机侧对应模块自带的 JG_RICOH_POSITIVE / JG_RICOH_NEGATIVE 两支 LUT。
+# GR 的十一个格子里，大师模式只有影调/饱和/青品/锐度这几轴，换算按：
+# 影调=对比度x8+影调曲线x4；饱和=饱和度x7；青品=色相x4；锐度=(锐度+清晰)x4。
+# 明暗、颗粒强度/尺寸、对比度(亮部/暗部) 在大师模式没有对应的格子，画面差异由 LUT 承担。
+p	omaster26	理光正片	@尼克lin	正片 100%	无	20	28	0	4	-8	关	【环境建议】白天户外、直射光或明暗反差明显的场景\n【场景推荐】街拍、人文、旅行、建筑与静物\n【拍摄要点】正片是理光 GR 的招牌色彩：红黄扎实、饱和偏高、暗部略压，阳光下的橙红与蓝天最出彩；阴天容易发闷，尽量找有光影的地方拍。	Auto	0	master_presets/omaster26_a.webp	master_presets/omaster26_g1.webp,master_presets/omaster26_g2.webp
+p	omaster27	理光负片	@尼克lin	负片 100%	无	36	21	0	12	4	关	【环境建议】阴天、室内窗光、傍晚等柔和光线\n【场景推荐】日常记录、人像、咖啡馆、雨天街景\n【拍摄要点】负片比正片柔和，暗部留得住细节，整体略偏冷偏品红，适合低反差和暗调画面；拍人像时白平衡可以再偏冷一点，肤色更干净。	Auto	0	master_presets/omaster27_a.webp	
