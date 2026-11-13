@@ -50,6 +50,8 @@ final class MasterPresetCreate {
     /** mFilterType */
     private static final String FIELD_FILTER_TYPE = "e";
     private static final String REPOSITORY = "com.oplus.camera.feature.captureparam.preset.PresetDataRepository";
+    /** 相机存自定义预设的 MMKV 文件（{@code files/mmkv/mmkv}）。 */
+    private static final String MMKV_FILE = "mmkv";
     /** 相机上限是 20 个自定义预设（0..19）。 */
     private static final int MAX_PRESETS = 20;
 
@@ -76,6 +78,14 @@ final class MasterPresetCreate {
                 return false;
             }
             keys.add(key);
+        } else if (keys.size() > 1) {
+            // 早期版本每次导入都新建一张，同名卡堆了好几张。这里只留一张（写参数用），
+            // 其余从登记表里摘掉，相机重启后列表就干净了。
+            String keep = keys.get(0);
+            int total = keys.size();
+            keys = new java.util.ArrayList<>(keys.subList(0, 1));
+            Log.i(TAG, "发现 " + total + " 张同名预设，只保留 " + keep);
+            dropIds(symbols, loader, name, keep);
         }
         // 光有 JSON 不够：预设卡片点开后读的是 MMKV 里<b>按预设键分开</b>的那一组效果键，
         // 没写就是全 0 —— 用户看到的就是「有这个名字的预设，但里面没有参数」。
@@ -121,15 +131,9 @@ final class MasterPresetCreate {
     /** MMKV 里已登记的自定义预设编号（{@code key_master_mode_custom_preset_ids}，形如 "[0,1,2]"）。 */
     private static java.util.List<Integer> customIds(Symbols symbols, ClassLoader loader) {
         java.util.List<Integer> ids = new java.util.ArrayList<>();
-        try {
-            Object key = symbols.call("DataKeys.prefs", null, String.class, "key_master_mode_custom_preset_ids");
-            Object raw = DataStore.get(symbols, loader, key, "");
-            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\d+")
-                .matcher(String.valueOf(raw));
-            while (matcher.find()) ids.add(Integer.valueOf(matcher.group()));
-        } catch (Throwable error) {
-            Log.e(TAG, "读自定义预设编号失败", error);
-        }
+        String raw = readString(symbols, loader, "key_master_mode_custom_preset_ids");
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\d+").matcher(raw);
+        while (matcher.find()) ids.add(Integer.valueOf(matcher.group()));
         return ids;
     }
 
@@ -148,10 +152,11 @@ final class MasterPresetCreate {
 
     private static String readString(Symbols symbols, ClassLoader loader, String preference) {
         try {
-            Object key = symbols.call("DataKeys.prefs", null, String.class, preference);
-            Object value = DataStore.get(symbols, loader, key, "");
+            Object value = DataStore.get(symbols, loader,
+                key(symbols, loader, String.class, preference), "");
             return value == null ? "" : String.valueOf(value);
         } catch (Throwable error) {
+            Log.e(TAG, "读 " + preference + " 失败", error);
             return "";
         }
     }
@@ -163,10 +168,51 @@ final class MasterPresetCreate {
 
     /** 把新编号写回 ids 列表（相机自己登记失败时的兜底，格式与它自己写的一致："[0,1,2]"）。 */
     private static void appendId(Symbols symbols, ClassLoader loader, java.util.List<Integer> ids, int id) {
+        java.util.List<Integer> all = new java.util.ArrayList<>(ids);
+        all.add(id);
+        writeIds(symbols, loader, all);
+    }
+
+    /**
+     * 把同名重复卡从登记表里摘掉，只留 {@code keep}。
+     *
+     * <p>只在读到的编号不少于 2 个时才写：万一读取失败拿到空表，写回去就是「[]」，
+     * 用户所有自定义预设会从列表里消失。
+     */
+    private static void dropIds(Symbols symbols, ClassLoader loader, String name, String keep) {
+        try {
+            java.util.List<Integer> all = customIds(symbols, loader);
+            if (all.size() < 2) {
+                Log.i(TAG, "登记表里只有 " + all.size() + " 个编号，跳过清理");
+                return;
+            }
+            java.util.List<Integer> kept = new java.util.ArrayList<>();
+            for (Integer id : all) {
+                String key = "custom_" + id;
+                boolean dup = !key.equals(keep)
+                    && name.equals(readString(symbols, loader, "key_master_mode_custom_preset_name_" + key));
+                if (dup) {
+                    Log.i(TAG, "摘掉重复预设 " + key + "（" + name + "）");
+                    continue;
+                }
+                kept.add(id);
+            }
+            if (kept.size() == all.size()) return;
+            writeIds(symbols, loader, kept);
+        } catch (Throwable error) {
+            Log.e(TAG, "清理重复预设失败：" + name, error);
+        }
+    }
+
+    private static void writeIds(Symbols symbols, ClassLoader loader, java.util.List<Integer> ids) {
         StringBuilder text = new StringBuilder("[");
-        for (Integer each : ids) text.append(each).append(',');
-        text.append(id).append(']');
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) text.append(',');
+            text.append(ids.get(i));
+        }
+        text.append(']');
         putString(symbols, loader, "key_master_mode_custom_preset_ids", text.toString());
+        Log.i(TAG, "登记表改为 " + text);
     }
 
     // ---- 每个预设自己的效果值 ---------------------------------------------------------------------
@@ -256,17 +302,16 @@ final class MasterPresetCreate {
     }
 
     private static int putInt(Symbols symbols, ClassLoader loader, String preference, int value) {
-        return put(symbols, loader, preference, value);
+        return put(symbols, loader, Integer.class, preference, value);
     }
 
     private static int putString(Symbols symbols, ClassLoader loader, String preference, String value) {
-        return put(symbols, loader, preference, value);
+        return put(symbols, loader, String.class, preference, value);
     }
 
-    private static int put(Symbols symbols, ClassLoader loader, String preference, Object value) {
+    private static int put(Symbols symbols, ClassLoader loader, Class<?> type, String preference, Object value) {
         try {
-            Object key = symbols.call("DataKeys.prefs", null, String.class, preference);
-            DataStore.put(symbols, loader, key, value);
+            DataStore.put(symbols, loader, key(symbols, loader, type, preference), value);
             return 1;
         } catch (Throwable error) {
             Log.e(TAG, "写 " + preference + " 失败", error);
@@ -274,30 +319,54 @@ final class MasterPresetCreate {
         }
     }
 
+    // ---- 真正的存储 ----------------------------------------------------------------------------
+
+    private static Class<?> keyClass;
+    private static java.lang.reflect.Constructor<?> keyCtor;
+
+    /**
+     * 造一个相机认的 DataKey —— <b>文件必须是 {@code mmkv}</b>。
+     *
+     * <p>相机的自定义预设（名字、滤镜类型、各档参数）全都存在
+     * {@code mmkv://com.oplus.camera/mmkv} 这份 MMKV 里（{@code files/mmkv/mmkv}）。
+     * {@code DataKeys.prefs} 指向 {@code com.oplus.camera_preferences}、
+     * {@code DataKeys.cameraPrefs} 指向 {@code ..._preferences_0}，用它们拼出来的键相机一个都不读 ——
+     * 这就是「预设建出来了、名字是『预设 N』、点开没有参数」的根因。
+     *
+     * <p>DataKey 的构造器是 {@code (包名, 文件名, 键名, 类型, 是否同步, 相机编号)}，其中文件名那一位
+     * 直接进 MMKV 的 mmapID。这里拿一个现成的 key 当模板，把包名/同步位/相机编号照抄，只换文件名和键名。
+     */
+    private static Object key(Symbols symbols, ClassLoader loader, Class<?> type, String name) throws Throwable {
+        if (keyClass == null) {
+            keyClass = de.robv.android.xposed.XposedHelpers.findClass("com.oplus.camera.data.DataKey", loader);
+            keyCtor = keyClass.getConstructor(String.class, String.class, String.class, Class.class,
+                boolean.class, Integer.class);
+        }
+        Object template = symbols.call("DataKeys.prefs", null, type, name);
+        String pkg = (String) keyClass.getField("d").get(template);
+        boolean local = keyClass.getField("h").getBoolean(template);
+        Object index = keyClass.getField("i").get(template);
+        return keyCtor.newInstance(pkg, MMKV_FILE, name, type, local, index);
+    }
+
     // ---- 名字 ------------------------------------------------------------------------------------
 
     /**
      * 改一个自定义预设的名字。
      *
-     * <p>相机把自定义预设名单独记在 DataManager 的
-     * {@code key_master_mode_custom_preset_name_<presetKey>} 上；预设列表 UI 显示的就是这一份，
-     * 不是 master_preset_storage.json 里的 presetName（实测：JSON 写「哈苏浓郁」、DataManager 里
-     * 还是「预设 1」，界面上就一直是「标准 - 预设 1」）。所以名字必须两处都写。
+     * <p>预设列表显示的既不是 master_preset_storage.json 里的 {@code presetName}，也不是
+     * DataManager 的 {@code ..._preferences} 文件，而是 MMKV 里
+     * {@code key_master_mode_custom_preset_name_<presetKey>}（`mmkv` 那份）。写错地方界面上
+     * 就一直是默认的「预设 N」。
      */
     static boolean renameStored(String presetKey, String name) {
         if (presetKey == null || presetKey.isEmpty() || name == null || name.isEmpty()) return false;
-        try {
-            Symbols symbols = Symbols.get();
-            ClassLoader loader = MasterPresetApply.cameraLoader();
-            Object key = symbols.call("DataKeys.prefs", null, String.class,
-                "key_master_mode_custom_preset_name_" + presetKey);
-            DataStore.put(symbols, loader, key, name);
-            Log.i(TAG, "预设名已写入 DataManager：" + presetKey + " = " + name);
-            return true;
-        } catch (Throwable error) {
-            Log.e(TAG, "改预设名失败：" + presetKey + " -> " + name, error);
-            return false;
-        }
+        Symbols symbols = Symbols.get();
+        ClassLoader loader = MasterPresetApply.cameraLoader();
+        if (symbols == null || loader == null) return false;
+        boolean done = putString(symbols, loader, "key_master_mode_custom_preset_name_" + presetKey, name) > 0;
+        Log.i(TAG, "预设名写入" + (done ? "成功" : "失败") + "：" + presetKey + " = " + name);
+        return done;
     }
 
     // ---- 文件 ------------------------------------------------------------------------------------
@@ -336,6 +405,17 @@ final class MasterPresetCreate {
                 break;
             }
             if (!replaced) presets.put(fresh);
+            // 同名条目只留一个：旧版本留下的重复卡如果只从 MMKV 摘、不删 JSON，
+            // 相机下次启动按 JSON 重建列表时又会冒出来。
+            for (int i = presets.length() - 1; i >= 0; i--) {
+                JSONObject preset = presets.optJSONObject(i);
+                if (preset == null) continue;
+                String key = preset.optString("presetKey");
+                if (!key.startsWith("custom_") || key.equals(presetKey)) continue;
+                if (!name.equals(preset.optString("presetName"))) continue;
+                presets.remove(i);
+                Log.i(TAG, "JSON 删掉重复同名条目：" + key);
+            }
             root.put("timestamp", System.currentTimeMillis());
             write(file, root.toString(2));
             Log.i(TAG, "JSON 已" + (replaced ? "更新" : "新增") + "：「" + name + "」" + presetKey);
