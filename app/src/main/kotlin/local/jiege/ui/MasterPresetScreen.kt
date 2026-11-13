@@ -1,13 +1,19 @@
 package local.jiege.ui
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.ExifInterface
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.util.Log
 import android.util.LruCache
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -68,6 +74,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import local.jiege.settings.DiagnosticsContract
 import local.jiege.settings.FilterAliases
 import local.jiege.settings.MasterPresetLibrary
+import local.jiege.settings.PicturePresetExtract
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -104,6 +111,8 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     // 库里这条叫什么、写进相机那条叫什么，是两件事：renaming 改前者，namingCamera 改后者。
     var renaming by remember { mutableStateOf(false) }
     var namingCamera by remember { mutableStateOf(false) }
+    // 点「导入」时先问一句从哪儿来：相册（照片选择器）还是文件（json / 文本）。
+    var choosingImport by remember { mutableStateOf(false) }
     // 点「写入相机大师模式」时先弹窗定名字：这条预设写进相机后，预设条上显示的就是它。
     var namingForWrite by remember { mutableStateOf(false) }
     // 长按封面弹操作面板；面板里的动作都先打开这条的详情页，再弹对应的对话框。
@@ -162,42 +171,53 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         }
     }
 
-    val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    // 相册里的图如果给的是 content://media/...，没权限就读不出来；读不到时顺手要一次。
+    val askMedia = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        Toast.makeText(
+            context,
+            if (granted) "已允许读取相册，再点一次「导入」"
+            else "没有相册权限也能用：点「导入」→「选预设文件」再挑这张图",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
+    // 相册（系统照片选择器）和文件选择器拿到的 uri 走同一条解析路径。
+    fun importUri(uri: Uri) {
         busy = "import"
         scope.launch {
-            // 只把文件读成行格式、数一下有几条；命名留到「写入相机」时再问。
-            val prepared = withContext(Dispatchers.IO) {
-                runCatching {
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: return@runCatching null
-                    // 选到图片、压缩包时按文本解析会拆出满屏乱码——先按二进制拒掉。
-                    if (looksBinary(bytes)) return@runCatching null
-                    val text = bytes.toString(Charsets.UTF_8)
-                    // OMaster 的 presets.json 是 JSON，本模块自己的导出是行格式。
-                    val converted = if (text.trimStart().startsWith("{")) {
-                        runCatching { omasterJsonToText(text) }.getOrDefault("")
-                    } else {
-                        text
-                    }
-                    val rows = countPresetRows(converted)
-                    if (rows == 0) null else converted to rows
-                }.getOrNull()
-            }
-            val added = if (prepared == null) -1 else withContext(Dispatchers.IO) {
-                runCatching { MasterPresets.library(context).importText(prepared.first) }.getOrDefault(0)
+            // 只把输入整理成行格式、数一下有几条；命名留到「写入相机」时再问。
+            val attempt = withContext(Dispatchers.IO) { readImport(context, uri) }
+            val plan = attempt.plan
+            val added = if (plan == null) -1 else withContext(Dispatchers.IO) {
+                runCatching { MasterPresets.library(context).importText(plan.text) }.getOrDefault(0)
             }
             busy = null
             revision++
             Toast.makeText(
                 context,
                 when {
-                    added > 0 -> "已导入 $added 条预设"
-                    else -> "这不是预设文件：支持 OMaster 的 presets.json，或本模块导出的预设文本"
+                    plan == null -> attempt.error
+                    added <= 0 -> "读到了内容，但没有一条是能用的预设格式"
+                    plan.note.isEmpty() -> "已导入 $added 条预设"
+                    else -> "已导入 $added 条预设 · ${plan.note}"
                 },
                 Toast.LENGTH_LONG,
             ).show()
+            // 读不到文件时顺手要一次媒体权限，用户授权后再点一次就能进去。
+            // 已经授权还读不到就别再弹（会变成「点了没反应」的死循环）。
+            val denied = context.checkSelfPermission(mediaPermission()) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (plan == null && attempt.needsMediaPermission && denied) askMedia.launch(mediaPermission())
         }
+    }
+
+    // 相册：系统照片选择器，按日期浏览所有照片，不占用应用自己的文件选择界面。
+    val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) importUri(uri)
+    }
+    // 文件：本模块导出的预设文本、OMaster 的 presets.json，或存成文件的照片。
+    val importFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importUri(uri)
     }
 
     val shown = if (favoriteOnly) presets.filter { it.favorite } else presets
@@ -272,6 +292,35 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                 }
             },
         )
+    }
+
+    if (choosingImport) {
+        OverlayDialog(
+            show = true,
+            title = "导入",
+            summary = "照片按画面估一套调色参数；也可以选本模块导出的预设文本，或 OMaster 的 presets.json。",
+            onDismissRequest = { choosingImport = false },
+        ) {
+            Column {
+                ImportSourceRow("从相册选照片", "按照片画面估参数，预设名默认用文件名") {
+                    choosingImport = false
+                    pickPhoto.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                }
+                ImportSourceRow("选预设文件", "本模块导出的 .txt，或 OMaster 的 presets.json") {
+                    choosingImport = false
+                    // "*/*" 一并放开：有些机型把图片存在文档目录里，只放开 json/文本会看不到。
+                    importFile.launch(arrayOf("application/json", "text/plain", "image/*", "*/*"))
+                }
+                Spacer(Modifier.height(4.dp))
+                TextButton(
+                    text = "取消",
+                    onClick = { choosingImport = false },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
     }
 
     if (open != null && renaming) {
@@ -429,7 +478,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                 }
             }
             Chip(text = if (busy == "import") "导入中" else "导入", selected = false) {
-                if (busy == null) import.launch(arrayOf("application/json", "text/plain", "*/*"))
+                if (busy == null) choosingImport = true
             }
             // 相机存储里一旦混进「内置滤镜的副本」，预设条上「标准」「清透」就会各多一张，
             // 而且相机自己的长按删除只认 custom_<n>，根本删不掉。这个入口让相机进程去清。
@@ -1074,6 +1123,159 @@ private fun rememberAssetImage(context: Context, path: String): ImageBitmap? {
     return image
 }
 
+/** 一次导入的产物：行格式文本、条数、给用户的补充说明（图片估算时才有）。 */
+private class ImportPlan(val text: String, val rows: Int, val note: String)
+
+/** 文件选择器里的显示名（含扩展名）；取不到时用 uri 末段。 */
+private fun displayName(context: Context, uri: Uri): String {
+    runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) {
+                        val value = cursor.getString(index).orEmpty().trim()
+                        if (value.isNotEmpty()) return value
+                    }
+                }
+            }
+    }
+    return uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifEmpty { "照片预设" }
+}
+
+/** 一次导入的结果：成功时带行格式文本，失败时带一句能直接给用户看的原因。 */
+private class ImportAttempt(
+    val plan: ImportPlan?,
+    val error: String,
+    /** 失败是因为读不到流（多半是相册没给权限）：上层据此请求一次媒体权限。 */
+    val needsMediaPermission: Boolean = false,
+)
+
+/** 单个文件读取上限：50MP 的 HEIC 也就十几兆，超过这个数多半是 RAW 或视频。 */
+private const val MAX_IMPORT_BYTES = 64L * 1024 * 1024
+private const val TAG_IMPORT = "MuseImport"
+
+/** 读相册需要的权限：Android 13 起是 READ_MEDIA_IMAGES。 */
+private fun mediaPermission(): String =
+    if (Build.VERSION.SDK_INT >= 33) android.Manifest.permission.READ_MEDIA_IMAGES
+    else android.Manifest.permission.READ_EXTERNAL_STORAGE
+
+/**
+ * 把选中的文件整理成预设行格式。
+ *
+ * 只读一次流：后面的 EXIF 和位图解码都在字节上做 —— 有些相册 provider 给的流只能开一次，
+ * 反复 openInputStream 会直接失败，以前就是被这个坑掉、统一报成「不是预设文件」。
+ */
+private fun readImport(context: Context, uri: Uri): ImportAttempt {
+    val declared = runCatching {
+        context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+    }.getOrNull() ?: -1L
+    if (declared > MAX_IMPORT_BYTES) {
+        return ImportAttempt(null, "这个文件有 ${declared / 1024 / 1024}MB，太大了；先导出成 JPG 再试")
+    }
+    val bytes = runCatching {
+        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+    }.getOrNull() ?: return ImportAttempt(
+        null,
+        "读不到这个文件：多半是相册没给权限。下面弹权限时点允许，然后重新选一次；" +
+            "也可以在文件选择器里走「文件 → 图片」。",
+        needsMediaPermission = true,
+    )
+    if (bytes.isEmpty()) return ImportAttempt(null, "这个文件是空的")
+    val fileName = displayName(context, uri)
+    Log.i(TAG_IMPORT, "uri=$uri bytes=${bytes.size} name=$fileName")
+
+    // 文本 / JSON 走原路：本模块导出的行格式，或 OMaster 的 presets.json。
+    if (!looksBinary(bytes)) {
+        val text = bytes.toString(Charsets.UTF_8)
+        val converted = if (text.trimStart().startsWith("{")) {
+            runCatching { omasterJsonToText(text) }.getOrDefault("")
+        } else {
+            text
+        }
+        val rows = countPresetRows(converted)
+        if (rows > 0) return ImportAttempt(ImportPlan(converted, rows, ""), "")
+    }
+
+    val name = fileName.substringBeforeLast('.')
+    // 图片自己带着预设参数时直接用，不再猜。
+    val embedded = embeddedPresetText(bytes)
+    if (embedded != null) {
+        val rows = countPresetRows(embedded)
+        if (rows > 0) {
+            Log.i(TAG_IMPORT, "embedded preset rows=$rows")
+            return ImportAttempt(ImportPlan(embedded, rows, "这张图里带着预设参数，直接读了出来"), "")
+        }
+    }
+    val picture = presetTextFromPicture(bytes, name) ?: return ImportAttempt(
+        null,
+        "这个文件既不是预设、也当不成照片（RAW、HEIF 或压缩包都读不了）。" +
+            "换成 JPG / PNG，或者 OMaster 的 presets.json",
+    )
+    Log.i(TAG_IMPORT, "picture estimate ${picture.second}")
+    return ImportAttempt(ImportPlan(picture.first, 1, "按画面估算：${picture.second}"), "")
+}
+
+/** 图片元数据里如果带了预设行格式（我们自己导出的图，或别人塞进 EXIF 的预设），直接用。 */
+private fun embeddedPresetText(bytes: ByteArray): String? = runCatching {
+    val exif = ExifInterface(bytes.inputStream())
+    for (tag in listOf(
+        ExifInterface.TAG_USER_COMMENT,
+        ExifInterface.TAG_IMAGE_DESCRIPTION,
+        ExifInterface.TAG_MAKER_NOTE,
+    )) {
+        val text = stripExifPrefix(exif.getAttribute(tag) ?: continue)
+        if (countPresetRows(text) > 0) return@runCatching text
+    }
+    null
+}.getOrNull()
+
+/** EXIF 文本字段常带 "ASCII\0\0\0" 这类编码前缀，去掉再解析，否则第一行的列会错位。 */
+private fun stripExifPrefix(raw: String): String {
+    var text = raw
+    for (prefix in listOf("ASCII\u0000\u0000\u0000", "UNICODE\u0000", "JIS\u0000\u0000\u0000\u0000\u0000")) {
+        if (text.startsWith(prefix)) {
+            text = text.substring(prefix.length)
+            break
+        }
+    }
+    return text.trimStart { it.code < 0x20 }
+}
+
+/**
+ * 把一张照片解码成小结像素，交给 PicturePresetExtract 估参数。
+ * 返回（行格式文本, 参数摘要）；不是图片或解码失败返回 null。
+ */
+private fun presetTextFromPicture(bytes: ByteArray, name: String): Pair<String, String>? =
+    runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        // 长边缩到 400 上下：统计量在这个尺寸上已经稳定，解码和遍历都很快。
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 400) sample *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            ?: return@runCatching null
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0) {
+            bitmap.recycle()
+            return@runCatching null
+        }
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        bitmap.recycle()
+        val params = PicturePresetExtract.fromPixels(pixels, width, height)
+        val label = name.ifBlank { "照片预设" }.take(24)
+        // id 由文件名算：同一张图重复导入会覆盖同一条，不会堆一堆重复。
+        val id = "picture_" + Integer.toHexString(label.hashCode())
+        ("v2\n" + params.row(id, label)) to params.describe()
+    }.getOrNull()
+
 /** 二进制文件（图片、压缩包）按文本解析只会得到乱码，先看头 4KB 有没有 NUL / 大量控制字符。 */
 private fun looksBinary(bytes: ByteArray): Boolean {
     val head = bytes.take(4096)
@@ -1112,12 +1314,15 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset, nam
     if (preset.vignette.isNotEmpty()) {
         args.putInt(DiagnosticsContract.KEY_PRESET_VIGNETTE, if (preset.vignetteOn()) 100 else 0)
     }
+    // 每次写入都落成一条「自定义预设」：预设名和 CREATE 无条件下发，
+    // 否则没有滤镜的预设（照片估算出来的那种）会被当成「改当前滤镜的参数」，
+    // 写脏内置的标准滤镜那一组。
+    args.putString(DiagnosticsContract.KEY_PRESET_NAME, target)
+    args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
     if (preset.filter.isNotEmpty()) {
         val filter = preset.filterName()
         args.putString(DiagnosticsContract.KEY_PRESET_FILTER, filter)
         args.putInt(DiagnosticsContract.KEY_PRESET_FILTER_STRENGTH, preset.filterStrength())
-        // 预设名始终带上：本机没有这个滤镜时要靠它落一条自定义预设。
-        args.putString(DiagnosticsContract.KEY_PRESET_NAME, target)
         val rows = filterRows(context)
         val exact = rows?.firstOrNull { it.title == filter }
         // 滤镜表里的名字可能被清空，按别名登记过的 LUT 文件名再找一次。
@@ -1128,7 +1333,6 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset, nam
         // 一律落成一条「自定义预设」，参数只进预设自己那组键。
         // 以前名字对得上就直接写效果栏，写的是「当前选中滤镜」那一组 —— 用户看到的
         // 就是「内置的标准滤镜被这条预设的参数改掉了」，而且两张卡参数一样。
-        args.putBoolean(DiagnosticsContract.KEY_PRESET_CREATE, true)
         // 相机预设里的 filterType 就是滤镜列表里的 id（fuji-nc.bin 这种，带扩展名），
         // 不是去掉扩展名的 kodak/fuji-nc。写错的话这条预设绑不上滤镜，卡片滤镜名会落成「标准」。
         val type = bound?.id.orEmpty()
@@ -1146,6 +1350,10 @@ private fun presetArgs(context: Context, preset: MasterPresetLibrary.Preset, nam
             else ->
                 "已存成预设「$target」（滤镜「${bound.title}」），去相机预设条里选中它就会用上"
         }
+    } else {
+        // 照片估算这类预设没有滤镜：明确绑「标准」，参数进它自己那组键。
+        args.putString(DiagnosticsContract.KEY_PRESET_FILTER_TYPE, "default")
+        hint = "已存成预设「$target」（没指定滤镜，绑标准滤镜，参数用这一套）"
     }
     // 大师 Pro 档的拍摄参数：预设里写了哪几项就下发哪几项，没写的保持相机当前值。
     if (preset.iso.isNotEmpty()) args.putString(DiagnosticsContract.KEY_PRESET_ISO, preset.iso)
@@ -1416,3 +1624,23 @@ private data class ParamEdit(
     val sharpness: Int?,
     val vignette: String,
 )
+
+/** 「导入」面板里的一行：标题 + 一句说明，点整行就去对应的选择器。 */
+@Composable
+private fun ImportSourceRow(title: String, hint: String, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 11.dp),
+    ) {
+        Text(text = title, fontSize = 15.sp, color = MiuixTheme.colorScheme.onSurface)
+        Text(
+            text = hint,
+            fontSize = 11.sp,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            modifier = Modifier.padding(top = 3.dp),
+        )
+    }
+}

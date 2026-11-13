@@ -4,6 +4,13 @@
         <package android:name="com.oplus.camera" />
         <package android:name="com.coloros.gallery3d" />
     </queries>
+    <!-- 从相册选照片做预设：有些相册给的是 content://media/... 而不是文件选择器的
+         content://...documents/...，读那种 uri 需要媒体权限。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="false"
         android:label="@string/app_name"

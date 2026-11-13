@@ -46,6 +46,7 @@ $xposed = "$xposed;$(Join-Path $out 'classes.jar');$($kotlin.FullName)"
 $sources += @(Get-ChildItem (Join-Path $project 'app/src/main/java/local/jiege/lut') -Filter *.java | ForEach-Object FullName)
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/MasterFilterContract.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/MasterFilterStore.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/FilterAliases.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/ModuleSettings.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/LaunchModes.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/ModelPresets.java')
@@ -54,6 +55,10 @@ $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/MasterLo
 $sources += (Join-Path $PSScriptRoot 'StoreOfflineTest.java')
 $sources += (Join-Path $PSScriptRoot 'FiltersOfflineTest.java')
 $sources += (Join-Path $PSScriptRoot 'LutBakerOfflineTest.java')
+# 照片估算预设：提取器是纯 Java，库解析也用同一个文件，两个一起编进离线测试。
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/MasterPresetLibrary.java')
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/PicturePresetExtract.java')
+$sources += (Join-Path $PSScriptRoot 'PicturePresetOfflineTest.java')
 & javac -encoding UTF-8 -d $out -cp "$out;$xposed;$android" $sources
 if ($LASTEXITCODE -ne 0) { throw 'offline test compile failed' }
 & java '-Dfile.encoding=UTF-8' -cp "$out;$xposed;$android" FiltersOfflineTest
@@ -65,6 +70,9 @@ if ($LASTEXITCODE -ne 0) { throw 'store tests failed' }
 
 & java -cp $out MasterLooksOfflineTest
 if ($LASTEXITCODE -ne 0) { throw "master colour tests failed" }
+
+& java '-Dfile.encoding=UTF-8' -cp $out PicturePresetOfflineTest
+if ($LASTEXITCODE -ne 0) { throw "picture preset tests failed" }
 
 # The /odm/lib64 overlay is shared by every module. Detaching it while removing OmniCam also
 # unmounts OPlusHapticsEnhancer's vibration library until the next boot, which is forbidden on
