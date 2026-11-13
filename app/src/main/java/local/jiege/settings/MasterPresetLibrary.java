@@ -35,16 +35,63 @@ import java.util.Set;
  */
 public final class MasterPresetLibrary {
     public static final String FILE = "master_presets.txt";
+    /** 用户自己起的名字单独存：内置数据刷新（syncBuiltin/reseed）时按 id 盖回去，不会被冲掉。 */
+    public static final String NAMES_FILE = "master_preset_names.txt";
     /** 内置数据的格式版本，改格式时递增，旧文件会被重新播种。 */
     private static final String VERSION = "v2";
     private static final String HEADER = "# OmniCam Muse · 大师预设库";
 
     private final File file;
+    private final File namesFile;
     private final List<Preset> presets = new ArrayList<>();
+    /** id → 用户起的名字。只记改过名的条目，没改过的用文件里的名字。 */
+    private final java.util.Map<String, String> customNames = new java.util.LinkedHashMap<>();
 
     public MasterPresetLibrary(File dir) {
         this.file = new File(dir, FILE);
+        this.namesFile = new File(dir, NAMES_FILE);
+        loadNames();
         load();
+        applyNames();
+    }
+
+    /** 把用户起的名字盖回列表（读盘之后、内置数据刷新之后都要再来一次）。 */
+    private void applyNames() {
+        if (customNames.isEmpty()) return;
+        for (Preset preset : presets) {
+            String name = customNames.get(preset.id);
+            if (name != null && !name.isEmpty()) preset.name = name;
+        }
+    }
+
+    private void loadNames() {
+        if (!namesFile.isFile()) return;
+        try {
+            String text = new String(Files.readAllBytes(namesFile.toPath()), StandardCharsets.UTF_8);
+            for (String raw : text.split("\r?\n")) {
+                String line = raw.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                int tab = line.indexOf('\t');
+                if (tab <= 0 || tab == line.length() - 1) continue;
+                customNames.put(line.substring(0, tab).trim(), unescape(line.substring(tab + 1)));
+            }
+        } catch (IOException ignored) {
+            // 名字文件读不出来就当没改过名，主库照常用。
+        }
+    }
+
+    private void saveNames() {
+        try {
+            StringBuilder out = new StringBuilder();
+            out.append("# OmniCam Muse · 自己起的预设名（id + 制表符 + 名字）\n");
+            for (java.util.Map.Entry<String, String> entry : customNames.entrySet()) {
+                out.append(entry.getKey()).append('\t').append(escape(entry.getValue())).append('\n');
+            }
+            Files.write(namesFile.toPath(), out.toString().getBytes(StandardCharsets.UTF_8));
+            namesFile.setReadable(true, false);
+        } catch (IOException ignored) {
+            // 写不进去就只在内存里生效。
+        }
     }
 
     /** 一条预设：8 个大师参数 + 拍摄建议。数值为 null 表示该项没有指定。 */
@@ -224,6 +271,8 @@ public final class MasterPresetLibrary {
             if (!row(existing).equals(row(preset))) updated++;
             presets.set(presets.indexOf(existing), preset);
         }
+        // 内置数据把名字覆盖回原厂名了，用户自己改过的名字在这里补回来。
+        applyNames();
         if (added > 0 || updated > 0) save();
         return added;
     }
@@ -257,6 +306,7 @@ public final class MasterPresetLibrary {
             preset.focus = kept[3];
             preset.whiteBalance = kept[4];
         }
+        applyNames();
         save();
     }
 
@@ -287,12 +337,28 @@ public final class MasterPresetLibrary {
         return value == null ? "" : value.replace('\t', ' ').replace('\n', ' ').trim();
     }
 
+    /** 名字长度上限：相机预设条的显示宽度就这么点，太长会被截成「…」。 */
+    private static final int MAX_NAME = 24;
+
+    private static String cut(String value, int max) {
+        return value.length() <= max ? value : value.substring(0, max).trim();
+    }
+
     /**
      * 解析并导入一段文本：本模块的行格式，或 OMaster 的 presets.json（由调用方先转成行格式）。
      * 同 id 覆盖，新 id 追加。返回实际导入的条数。
      */
     public int importText(String text) {
-        int added = 0;
+        return importText(text, "");
+    }
+
+    /**
+     * 带自定义名字的导入：[namePrefix] 非空时用它替换文件里的名字——只有一条就直接叫这个名字，
+     * 多条自动编号（前缀 1、前缀 2…），这样一次导入一堆预设也能全用自己起的名字。
+     * 留空则保留文件里的原名。
+     */
+    public int importText(String text, String namePrefix) {
+        List<Preset> parsed = new ArrayList<>();
         for (String raw : text.split("\r?\n")) {
             String line = raw.trim();
             if (line.isEmpty() || line.startsWith("#") || VERSION.equals(line)) continue;
@@ -300,11 +366,34 @@ public final class MasterPresetLibrary {
             if (parts.length < 14) continue;
             Preset preset = parse(parts);
             if (preset == null) continue;
-            merge(preset);
-            added++;
+            parsed.add(preset);
         }
-        if (added > 0) save();
-        return added;
+        String prefix = cut(clean(namePrefix), MAX_NAME);
+        for (int i = 0; i < parsed.size() && !prefix.isEmpty(); i++) {
+            Preset preset = parsed.get(i);
+            String name = parsed.size() == 1 ? prefix : prefix + " " + (i + 1);
+            preset.name = name;
+            customNames.put(preset.id, name);
+        }
+        for (Preset preset : parsed) merge(preset);
+        if (!prefix.isEmpty()) saveNames();
+        if (!parsed.isEmpty()) save();
+        return parsed.size();
+    }
+
+    /** 给一条预设改名（导入后想换个名字，或导入时没起名）。空名字、名字没变都返回 false。 */
+    public boolean rename(String id, String name) {
+        Preset preset = find(id);
+        if (preset == null) return false;
+        String value = cut(clean(name), MAX_NAME);
+        if (value.isEmpty()) return false;
+        // 名字单独存一份：内置数据刷新时按 id 盖回来，改过的名字不会被冲掉。
+        boolean changed = !value.equals(preset.name) || !value.equals(customNames.get(id));
+        preset.name = value;
+        customNames.put(id, value);
+        saveNames();
+        if (changed) save();
+        return changed;
     }
 
     private void merge(Preset incoming) {
@@ -383,8 +472,10 @@ public final class MasterPresetLibrary {
             for (Preset preset : presets) out.append(row(preset)).append('\n');
             Files.write(file.toPath(), out.toString().getBytes(StandardCharsets.UTF_8));
             file.setReadable(true, false);
-        } catch (IOException ignored) {
+            System.out.println("[MusePreset] save ok " + file + " " + presets.size() + " rows");
+        } catch (IOException error) {
             // 存储不可写时保持内存状态，UI 仍可用。
+            System.out.println("[MusePreset] save FAILED " + file + " " + error);
         }
     }
 

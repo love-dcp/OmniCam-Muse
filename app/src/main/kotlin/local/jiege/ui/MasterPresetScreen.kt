@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.LruCache
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -93,6 +94,9 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     var busy by remember { mutableStateOf<String?>(null) }
     var proBusy by remember { mutableStateOf(false) }
     var dump by remember { mutableStateOf<String?>(null) }
+    // 导入前先攒在手里：文件选完，弹窗让用户自己给这批预设起名，确认了才落库。
+    var pendingImport by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    var renaming by remember { mutableStateOf(false) }
 
     LaunchedEffect(revision) {
         presets = withContext(Dispatchers.IO) { MasterPresets.library(context).presets() }
@@ -112,12 +116,13 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         if (uri == null) return@rememberLauncherForActivityResult
         busy = "import"
         scope.launch {
-            val added = withContext(Dispatchers.IO) {
+            // 先只把文件读成行格式、数一下有几条，名字等用户在弹窗里输入后再落库。
+            val prepared = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: return@runCatching -1
+                        ?: return@runCatching null
                     // 选到图片、压缩包时按文本解析会拆出满屏乱码——先按二进制拒掉。
-                    if (looksBinary(bytes)) return@runCatching -2
+                    if (looksBinary(bytes)) return@runCatching null
                     val text = bytes.toString(Charsets.UTF_8)
                     // OMaster 的 presets.json 是 JSON，本模块自己的导出是行格式。
                     val converted = if (text.trimStart().startsWith("{")) {
@@ -125,23 +130,77 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                     } else {
                         text
                     }
-                    if (converted.isBlank()) return@runCatching -2
-                    MasterPresets.library(context).importText(converted)
-                }.getOrDefault(-1)
+                    val rows = countPresetRows(converted)
+                    if (rows == 0) null else converted to rows
+                }.getOrNull()
             }
             busy = null
-            revision++
-            val message = when {
-                added > 0 -> "已导入 $added 条预设"
-                added == -2 -> "这不是预设文件：支持 OMaster 的 presets.json，或本模块导出的预设文本"
-                else -> "没有读到可识别的预设，支持 OMaster 的 presets.json 或本模块导出的文本"
+            if (prepared == null) {
+                Toast.makeText(
+                    context,
+                    "这不是预设文件：支持 OMaster 的 presets.json，或本模块导出的预设文本",
+                    Toast.LENGTH_LONG,
+                ).show()
+            } else {
+                pendingImport = prepared
             }
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
         }
     }
 
     val shown = if (favoriteOnly) presets.filter { it.favorite } else presets
     val open = presets.firstOrNull { it.id == openId }
+
+    // 导入时自己起名：只有一条就直接用这个名字，多条按「名字 1 / 名字 2」编号；留空保留文件里的原名。
+    pendingImport?.let { (text, count) ->
+        NameFieldDialog(
+            title = "导入 $count 条预设",
+            summary = "给它们起个名字：只有一条时就用这个名字，多条会自动加编号；留空则用文件里的名字。",
+            initial = "",
+            placeholder = if (count == 1) "预设名（可留空）" else "名字前缀（可留空）",
+            confirmText = "导入",
+            onConfirm = { name ->
+                pendingImport = null
+                busy = "import"
+                scope.launch {
+                    val added = withContext(Dispatchers.IO) {
+                        runCatching { MasterPresets.library(context).importText(text, name) }.getOrDefault(0)
+                    }
+                    busy = null
+                    revision++
+                    Toast.makeText(
+                        context,
+                        if (added > 0) "已导入 $added 条预设" else "没有读到可识别的预设",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            },
+            onDismiss = { pendingImport = null },
+        )
+    }
+
+    if (open != null && renaming) {
+        val target = open
+        NameFieldDialog(
+            title = "重命名预设",
+            summary = "只改这条预设在你库里的名字；下次写入相机时，相机里那一条也会跟着用新名字。",
+            initial = target.name,
+            placeholder = "预设名",
+            confirmText = "保存",
+            onConfirm = { name ->
+                renaming = false
+                if (name.isNotEmpty()) {
+                    scope.launch {
+                        val ok = withContext(Dispatchers.IO) {
+                            MasterPresets.library(context).rename(target.id, name)
+                        }
+                        revision++
+                        Toast.makeText(context, if (ok) "已改名为 $name" else "名字没有变化", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onDismiss = { renaming = false },
+        )
+    }
 
     if (open != null) {
         PresetDetail(
@@ -152,6 +211,7 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
             proBusy = proBusy,
             onBack = { openId = null },
             onFavorite = { toggleFavorite(open) },
+            onRename = { renaming = true },
             onProRead = {
                 if (!proBusy && busy == null) {
                     proBusy = true
@@ -423,12 +483,15 @@ private fun PresetDetail(
     proBusy: Boolean,
     onBack: () -> Unit,
     onFavorite: () -> Unit,
+    onRename: () -> Unit,
     onProRead: () -> Unit,
     onApply: () -> Unit,
 ) {
     val images = preset.images()
     var tipsOpen by remember(preset.id) { mutableStateOf(true) }
     val pager = rememberPagerState(pageCount = { if (images.isEmpty()) 1 else images.size })
+    // 系统返回键先回列表，不然会直接把整个设置页关掉。
+    BackHandler { onBack() }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().overScrollVertical().nestedScroll(nestedScrollConnection),
@@ -705,6 +768,21 @@ private fun PresetDetail(
                 )
             }
         }
+        item(key = "rename") {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 12.dp)) {
+                TextButton(
+                    text = "重命名这条预设",
+                    onClick = onRename,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "改名只影响显示与写入相机时的预设名，调色参数不变。",
+                    fontSize = 11.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
+                )
+            }
+        }
         item(key = "apply") {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 18.dp)) {
                 TextButton(
@@ -813,6 +891,12 @@ private fun looksBinary(bytes: ByteArray): Boolean {
         if (value < 9 || (value in 14..31)) control++
     }
     return control * 20 > head.size
+}
+
+/** 行格式文本里有几条像样的预设：至少 14 列，跳过注释与版本行。 */
+private fun countPresetRows(text: String): Int = text.lineSequence().count { raw ->
+    val line = raw.trim()
+    line.isNotEmpty() && !line.startsWith("#") && line != "v2" && raw.count { it == '\t' } >= 13
 }
 
 /** 一条预设变成相机侧的入参；没有的项不下发，相机保持原值。 */
@@ -956,10 +1040,22 @@ private fun omasterJsonToText(json: String): String {
     val root = JSONObject(json)
     val presets = root.optJSONArray("presets") ?: return ""
     val out = StringBuilder("v2\n")
+    // id 由名字算出来：同一个文件重复导入会覆盖同一条，改过名字的另存一条，不会互相顶掉。
+    val usedIds = HashSet<String>()
     for (i in 0 until presets.length()) {
         val preset = presets.optJSONObject(i) ?: continue
-        if (preset.optString("name").startsWith("_")) continue
-        val fields = arrayOf("", "import_${i + 1}", preset.optString("name"), preset.optString("author"),
+        val rawName = preset.optString("name").trim()
+        if (rawName.startsWith("_")) continue
+        // 没有名字的条目留着也点不开（库要求名字非空），先给个能改的默认名。
+        val name = rawName.ifEmpty { "导入 ${i + 1}" }
+        val base = "import_" + Integer.toHexString(name.hashCode())
+        var id = base
+        var duplicate = 2
+        while (!usedIds.add(id)) {
+            id = base + "_" + duplicate
+            duplicate++
+        }
+        val fields = arrayOf("", id, name, preset.optString("author"),
             "", "", "", "", "", "", "", "", "", "", "0", "", "", "", "", "", "", "")
         var tips = ""
         val sections = preset.optJSONArray("sections")
