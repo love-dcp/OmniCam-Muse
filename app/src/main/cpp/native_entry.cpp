@@ -27,6 +27,14 @@ bool moduleOn(const char *prop) {
     return value[0] != '0';
 }
 
+// Opt-in switch: absent is off, only "1" turns it on. Used by the halves that must not run unless
+// someone asked for them, so a fresh install cannot make a photo worse.
+bool moduleOptIn(const char *prop) {
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(prop, value) <= 0) return false;
+    return value[0] == '1';
+}
+
 struct NativeApiEntries {
     uint32_t version;
     HookFunction hook;
@@ -48,7 +56,10 @@ void onLibraryLoaded(const char *name, void *handle) {
     onLibraryLoadedForPopFisheye(installHook, name, handle);
     // Ungated like the capture dump: the pass only touches the frame while the master slider is up,
     // and it has to be in place before HDRTransform is first called.
-    if (moduleOn(kPropGrain)) installGrainOverlay(installHook, name, handle);
+    // Opt-in (persist.omnicam.aura.ngrain=1). Off by default since 2026-11-14: on POP captures the
+    // grain pass corrupts the upper half of the frame ("满天星"), and a photo that is merely grainy
+    // is not worth a chance of a destroyed one.
+    if (moduleOptIn(kPropGrain)) installGrainOverlay(installHook, name, handle);
 }
 
 // The library is also loaded in system_server and the gallery (release license check). Patching libc
@@ -84,6 +95,6 @@ LibraryLoadedCallback native_init(const NativeApiEntries *entries) {
     __android_log_print(ANDROID_LOG_INFO, "MuseNative",
                         "groups: remap=%d natural=%d gr=%d lut=%d soft=%d grain=%d", int(remap),
                         int(moduleOn(kPropNatural)), int(moduleOn(kPropGr)),
-                        int(moduleOn(kPropLut)), int(moduleOn(kPropSoft)), int(moduleOn(kPropGrain)));
+                        int(moduleOn(kPropLut)), int(moduleOn(kPropSoft)), int(moduleOptIn(kPropGrain)));
     return onLibraryLoaded;
 }

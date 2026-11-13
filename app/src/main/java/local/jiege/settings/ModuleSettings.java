@@ -215,7 +215,9 @@ public final class ModuleSettings {
         if (NATURAL_SOFTEN.equals(key)) return 0;
         if (MASTER_FILM_DENSITY_C.equals(key) || MASTER_FILM_DENSITY_M.equals(key) || MASTER_FILM_DENSITY_Y.equals(key)) return 100;
         if (MASTER_LOOK_PRINT.equals(key) || MASTER_HNCS_INTENT.equals(key) || MASTER_HNCS_CURVE.equals(key)) return 0;
-        if (MASTER_LOOK.equals(key)) return MasterLooks.FAMILY_HNCS;
+        // OPPO (0) is the stock master LMT: when the setting cannot be read the photo keeps the phone's own
+        // colour instead of silently wearing HNCS. The reference module (V3-test160) ships the same default.
+        if (MASTER_LOOK.equals(key)) return MasterLooks.FAMILY_OPPO;
         Integer parameter = MasterLooks.paramDefault(key);
         if (parameter != null) return parameter;
         if (MASTER_LOOK_MODE.equals(key)) return MasterLooks.MODE_REPLACE;

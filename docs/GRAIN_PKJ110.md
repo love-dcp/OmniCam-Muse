@@ -277,3 +277,20 @@ newParameters: [needSimulation, 0, raw_value, none,
   本实现取 `0.55 + 0.45·4t(1-t)`；`cell = 1 + round(size·6)`，幅度上限 0.18。
 - 开关：`persist.omnicam.aura.ngrain=0` 关掉这一半（日志里 `groups: ... grain=0`）。
 - 已知不足：**预览不出颗粒**，只有成片有（预览侧要另做 GL 合成，未做）。
+
+## 2026-11-14：颗粒改为默认关闭（r335）
+
+用户在 POP 模式下拍到的成片**上半幅变成"满天星"**：一块水平边界非常整齐的纯噪声，下半幅正常。
+同一台机器、同一份代码，大师模式拍的照片是干净的，所以这不是缓冲区越界崩溃，而是颗粒 pass
+在 POP 那条管线上拿到的几何信息与实际缓冲区不一致（`out+0x2c` slice 与真实行数不同），
+把噪声写进了不该写的位置。
+
+一张照片只是"有颗粒"不值得冒"整张废掉"的风险，所以这一半改成**opt-in**：
+
+- `native_entry.cpp` 新增 `moduleOptIn()`：属性缺失即关闭，只有 `=1` 才开。
+- `persist.omnicam.aura.ngrain` 语义随之改变：以前"缺失=开"，现在"缺失=关，`1`=开"。
+- r335 实测：不设属性拍照，`MasterGrainOverlay` 一行日志都没有，成片行噪声与 OPPO 基准完全一致
+  （row std 37/34/43/49/56/32/21/27 对 37/34/43/49/55/31/21/27，lap var 112.0 对 113.5）。
+
+要再验证颗粒时：`setprop persist.omnicam.aura.ngrain 1` 后重启相机（只在 HDRTransform 成片
+钩子上作画，不影响预览）。**POP 模式请勿开启**，那里的几何还没算对。

@@ -67,6 +67,10 @@ constexpr SettingIntLayout kSettingIntLayouts[] = {
 int (*getSettingInt)(void *settings, const void *key, int fallback);
 void (*originalGetLmtParams)(void *, void *, int);
 void (*originalGetVigParams)(void *, void *, void *);
+// The 2-argument getLmtParams (no stage) also exists in these builds. Nothing is known about which
+// one a given firmware's capture path calls, so it is hooked next to V1: on a build that only uses
+// this one, V1 never fires and the whole GR / master LUT swap is silently dead.
+void (*originalGetLmtParams2)(void *, void *);
 int (*originalFilterProcessV2)(void *, int);
 int (*filterProcessV1)(void *, int);
 int (*filterRegisterV1)(void *, int);
@@ -129,9 +133,9 @@ void noteCaptureMode(uint32_t mode, bool gr, bool master) {
                         gr ? 1 : 0, master ? 1 : 0);
 }
 
-void getLmtParams(void *parameters, void *frame, int stage) {
+// Shared body of both getLmtParams arities: read the frame, remember which LUT tree it belongs to.
+void noteLmtParams(void *parameters, void *frame) {
     bool gr = isGrFrame(frame);
-    originalGetLmtParams(parameters, frame, stage);
     FrameProfile profile;
     profile.profile = gr ? kGr : kHost;
     uint32_t mode = *reinterpret_cast<uint32_t *>(static_cast<char *>(frame) + 0x18);
@@ -156,6 +160,25 @@ void getLmtParams(void *parameters, void *frame, int stage) {
     }
     std::lock_guard<std::mutex> lock(profileMutex);
     frameProfiles[parameters] = profile;
+}
+
+// Which arity a firmware drives is not documented anywhere; both are hooked and each says so once,
+// so a capture's log settles it instead of a guess. Calling the shared body from both is harmless:
+// if V1 already forwarded to the 2-argument one, it simply writes the same profile twice.
+void getLmtParams(void *parameters, void *frame, int stage) {
+    originalGetLmtParams(parameters, frame, stage);
+    static std::atomic<bool> noted{false};
+    if (!noted.exchange(true))
+        __android_log_print(ANDROID_LOG_INFO, kTag, "getLmtParamsV1 in use");
+    noteLmtParams(parameters, frame);
+}
+
+void getLmtParams2(void *parameters, void *frame) {
+    if (originalGetLmtParams2) originalGetLmtParams2(parameters, frame);
+    static std::atomic<bool> noted{false};
+    if (!noted.exchange(true))
+        __android_log_print(ANDROID_LOG_INFO, kTag, "getLmtParams(2 args) in use");
+    noteLmtParams(parameters, frame);
 }
 
 void getVigParams(void *parameters, void *frame, void *planes) {
@@ -284,6 +307,13 @@ void hookAlgoInterface(HookFunction hook, void *handle) {
     getSettingInt = reinterpret_cast<decltype(getSettingInt)>(accessor);
     hookExport(hook, handle, lmtSymbol, reinterpret_cast<void *>(getLmtParams),
                reinterpret_cast<void **>(&originalGetLmtParams), kTag);
+    // The 2-argument entry: on a build whose capture path calls this one, V1 above never fires and
+    // both GR and master colour would look "switched but unchanged". Hooked unconditionally, the
+    // cost is one comparison when the symbol is absent.
+    static const char kLmtSymbol2[] = "_ZN7android12getLmtParamsER12ProcessParamPNS_15AlgoProcessDataE";
+    if (dlsym(handle, kLmtSymbol2))
+        hookExport(hook, handle, kLmtSymbol2, reinterpret_cast<void *>(getLmtParams2),
+                   reinterpret_cast<void **>(&originalGetLmtParams2), kTag);
     filterProcessV1 = reinterpret_cast<decltype(filterProcessV1)>(
         dlsym(handle, "_ZN7android15doFilterProcessEPNS_15AlgoProcessDataEi"));
     filterRegisterV1 = reinterpret_cast<decltype(filterRegisterV1)>(
