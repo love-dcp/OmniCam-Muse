@@ -239,6 +239,8 @@ final class MasterPresetCreate {
         int intensity = clamp(intOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_STRENGTH, 100), 0, 100);
         int softLight = softLightIndex(extras.getString(DiagnosticsContract.KEY_PRESET_SOFT_LIGHT));
         String softType = softLightType(softLight);
+        // 影调在相机里就叫 contrast（模块另插的那个对比度是 muse_contrast，不是这一项）。
+        int tone = intOf(extras, DiagnosticsContract.KEY_PRESET_TONE, 0);
         int saturation = intOf(extras, DiagnosticsContract.KEY_PRESET_SATURATION, 0);
         int coldWarm = intOf(extras, DiagnosticsContract.KEY_PRESET_WARM_COOL, 0);
         int cyanMagenta = intOf(extras, DiagnosticsContract.KEY_PRESET_CYAN_MAGENTA, 0);
@@ -251,15 +253,15 @@ final class MasterPresetCreate {
         if (filterType != null && !filterType.isEmpty()) {
             ok += putString(symbols, loader, "key_master_mode_custom_preset_filter_type_" + presetKey, filterType);
         }
-        ok += putEffects(symbols, loader, presetKey, intensity, softLight, softType,
+        ok += putEffects(symbols, loader, presetKey, intensity, softLight, softType, tone,
             saturation, coldWarm, cyanMagenta, sharpness, vignette);
         // 同一套值在 custom_base_<n> 上也存一份：相机「重置」拿的是这一份，留 0 会把参数清掉。
         if (presetKey.startsWith("custom_")) {
             ok += putEffects(symbols, loader, "custom_base_" + presetKey.substring("custom_".length()),
-                intensity, softLight, softType, saturation, coldWarm, cyanMagenta, sharpness, vignette);
+                intensity, softLight, softType, tone, saturation, coldWarm, cyanMagenta, sharpness, vignette);
         }
         Log.i(TAG, "预设效果值已写入：" + presetKey + " 共 " + ok + " 项"
-            + "（饱和 " + saturation + " 冷暖 " + coldWarm + " 青品 " + cyanMagenta
+            + "（影调 " + tone + " 饱和 " + saturation + " 冷暖 " + coldWarm + " 青品 " + cyanMagenta
             + " 锐度 " + sharpness + " 强度 " + intensity + " 柔光 " + softLight + "/" + softType
             + " 暗角 " + vignette + "）");
         return ok;
@@ -267,7 +269,7 @@ final class MasterPresetCreate {
 
     /** 一整套效果键（主键或 base 键都长一个样）。 */
     private static int putEffects(Symbols symbols, ClassLoader loader, String presetKey,
-                                  int intensity, int softLight, String softType,
+                                  int intensity, int softLight, String softType, int tone,
                                   int saturation, int coldWarm, int cyanMagenta,
                                   int sharpness, int vignette) {
         String p = "key_master_mode_effect_";
@@ -276,7 +278,7 @@ final class MasterPresetCreate {
         ok += putInt(symbols, loader, p + "filter_intensity_" + presetKey, intensity);
         ok += putInt(symbols, loader, p + "soft_light_" + presetKey, softLight);
         ok += putString(symbols, loader, p + "soft_light_type_" + presetKey, softType);
-        ok += putInt(symbols, loader, p + "contrast_" + presetKey, 0);
+        ok += putInt(symbols, loader, p + "contrast_" + presetKey, tone);
         ok += putInt(symbols, loader, p + "saturation_" + presetKey, saturation);
         ok += putInt(symbols, loader, p + "cold_warm_" + presetKey, coldWarm);
         ok += putInt(symbols, loader, p + "cyan_magenta_" + presetKey, cyanMagenta);
@@ -457,7 +459,7 @@ final class MasterPresetCreate {
         }
         preset.put("filterIntensity", clamp(intOf(extras, DiagnosticsContract.KEY_PRESET_FILTER_STRENGTH, 100), 0, 100));
         preset.put("softLightIndex", softLightIndex(extras.getString(DiagnosticsContract.KEY_PRESET_SOFT_LIGHT)));
-        preset.put("contrast", 0);
+        preset.put("contrast", intOf(extras, DiagnosticsContract.KEY_PRESET_TONE, 0));
         preset.put("saturation", intOf(extras, DiagnosticsContract.KEY_PRESET_SATURATION, 0));
         preset.put("coldWarm", intOf(extras, DiagnosticsContract.KEY_PRESET_WARM_COOL, 0));
         preset.put("cyanMagenta", intOf(extras, DiagnosticsContract.KEY_PRESET_CYAN_MAGENTA, 0));

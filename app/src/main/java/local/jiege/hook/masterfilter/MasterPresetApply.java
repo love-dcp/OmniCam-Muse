@@ -704,14 +704,26 @@ public final class MasterPresetApply {
                 return out;
             }
             if (menu == null) {
+                // 效果栏没建（相机不在大师模式、或切后台后收起了）也不耽误落预设：
+                // 写预设存储本身不需要效果栏，这样用户点完「写入」预设里立刻就有参数，
+                // 不用先切回相机把效果栏拉出来。效果栏那一步仍留着排队，进大师模式时补上。
+                String createdName = null;
+                if (extras.getBoolean(DiagnosticsContract.KEY_PRESET_CREATE, false)
+                    && extras.getString(DiagnosticsContract.KEY_PRESET_NAME) != null) {
+                    String name = extras.getString(DiagnosticsContract.KEY_PRESET_NAME);
+                    if (MasterPresetCreate.create(cameraLoader(), name, extras)) createdName = name;
+                }
                 // Pro 参数（ISO / 快门 / EV / 对焦 / 白平衡）不依赖效果栏：数据层写进去后，
                 // 相机进 Pro 档就会用上，所以这一支也要写。
                 if (MasterProParams.has(extras)) MasterProParams.apply(extras);
                 // 设置 App 已经把参数排进待写入文件：进大师模式时效果栏一建好就会写进去。
                 out.putString(DiagnosticsContract.KEY_PRESET_RESULT,
-                    DiagnosticsContract.ACTION_APPLY.equals(action)
-                        ? "已排队，切到相机的大师模式后自动写入"
-                        : "大师效果栏还没建好：先打开相机并切到大师模式，再回来核对");
+                    createdName != null
+                        ? "预设「" + createdName + "」已写入（带参数）；相机的大师效果栏打开后会自动同步"
+                        : DiagnosticsContract.ACTION_APPLY.equals(action)
+                            ? "已排队，切到相机的大师模式后自动写入"
+                            : "大师效果栏还没建好：先打开相机并切到大师模式，再回来核对");
+                // 故意不报 applied：队列要留着，等效果栏建好时把同一套值也写进画面。
                 out.putInt(DiagnosticsContract.KEY_PRESET_APPLIED, 0);
                 return out;
             }
