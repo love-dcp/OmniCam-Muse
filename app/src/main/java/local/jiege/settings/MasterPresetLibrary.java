@@ -422,7 +422,7 @@ public final class MasterPresetLibrary {
      * 同 id 覆盖，新 id 追加。返回实际导入的条数。
      */
     public int importText(String text) {
-        return importText(text, "");
+        return importText(text, "", "");
     }
 
     /**
@@ -431,6 +431,14 @@ public final class MasterPresetLibrary {
      * 留空则保留文件里的原名。
      */
     public int importText(String text, String namePrefix) {
+        return importText(text, namePrefix, "");
+    }
+
+    /**
+     * 导入并指定封面：照片导入时用这张图当封面，[cover] 是本地图片文件的绝对路径。
+     * 空串表示不改封面（文本导入、presets.json 都走这条）。
+     */
+    public int importText(String text, String namePrefix, String cover) {
         List<Preset> parsed = new ArrayList<>();
         for (String raw : text.split("\r?\n")) {
             String line = raw.trim();
@@ -442,12 +450,23 @@ public final class MasterPresetLibrary {
             parsed.add(preset);
         }
         String prefix = cut(clean(namePrefix), MAX_NAME);
+        String picture = clean(cover);
         for (int i = 0; i < parsed.size() && !prefix.isEmpty(); i++) {
             Preset preset = parsed.get(i);
             String name = parsed.size() == 1 ? prefix : prefix + " " + (i + 1);
-            // 这个名字只写进相机（预设条上显示的那一个）：库里的条目名仍是文件里的图片名。
+            // 导入时起的名字两头都用上：库里这条卡片显示它，写进相机后预设条也显示它。
+            // 之前只写相机那一边，导入完卡片上还是图片名，看着就像「名字没改成功」。
+            preset.name = name;
             preset.cameraName = name;
+            customNames.put(preset.id, name);
             cameraNames.put(preset.id, name);
+        }
+        // 照片导入：这张图就是封面。不设的话卡片只能显示渐变色块。
+        if (!picture.isEmpty()) {
+            for (Preset preset : parsed) {
+                preset.cover = picture;
+                preset.gallery = "";
+            }
         }
         for (Preset preset : parsed) merge(preset);
         applyNames();

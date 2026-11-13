@@ -21,6 +21,7 @@ public final class PicturePresetOfflineTest {
         vividPicture();
         vignettePicture();
         rowParses();
+        importWithNameAndCover();
         if (failed > 0) {
             System.out.println("FAILED: " + failed);
             System.exit(1);
@@ -137,6 +138,45 @@ public final class PicturePresetOfflineTest {
         check("照片".equals(preset.tags), "标签不对：" + preset.tags);
         // 再写一次同 id：应覆盖而不是新增。
         check(library.importText(text) == 1 && library.presets().size() == 1, "同 id 重复导入应覆盖");
+    }
+
+    /**
+     * 导入时定的名字与封面：名字要同时进「库里的名字」和「相机里的预设名」，
+     * 封面路径要落盘、重新读库还在（换手机/重进设置页都得能显示）。
+     */
+    private static void importWithNameAndCover() throws Exception {
+        int w = 120;
+        int h = 90;
+        int[] pixels = solid(w, h, 150, 120, 90);
+        PicturePresetExtract.Params p = PicturePresetExtract.fromPixels(pixels, w, h);
+        String text = "v2\n" + p.row("picture_abc123", "IMG_2043");
+        String cover = "/data/user/0/local.jiege/files/preset_covers/picture_abc123_1.jpg";
+
+        java.io.File dir = Files.createTempDirectory("muse-preset-cover").toFile();
+        MasterPresetLibrary library = new MasterPresetLibrary(dir);
+        check(library.importText(text, "海边黄昏", cover) == 1, "带名字与封面的导入应成功");
+
+        MasterPresetLibrary.Preset preset = library.find("picture_abc123");
+        check(preset != null, "导入后应能找到 picture_abc123");
+        if (preset == null) return;
+        check("海边黄昏".equals(preset.name), "库里的名字没改成导入时定的：" + preset.name);
+        check("海边黄昏".equals(preset.cameraName), "相机里的名字没改成导入时定的：" + preset.cameraName);
+        check(cover.equals(preset.cover), "封面没存进去：" + preset.cover);
+
+        // 重新读库：名字与封面都得留在文件里。
+        MasterPresetLibrary reloaded = new MasterPresetLibrary(dir);
+        MasterPresetLibrary.Preset again = reloaded.find("picture_abc123");
+        check(again != null && "海边黄昏".equals(again.name), "重新读库后名字丢了");
+        check(again != null && cover.equals(again.cover), "重新读库后封面丢了");
+
+        // 多条导入：名字按「前缀 1、前缀 2」编号，没给封面就不该乱写。
+        String two = "v2\n" + p.row("picture_a", "A") + "\n" + p.row("picture_b", "B");
+        java.io.File dir2 = Files.createTempDirectory("muse-preset-multi").toFile();
+        MasterPresetLibrary multi = new MasterPresetLibrary(dir2);
+        check(multi.importText(two, "旅行", "") == 2, "两条都该导入");
+        check("旅行 1".equals(multi.find("picture_a").name), "第一条应编号：" + multi.find("picture_a").name);
+        check("旅行 2".equals(multi.find("picture_b").name), "第二条应编号：" + multi.find("picture_b").name);
+        check(multi.find("picture_a").cover.isEmpty(), "没给封面时不该写封面");
     }
 
     private static int[] solid(int width, int height, int r, int g, int b) {

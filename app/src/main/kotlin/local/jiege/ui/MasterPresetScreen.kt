@@ -113,6 +113,8 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     var namingCamera by remember { mutableStateOf(false) }
     // 点「导入」时先问一句从哪儿来：相册（照片选择器）还是文件（json / 文本）。
     var choosingImport by remember { mutableStateOf(false) }
+    // 选完文件、还没写进库的那一份：先弹名称窗口，确认了才落地。
+    var namingImport by remember { mutableStateOf<ImportPlan?>(null) }
     // 点「写入相机大师模式」时先弹窗定名字：这条预设写进相机后，预设条上显示的就是它。
     var namingForWrite by remember { mutableStateOf(false) }
     // 长按封面弹操作面板；面板里的动作都先打开这条的详情页，再弹对应的对话框。
@@ -185,29 +187,44 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
     fun importUri(uri: Uri) {
         busy = "import"
         scope.launch {
-            // 只把输入整理成行格式、数一下有几条；命名留到「写入相机」时再问。
+            // 先把文件读成一份导入计划（照片顺带缩一张封面），名字等用户确认了再写库。
             val attempt = withContext(Dispatchers.IO) { readImport(context, uri) }
+            busy = null
             val plan = attempt.plan
-            val added = if (plan == null) -1 else withContext(Dispatchers.IO) {
-                runCatching { MasterPresets.library(context).importText(plan.text) }.getOrDefault(0)
+            if (plan != null) {
+                namingImport = plan
+                return@launch
+            }
+            Toast.makeText(context, attempt.error, Toast.LENGTH_LONG).show()
+            // 读不到文件时顺手要一次媒体权限，用户授权后再点一次就能进去。
+            // 已经授权还读不到就别再弹（会变成「点了没反应」的死循环）。
+            val denied = context.checkSelfPermission(mediaPermission()) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (attempt.needsMediaPermission && denied) askMedia.launch(mediaPermission())
+        }
+    }
+
+    /** 名称确认之后真正写进预设库；照片导入时顺手把缩好的图存成封面。 */
+    fun saveImport(plan: ImportPlan, name: String) {
+        busy = "import"
+        scope.launch {
+            val added = withContext(Dispatchers.IO) {
+                runCatching {
+                    val cover = plan.coverJpeg?.let { saveCover(context, plan.coverId, it) }.orEmpty()
+                    MasterPresets.library(context).importText(plan.text, name, cover)
+                }.getOrDefault(0)
             }
             busy = null
             revision++
             Toast.makeText(
                 context,
                 when {
-                    plan == null -> attempt.error
                     added <= 0 -> "读到了内容，但没有一条是能用的预设格式"
                     plan.note.isEmpty() -> "已导入 $added 条预设"
                     else -> "已导入 $added 条预设 · ${plan.note}"
                 },
                 Toast.LENGTH_LONG,
             ).show()
-            // 读不到文件时顺手要一次媒体权限，用户授权后再点一次就能进去。
-            // 已经授权还读不到就别再弹（会变成「点了没反应」的死循环）。
-            val denied = context.checkSelfPermission(mediaPermission()) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-            if (plan == null && attempt.needsMediaPermission && denied) askMedia.launch(mediaPermission())
         }
     }
 
@@ -253,6 +270,10 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                 deleting = false
                 scope.launch {
                     val ok = withContext(Dispatchers.IO) { MasterPresets.library(context).remove(target.id) }
+                    // 照片导入的封面存在应用私有目录里，库里那条没了就别留着占地方。
+                    if (ok && target.cover.startsWith("/")) {
+                        withContext(Dispatchers.IO) { runCatching { java.io.File(target.cover).delete() } }
+                    }
                     openId = null
                     revision++
                     Toast.makeText(
@@ -298,11 +319,11 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
         OverlayDialog(
             show = true,
             title = "导入",
-            summary = "照片按画面估一套调色参数；也可以选本模块导出的预设文本，或 OMaster 的 presets.json。",
+            summary = "照片按画面估一套调色参数，这张图同时当封面；也可以选本模块导出的预设文本，或 OMaster 的 presets.json。",
             onDismissRequest = { choosingImport = false },
         ) {
             Column {
-                ImportSourceRow("从相册选照片", "按照片画面估参数，预设名默认用文件名") {
+                ImportSourceRow("从相册选照片", "按照片画面估参数，这张图当封面，名字可以在下一步改") {
                     choosingImport = false
                     pickPhoto.launch(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
@@ -321,6 +342,31 @@ fun MasterPresetScreen(padding: PaddingValues, nestedScrollConnection: NestedScr
                 )
             }
         }
+    }
+
+    // 导入时先定名字：默认就是这张图/这个文件的名字，不想改直接点确定。
+    val pendingImport = namingImport
+    if (pendingImport != null) {
+        NameFieldDialog(
+            title = "预设名",
+            summary = when {
+                pendingImport.rows > 1 ->
+                    "这次有 ${pendingImport.rows} 条预设。名字留空就沿用文件里的原名；填了会变成「名字 1」「名字 2」……"
+                pendingImport.coverJpeg != null ->
+                    "这张照片会作为这条预设的封面。名字默认用图片名，不想改直接点确定。"
+                else -> "存进库里的名字，也是写进相机大师模式后预设条上显示的名字。不想改直接点确定。"
+            },
+            initial = pendingImport.suggestedName,
+            placeholder = "预设名",
+            confirmText = "确定",
+            onConfirm = { name ->
+                namingImport = null
+                saveImport(pendingImport, name)
+            },
+            onDismiss = { namingImport = null },
+            // 默认值就是要用的名字，别主动弹键盘。
+            autoFocus = false,
+        )
     }
 
     if (open != null && renaming) {
@@ -1097,9 +1143,15 @@ private fun signed(value: Int?): String = when {
     else -> value.toString()
 }
 
-/** 解码过的封面缓存：列表滚动时不必反复从 assets 读盘。 */
-private val presetImages = object : LruCache<String, ImageBitmap>(16) {}
+/** 解码过的封面缓存：列表滚动时不必反复从 assets 或文件读盘。 */
+private val presetImages = object : LruCache<String, ImageBitmap>(8) {}
 
+/** 照片封面缩到长边 900 再进内存：原图 1080 宽的位图一张就 6MB，八张够把手机拖卡。 */
+
+/**
+ * 读一张预设图：[path] 是 assets 里的路径（内置预设），或照片导入后存在
+ * 应用私有目录里的绝对路径（`/data/.../preset_covers/xxx.jpg`）。
+ */
 @Composable
 private fun rememberAssetImage(context: Context, path: String): ImageBitmap? {
     var image by remember(path) { mutableStateOf(presetImages.get(path)) }
@@ -1114,7 +1166,11 @@ private fun rememberAssetImage(context: Context, path: String): ImageBitmap? {
         }
         val decoded = withContext(Dispatchers.IO) {
             runCatching {
-                context.assets.open(path).use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+                if (path.startsWith("/")) {
+                    decodeCoverFile(path)
+                } else {
+                    context.assets.open(path).use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+                }
             }.getOrNull()
         }
         if (decoded != null) presetImages.put(path, decoded)
@@ -1123,8 +1179,32 @@ private fun rememberAssetImage(context: Context, path: String): ImageBitmap? {
     return image
 }
 
+/** 照片封面自己缩过一遍（长边 900），这里按 bounds 再挑一次采样率，防止老数据是原图。 */
+private fun decodeCoverFile(path: String): ImageBitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1080) sample *= 2
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    return BitmapFactory.decodeFile(path, options)?.asImageBitmap()
+}
+
 /** 一次导入的产物：行格式文本、条数、给用户的补充说明（图片估算时才有）。 */
-private class ImportPlan(val text: String, val rows: Int, val note: String)
+private class ImportPlan(
+    val text: String,
+    val rows: Int,
+    val note: String,
+    /** 名称弹窗里预填的值：照片导入是图片名，文本导入留空（沿用文件里的原名）。 */
+    val suggestedName: String = "",
+    /** 照片导入时这张图缩好的 JPEG，存成本地文件当封面；文本导入为 null。 */
+    val coverJpeg: ByteArray? = null,
+    /** 封面文件名用的预设 id，照片导入时才有。 */
+    val coverId: String = "",
+)
 
 /** 文件选择器里的显示名（含扩展名）；取不到时用 uri 末段。 */
 private fun displayName(context: Context, uri: Uri): String {
@@ -1197,14 +1277,24 @@ private fun readImport(context: Context, uri: Uri): ImportAttempt {
         if (rows > 0) return ImportAttempt(ImportPlan(converted, rows, ""), "")
     }
 
-    val name = fileName.substringBeforeLast('.')
-    // 图片自己带着预设参数时直接用，不再猜。
+    val name = fileName.substringBeforeLast('.').trim()
+    // 图片自己带着预设参数时直接用，不再猜；不管哪条路，这张图都拿来当封面。
     val embedded = embeddedPresetText(bytes)
     if (embedded != null) {
         val rows = countPresetRows(embedded)
         if (rows > 0) {
             Log.i(TAG_IMPORT, "embedded preset rows=$rows")
-            return ImportAttempt(ImportPlan(embedded, rows, "这张图里带着预设参数，直接读了出来"), "")
+            return ImportAttempt(
+                ImportPlan(
+                    text = embedded,
+                    rows = rows,
+                    note = "这张图里带着预设参数，直接读了出来",
+                    suggestedName = name.take(24),
+                    coverJpeg = pictureCover(bytes),
+                    coverId = firstPresetId(embedded),
+                ),
+                "",
+            )
         }
     }
     val picture = presetTextFromPicture(bytes, name) ?: return ImportAttempt(
@@ -1213,7 +1303,79 @@ private fun readImport(context: Context, uri: Uri): ImportAttempt {
             "换成 JPG / PNG，或者 OMaster 的 presets.json",
     )
     Log.i(TAG_IMPORT, "picture estimate ${picture.second}")
-    return ImportAttempt(ImportPlan(picture.first, 1, "按画面估算：${picture.second}"), "")
+    return ImportAttempt(
+        ImportPlan(
+            text = picture.first,
+            rows = 1,
+            note = "按画面估算：${picture.second}",
+            suggestedName = name.take(24),
+            coverJpeg = pictureCover(bytes),
+            coverId = firstPresetId(picture.first),
+        ),
+        "",
+    )
+}
+
+/** 行格式文本里第一条预设的 id：封面文件按它命名，同一张图重复导入会盖掉旧封面。 */
+private fun firstPresetId(text: String): String = text.lineSequence()
+    .firstOrNull { raw -> raw.count { it == '\t' } >= 13 && !raw.trim().startsWith("#") }
+    ?.split('\t')?.getOrNull(1)?.trim().orEmpty()
+
+/**
+ * 把照片缩成一张长边不超过 900、按 EXIF 摆正的 JPEG，用来当预设封面。
+ * 直接拿原图（几兆、可能还是横躺的）当封面又慢又费内存，网格里也看不出差别。
+ */
+private fun pictureCover(bytes: ByteArray): ByteArray? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 900) sample *= 2
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return@runCatching null
+    val degrees = runCatching {
+        when (ExifInterface(bytes.inputStream()).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL,
+        )) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    }.getOrDefault(0)
+    if (degrees != 0) {
+        val matrix = android.graphics.Matrix().apply { postRotate(degrees.toFloat()) }
+        val turned = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (turned !== bitmap) {
+            bitmap.recycle()
+            bitmap = turned
+        }
+    }
+    val out = java.io.ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+    bitmap.recycle()
+    out.toByteArray()
+}.getOrNull()
+
+/**
+ * 把封面图写进应用私有目录，返回给预设库的绝对路径。
+ * 文件名带时间戳：同一张图重新导入换了封面时路径跟着变，界面上的旧图缓存才会失效。
+ */
+private fun saveCover(context: Context, id: String, jpeg: ByteArray): String = try {
+    val dir = java.io.File(context.filesDir, "preset_covers").apply { mkdirs() }
+    val safe = id.ifBlank { "cover" }
+    val target = java.io.File(dir, safe + "_" + System.currentTimeMillis() + ".jpg")
+    target.writeBytes(jpeg)
+    dir.listFiles()?.forEach { file ->
+        if (file != target && file.name.startsWith(safe + "_")) runCatching { file.delete() }
+    }
+    target.absolutePath
+} catch (_: Throwable) {
+    ""
 }
 
 /** 图片元数据里如果带了预设行格式（我们自己导出的图，或别人塞进 EXIF 的预设），直接用。 */
