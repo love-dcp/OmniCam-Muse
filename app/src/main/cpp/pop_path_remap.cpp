@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <android/log.h>
 
 #include "native_hooks.h"
@@ -43,6 +44,33 @@ static constexpr char kAppVideoLut[] = "/data/user/0/com.oplus.camera/files/jieg
 
 static thread_local int bypass;
 
+// Diagnostic: which BasicTone tables a capture actually reads. The GR / master-colour LUT swap only
+// does anything if the reader's open() lands inside our directory, so each distinct path is logged
+// once per process. Cheap (a string prefix test on paths nobody else touches) and it is the only
+// evidence that separates "the path was rewritten" from "the table was read".
+static constexpr char kStockToneDir[] = "/odm/etc/camera/basictone/";
+static constexpr char kOurToneDir[] = "/data/user/0/com.oplus.camera/files/jiege/mastercolor/live/";
+static constexpr char kGrToneDir[] = "/data/user/0/com.oplus.camera/files/ricoh_gr/";
+static constexpr int kSeenPaths = 96;
+static std::mutex seenMutex;
+static char seen[kSeenPaths][160];
+static int seenCount;
+
+static void noteTableRead(const char *path) {
+    if (!path) return;
+    bool ours = std::strncmp(path, kStockToneDir, sizeof(kStockToneDir) - 1) == 0 ||
+                std::strncmp(path, kOurToneDir, sizeof(kOurToneDir) - 1) == 0 ||
+                std::strncmp(path, kGrToneDir, sizeof(kGrToneDir) - 1) == 0;
+    if (!ours) return;
+    std::lock_guard<std::mutex> lock(seenMutex);
+    for (int i = 0; i < seenCount; i++)
+        if (std::strcmp(seen[i], path) == 0) return;
+    if (seenCount >= kSeenPaths) return;
+    std::snprintf(seen[seenCount], sizeof(seen[0]), "%s", path);
+    seenCount++;
+    __android_log_print(ANDROID_LOG_INFO, "PopPort", "table read %s", path);
+}
+
 static bool destExists(const char *path) {
     if (!path || bypass) {
         return false;
@@ -53,7 +81,7 @@ static bool destExists(const char *path) {
     return ok == 0;
 }
 
-static const char *remap(const char *path, char *buf, size_t n) {
+static const char *remapInner(const char *path, char *buf, size_t n) {
     if (bypass || !path) {
         return path;
     }
@@ -109,6 +137,16 @@ static const char *remap(const char *path, char *buf, size_t n) {
         }
     }
     return path;
+}
+
+// Wrapper: every open goes through here, so the first read of each table is reported without
+// touching the mapping logic itself.
+static const char *remap(const char *path, char *buf, size_t n) {
+    const char *result = remapInner(path, buf, n);
+    if (!bypass) {
+        noteTableRead(result);
+    }
+    return result;
 }
 
 static int hookedOpenat(int dirfd, const char *path, int flags, ...) {

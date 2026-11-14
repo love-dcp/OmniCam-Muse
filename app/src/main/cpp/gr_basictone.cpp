@@ -248,6 +248,13 @@ uintptr_t processCore(void *object, void *input, void *output, void *parameters,
 void applyLmtPath(void *object) {
     if (activeProfile == kUnknown) return;
     char *lmtPath = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
+    // The object offset is per firmware. The first frame of the process reports what is already in
+    // the buffer, which is the only way to tell "the swap landed in the LMT directory" from "it
+    // landed in some other member and the stock tree was used all along".
+    static std::atomic<bool> inspected{false};
+    if (!inspected.exchange(true))
+        __android_log_print(ANDROID_LOG_INFO, kTag, "lmt path at +0x008 is '%.64s' (profile=%d)",
+                            lmtPath, int(activeProfile));
     const char *desired = activeProfile == kGr ? kGrLmtPath
                         : activeProfile == kMaster ? activeMasterDir.c_str() : kHostLmtPath;
     if (std::strlen(desired) < 240 && std::strcmp(lmtPath, desired) != 0) {

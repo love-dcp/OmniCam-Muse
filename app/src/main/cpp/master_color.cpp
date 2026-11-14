@@ -506,12 +506,25 @@ std::string masterColorCaptureDir(const MasterColorCapture &capture, int width, 
     return ok ? dir : std::string();
 }
 
+// The LMT table names a live directory can be asked for: "LMTLut<N>" and "LMTPhotoLut<N>". The
+// photo path reads the LMTPhoto* spelling (BasicTone's readLMTLut builds "%s/LMTPhotoLut0"), so
+// both spellings have to resolve to the baked table -- otherwise a master look is baked, installed
+// and never seen, because every photo raster still came from the stock LMTPhotoLut0. That is what
+// made "大师色彩 switched but nothing changed" on PKJ110 (2026-11-14).
+int lutIndex(const char *name) {
+    const char *digits = nullptr;
+    if (!std::strncmp(name, "LMTPhotoLut", 11)) digits = name + 11;
+    else if (!std::strncmp(name, "LMTLut", 6)) digits = name + 6;
+    if (!digits || digits[0] < '0' || digits[0] > '9' || digits[1] != 0) return -1;
+    return digits[0] - '0';
+}
+
 // Path hook helper: bakes a preview directory on first use (its key.bin comes from Java).
 void masterColorPreparePath(const char *path) {
     if (inMaster || !path || std::strncmp(path, kLive, sizeof(kLive) - 1) != 0) return;
     const char *rest = path + sizeof(kLive) - 1;
     const char *slash = std::strchr(rest, '/');
-    if (!slash || std::strncmp(slash + 1, "LMTLut", 6) != 0) return;
+    if (!slash || lutIndex(slash + 1) < 0) return;
     std::string dir(path, size_t(slash - path));
     inMaster = true;
     markUsed(dir);
@@ -532,9 +545,17 @@ const char *masterColorRemapPath(const char *path, char *buf, size_t n) {
     // A directory being written (dir.tmp<tid>) is not a served directory: its LMTLut1..5 are real files.
     if (std::string_view(rest, size_t(slash - rest)).find(".tmp") != std::string_view::npos) return nullptr;
     const char *name = slash + 1;
-    if (!std::strcmp(name, "LMTLut0") || !std::strcmp(name, "key.bin") || std::strstr(name, ".tmp")) return nullptr;
-    if (!std::strncmp(name, "LMTLut", 6) && name[6] >= '1' && name[6] <= '9' && name[7] == 0) {
-        if (existsRaw(path)) return nullptr;  // blend mode: the six tables are all baked
+    if (!std::strcmp(name, "key.bin") || std::strstr(name, ".tmp")) return nullptr;
+    int index = lutIndex(name);
+    if (index >= 0) {
+        // A directory that holds this very table (LMTLut0, and LMTLut1..5 in blend mode) serves it
+        // as-is. Otherwise the photo spelling pairs with the baked segment of the same index, so a
+        // blend keeps its per-tone split, and falls back to the single baked table.
+        if (existsRaw(path)) return nullptr;
+        if (index > 0) {
+            std::snprintf(buf, n, "%.*sLMTLut%d", int(name - path), path, index);
+            if (existsRaw(buf)) return buf;
+        }
         std::snprintf(buf, n, "%.*sLMTLut0", int(name - path), path);
     } else {
         std::snprintf(buf, n, "%s%s", kStockLmt, name);

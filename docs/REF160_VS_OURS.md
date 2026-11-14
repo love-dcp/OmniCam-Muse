@@ -157,6 +157,47 @@ cached settings:`。provider 侧 `ui.MasterFilterProvider` 加了同名方法，
 `master_look` 默认：参考包 **0（原厂 OPPO）**，我们 **1（HNCS）**。差别在于设置读不到时的失败姿态：
 他们静默等于原厂（看不出来），我们静默等于 HNCS（看起来"一直是同一个调子"）。
 
+### 3.5 真因与修复（2026-11-14，r338）
+
+上一轮把"切换没效果"归到"LMT 只作用在 4096×3072 中间帧、成片却是 6100×3388"，**那个判断是错的**。
+6100×3388 就是同一张 4096×3072 竖幅照片，只是被大师水印加了白边：
+
+```
+IPU_WM_MasterWatermarkCreator-aiMaster: buildParamsFromJson, finalPicture: 3388x6100,
+  pictureSize: 3072x4096, StartX: 158, StartY: 1002
+→ 3072 + 158*2 = 3388，4096 + 1002*2 = 6100
+```
+
+所以画面内容从头到尾就是 BasicTone 吃进去的那一帧，下游没有任何"另一条管线"。
+
+真正的断点在**文件名的拼写**。`libBasicTonePhoto.so` 里照片路径拼的是 `%s/LMTPhotoLut0`
+（另有 `%s/Photo/Sensor%d/LMTLut0`），而 live 目录只烘了 `LMTLut0`；
+`masterColorRemapPath` 对不认识的 `LMTPhotoLut*` 一律回落到
+`/odm/etc/camera/basictone/lmt/<name>` —— 也就是 **stock 表**。于是：
+
+- 表烘好了、`BasicTone profile=master-colour path=…/live/<key>` 也打了、
+  `loadLut` 也跑了，读的却始终是原厂 `LMTPhotoLut0`；
+- GR 侧一直没这个问题，因为 `files/ricoh_gr/lmt` 是**整个目录**的拷贝，里面本来就有 `LMTPhotoLut0..3`。
+
+修复（`master_color.cpp`）：新增 `lutIndex()`，同时认 `LMTLut<N>` 与 `LMTPhotoLut<N>` 两种拼写；
+目录里有同名文件就用它（`LMTLut0`、混合模式的 `LMTLut1..5`），否则同索引配 `LMTLut<N>`，
+再退到 `LMTLut0`。`masterColorPreparePath` 用同一个判断，预览才会在首次 open 时烘表。
+
+实测（大师模式、同一机位连拍，裁掉水印边框后比 160×160 缩略图）：
+
+| look | mean RGB | 饱和度 | 与 OPPO 的平均像素差 |
+|---|---|---|---|
+| OPPO（原厂） | 96.3 / 91.4 / 76.2 | 53.6 | — |
+| HNCS | 102.3 / 94.1 / 65.0 | 66.8 | 9.9 |
+| Lumix 标准 | 101.3 / 92.2 / 67.3 | 60.8 | 9.8 |
+| 胶片 Kodak Portra 400 | 97.9 / 84.1 / 61.4 | 68.7 | 12.7 |
+
+修复前同一组对比是 **< 1.2**（等于没变）。四张并排见 `work/master_look_ab.png`。
+
+另有一条与代码无关、但同样会让人以为"没效果"的：**大师模式在模式栏 rank 0**，
+排在 POP 左边，模式栏默认停在"照片"，必须一直往左滑才看得到。`mode_data.db` 里
+`('professional', 4, 'position_headline', 0, …)` 就是它的位置。
+
 ---
 
 ## 4. 设备回来后怎么验（一次开机就能定案）
