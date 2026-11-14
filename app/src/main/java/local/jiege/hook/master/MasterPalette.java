@@ -1497,10 +1497,11 @@ public final class MasterPalette {
                         }
                         // 调色盘 off: the class still installs (the 哈苏超清 filter entry lives here),
                         // but the only page that keeps an entry is that mode's.
+                        // The video page has no entry at all: in landscape its dial docks in the band
+                        // under the shutter, which on that page is where the record button sits.
                         boolean paletteOn = paletteEnabled();
                         boolean canWrite = presenter != null || retro || grActive || filterOnly
-                            || (highPixelPage && (lut() != null || !paletteOn))
-                            || (video && lut() != null);
+                            || (highPixelPage && (lut() != null || !paletteOn));
                         if (anchor != null && canWrite && (paletteOn || highPixelPage)
                             && decor.hasWindowFocus() && !paletteUp) {
                             int[] anchorLoc = new int[2];
@@ -2817,8 +2818,14 @@ public final class MasterPalette {
             // Master goes through the pro presenter. Without one - POP, and the video pages, whose
             // pro feature is never built - tone and saturation still work, because they live in the
             // LUT manager rather than in a presenter.
-            if (presenter == null
-                && !(retro || highPixel || (isVideoMode(currentMode()) && lut() != null))) {
+            // The video page is refused outright: it is the one page whose shutter sits where the
+            // dial has to dock in landscape, and the entry button is not offered there either
+            // (see canWrite in the tick).
+            if (isVideoMode(currentMode())) {
+                Log.i(TAG, "palette is not offered on the video page");
+                return;
+            }
+            if (presenter == null && !(retro || highPixel)) {
                 return;
             }
             // Only the pro page has room for - and matches - the camera's own lifted arrangement.
