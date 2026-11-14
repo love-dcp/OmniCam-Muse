@@ -1344,6 +1344,55 @@
    ],
    "ret": "void"
   },
+  "LivePhotoPresenter": {
+   "kind": "class",
+   "strings": [
+    "onModeSwitchStageChanged, mbPreviewHdr: "
+   ]
+  },
+  "LivePhotoPresenter.create": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "android.os.Bundle"
+   ],
+   "ret": "void",
+   "strings": [
+    "onCreate, presenter: "
+   ]
+  },
+  "LivePhotoPresenter.modeStage": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.modeProtocol.EventMessageModeSwitcherStage"
+   ],
+   "ret": "void",
+   "strings": [
+    "onModeSwitchStageChanged, mbPreviewHdr: "
+   ]
+  },
+  "LivePhotoPresenter.resume": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "boolean"
+   ],
+   "ret": "void",
+   "strings": [
+    "onResume, presenter: "
+   ]
+  },
+  "LivePhotoPresenter.previewHdr": {
+   "kind": "field",
+   "in": "@LivePhotoPresenter",
+   "type": "boolean",
+   "writtenBy": [
+    "@LivePhotoPresenter.create",
+    "@LivePhotoPresenter.modeStage",
+    "@LivePhotoPresenter.resume"
+   ]
+  },
   "ModeSwitch.switch": {
    "kind": "method",
    "params": [

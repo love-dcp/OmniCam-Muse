@@ -24,6 +24,7 @@ public final class GrPort {
             return;
         }
         install("effect transport", () -> GrEffectTransport.install(classLoader));
+        install("live photo HDR restore", () -> LivePhotoHdrRestore.install(classLoader));
         install("focal length", () -> GrFocalLength.install(classLoader));
         install("snap focus", () -> GrSnapFocus.install(classLoader));
         install("ratio guard", () -> GrRatioGuard.install(classLoader));

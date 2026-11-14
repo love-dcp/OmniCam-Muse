@@ -178,6 +178,16 @@ add(
  DataManager__getOr=M(**{"in": DM}, params=[DK, "java.lang.Object"], ret="java.lang.Object"),
  DataManager__put=M(**{"in": DM}, params=[DK, "java.lang.Object"], ret="void"),
  DataManager__putSync=M(**{"in": DM}, params=[DK, "java.lang.Object", "boolean"], ret="void"),
+ # live photo preview HDR flag (mbPreviewHdr). The presenter queries it on create, resume and every
+ # mode-switch stage and hands it to the video encoder (color-format, data-space, HEVC profile).
+ # Entering GR turns it off and nothing turns it back on, so the next master live photo records an
+ # SDR video over an HLG preview while its cover keeps the master look: see
+ # docs/LIVE_PHOTO_GR_MISMATCH.md. The field is the only boolean all three methods write.
+ LivePhotoPresenter=K(strings=["onModeSwitchStageChanged, mbPreviewHdr: "]),
+ LivePhotoPresenter__create=M(**{"in": "@LivePhotoPresenter"}, params=["android.os.Bundle"], ret="void", strings=["onCreate, presenter: "]),
+ LivePhotoPresenter__modeStage=M(**{"in": "@LivePhotoPresenter"}, params=["com.oplus.camera.protocal.event.message.modeProtocol.EventMessageModeSwitcherStage"], ret="void", strings=["onModeSwitchStageChanged, mbPreviewHdr: "]),
+ LivePhotoPresenter__resume=M(**{"in": "@LivePhotoPresenter"}, params=["boolean"], ret="void", strings=["onResume, presenter: "]),
+ LivePhotoPresenter__previewHdr=F(**{"in": "@LivePhotoPresenter"}, type="boolean", writtenBy=["@LivePhotoPresenter.create", "@LivePhotoPresenter.modeStage", "@LivePhotoPresenter.resume"]),
  # mode switch
  ModeSwitch__switch=M(params=[S, S, S], ret="void", strings=["swapRetroLivePhotoStateIfNeeded, curMode: "]),
  # shutter sound

@@ -159,3 +159,75 @@ RGBA 就是**没过大仕 LMT 的原厂 professional 画面**（原厂比大师�
 本地留档（2026-11-14 18:00 拉取）：`work/lp/logs/logcat_full_1759.txt`（本进程 34MB）、
 `logcat_all_1759.txt`（全 buffer 355MB）、`work/lp/dcim/*.jpg`（当天 24 张）、
 `work/lp/dcim/*.mp4`（2 段视频）、`module_settings.xml`、`getprop.txt`、`media_camera.txt`。
+
+---
+
+## 6. 对照实验确认 + 真因与修复（r362，2026-11-14 19:13）
+
+用户做的对照实验：**重启相机、不进 GR，直接在大师模式拍实况** → 相册播放颜色正常。
+这条把范围收死了：不是「大师实况视频天生不带 LMT」，而是**进过一次 GR 之后**才坏。
+和 §5 的推断一致，`mbPreviewHdr` 就是那个开关。
+
+### 6.1 反汇编确认：W0 是实况视频的编码器色彩配置
+
+`classes8.dex` 里 `gh/e2`（日志 tag `OCAM_LivePhotoPresenter-`，栈里叫 `LivePhotoPresenter.java`）
+的字段 `W0` 就是 `mbPreviewHdr`。`buildPreview` 构造视频 `MediaFormat` 时依次读它：
+
+```smali
+089f: iget-boolean W0            ; color-format: W0 → 0x36(54), 否则 U0 → 0x15(21), 再否则 0x7f420888
+08c3: iget-boolean W0            ; dataspace:   W0 → com.oplus.camera.preview.hdr.livephoto.video.dataspace
+                                 ;              否则 com.oplus.camera.livephoto.color.dataspace.value
+08f3: iget-boolean W0            ; W0 时补 profile=2 / level=16384（HEVC Main10）
+```
+
+也就是说 **W0 决定这段视频按 HDR 还是 SDR 编码**。
+
+`W0` 的写点只有四处（`grep iput-boolean Lgh/e2;.W0`）：
+
+| 位置 | 方法 | 取值 |
+| --- | --- | --- |
+| `gh.e2.<init>` | 构造器 | 常量 false |
+| `gh.e2.I1(Bundle)` | onCreate | 查 `Lzg/a`（相机能力） |
+| `gh.e2.R1(EventMessageSwitcherStage)` | onModeSwitchStageChanged | 查 `Lzg/a` |
+| `gh.e2.f2(Z)` | onResume / onPause | 查 `Lzg/a` |
+
+四处都不缓存「上一次的结果」，每次重新查 `Lzg/a`。进 GR 时它答 false，退出 GR 时
+presenter 被 onPause+onDestroy 再 onCreate（17:45:56.841 → 17:46:02.503），新实例同样查回 false，
+**于是这个 false 会一直留到相机重启**。
+
+### 6.2 为什么表现是「视频更艳」
+
+W0=false 时视频按 SDR 8bit / SDR dataspace 编码，但喂给编码器的 RGBA 是 HLG 预览
+（`OCAM_LivePhoto.Rgba2YuvConversion`，1920x1440）。HLG 信号被当成 SDR 解释，中间调抬升，
+看起来就是明显更亮更艳；封面走静态成片管线，不受这个标志影响，所以正常。
+
+### 6.3 修复（r362）
+
+新增 `app/src/main/java/local/jiege/hook/gr/LivePhotoHdrRestore.java`，挂在 GR port 上：
+
+- hook `LivePhotoPresenter.modeStage`（`R1`）与 `LivePhotoPresenter.resume`（`f2`，仅 `Z=true`）；
+- 见到 true → 记 `sawHdrPreview`（说明这台机器确实做 HDR 实况预览）；
+- 见到 false 且 `sawHdrPreview` 且 `GrState.isGrMode()==false` → 把标志补回 true，打一行
+  `live photo preview HDR restored (...)`。
+
+条件这么窄是为了不误伤：只有「本进程见过 true」才补（不支持 HDR 预览的机型不碰），
+GR 模式内不补（GR 自己有它的取值），且只补这个被查询污染的标志，不动预览本身。
+
+符号（`symbols.json`，源在 `tools/symbols/sym_camera.py`）：
+
+```json
+"LivePhotoPresenter"              : strings ["onModeSwitchStageChanged, mbPreviewHdr: "]
+"LivePhotoPresenter.create"       : in @LivePhotoPresenter, params [android.os.Bundle],  strings ["onCreate, presenter: "]
+"LivePhotoPresenter.modeStage"    : in @LivePhotoPresenter, params [EventMessageModeSwitcherStage], strings ["onModeSwitchStageChanged, mbPreviewHdr: "]
+"LivePhotoPresenter.resume"       : in @LivePhotoPresenter, params [boolean], strings ["onResume, presenter: "]
+"LivePhotoPresenter.previewHdr"   : in @LivePhotoPresenter, type boolean,
+                                    writtenBy [create, modeStage, resume]
+```
+
+字段不用名字定位：`gh.e2` 里 boolean 字段中**同时被这三个方法写**的只有 `W0`
+（U0/X0 只被 `<init>` 和 `I1` 写，Y0 不被 `I1` 写）。
+
+> 附注：`EffectItemView` 在已提交的 `symbols.json` 里带 `super` + `fieldTypes`，而
+> `sym_camera3.py` 里只有 `strings`。直接跑 `sym.py` 会把那两条约束删掉，所以这次是
+> 手工往 JSON 里加条目、同时把同样的条目写进 `sym_camera.py` 保持两边一致。
+> 下次动 `sym.py` 前先把这个不一致补上。
