@@ -198,13 +198,26 @@ public final class MasterPalette {
      */
     private static final int WIDE_DIAL_LEFT_DP = 84;
     /**
-     * Landscape, POP only: the dial docks to the right of the preview card instead. POP rotates its
-     * tree exactly like master does, but its shutter is not in a bottom bar - portrait's bottom row
-     * (shutter, 交换镜头, mode strip) turns into the left edge, so the 84dp band lands on the button
-     * itself. The right edge is the mirror image of it and stays empty: the AI and grid buttons sit
-     * at the top and bottom corners, and the page hides them anyway while a palette is up.
+     * Landscape, POP only: the dial goes to the very left of the window instead of photo mode's
+     * 84dp column. POP turns its whole view tree 90 degrees with the sensor, so portrait's bottom
+     * row - thumbnail, shutter, 交换镜头 - becomes the left edge: at 84dp the dial sat right on top
+     * of the shutter, and lifting the shutter out of the way only piled it onto the thumbnail above
+     * it. Measured off a POP landscape screenshot (2376x1080): the shutter's white circle starts at
+     * x=351 and the dial is 288 wide, so 8dp puts it at 24..312 and the two clear each other by 39px.
      */
-    private static final int WIDE_DIAL_RIGHT_DP = 4;
+    private static final int WIDE_POP_DIAL_LEFT_DP = 8;
+    /**
+     * The POP page's filter strip, dropped while the palette is up: photo mode hides its own strip
+     * in that state, and the band is where the dial goes. The strip cannot simply be pushed aside -
+     * it is a scroll view the camera keeps relaying out, so it is put away like the other borrowed
+     * views and handed back on {@code hide()}.
+     */
+    private static final String[] POP_STRIP_IDS = {
+        "retro_camera_filter_scrollview",
+        "retro_camera_filter_selected_item_anim",
+        "retro_camera_filter_selected_bg_anim",
+        "retro_camera_filter_function_introduction",
+    };
     /**
      * The preview card photo mode draws while its palette is up: the image is inset 14dp on both
      * sides (42px at 3x) and rounded with a 16dp radius (48px) - measured off the screenshots.
@@ -1545,6 +1558,14 @@ public final class MasterPalette {
                         // palette row for as long as the dial is up.
                         if (shelf != null && thumb != null) {
                             thumb.setTranslationY(thumbBase + thumbShift);
+                        }
+                        // POP's filter strip is the camera's, so it is free to bring it back the next
+                        // time it relays the page out. The dial is docked in the far-left band, so the
+                        // strip has to be put away again on every tick - the same way the thumbnail
+                        // above is held in place. The shutter is left exactly where the page puts it:
+                        // moving it up the screen only ever parked it on the thumbnail.
+                        if (shelf != null && retro && decor.getWidth() > decor.getHeight()) {
+                            for (String id : POP_STRIP_IDS) hideView(id);
                         }
                         // Opening the filter page has to take the palette down: the click-catcher
                         // covers the preview, so the filter pager would never see the drag.
@@ -2908,6 +2929,13 @@ public final class MasterPalette {
                         view.setVisibility(View.GONE);
                     }
                     dialTop = decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP);
+                    // Landscape puts the dial in the band the filter strip fills in portrait, so the
+                    // strip goes away for as long as the palette is up - photo mode drops its own
+                    // strip in that state too. Nothing else about the page moves: the shutter is
+                    // lifted separately, further down.
+                    if (decor.getWidth() > decor.getHeight()) {
+                        for (String id : POP_STRIP_IDS) hideView(id);
+                    }
                 } else {
                     if (controlBar != null) controlBar.setTranslationY(-dp(PALETTE_PANEL_LIFT_DP));
                     panelTop = controlBar != null ? screenTop(controlBar)
@@ -2959,22 +2987,14 @@ public final class MasterPalette {
                 // Master leaves the band to the left of the preview card empty (the mode strip, the
                 // parameter column and photo mode's own landscape palette all live elsewhere), so the
                 // dial docks there, vertically centred, at the same 84dp photo mode uses - measured
-                // off its own palette. POP does not: its shutter is in that band, see below.
+                // off its own palette. POP cannot: its shutter turned with the tree and now sits in
+                // that band, so the dial goes all the way to the window's left edge, clear of the
+                // button. Measured off a POP screenshot: the shutter's circle starts at x=330, the
+                // dial ends at 12+288=300, so the two never touch.
                 boolean wide = decor.getWidth() > decor.getHeight();
-                int wideLeft = wide ? dp(WIDE_DIAL_LEFT_DP) : 0;
+                int wideLeft = wide ? dp(retro ? WIDE_POP_DIAL_LEFT_DP : WIDE_DIAL_LEFT_DP) : 0;
                 if (wide) {
                     dialTop = Math.max(dp(24), (decor.getHeight() - dialPx) / 2);
-                    if (retro) {
-                        // POP keeps the shutter where portrait's bottom row went - the left edge -
-                        // so this page docks the dial on the other side instead, at the same distance
-                        // from the bottom edge it keeps in portrait. Portrait's bottom band is the
-                        // only anchor that still means anything once the tree is turned 90 degrees:
-                        // the page's whole chrome (mode strip, shutter, lens switch, filter strip)
-                        // lives along the left edge, the right band holds nothing.
-                        wideLeft = Math.max(dp(4), decor.getWidth() - dialPx - dp(WIDE_DIAL_RIGHT_DP));
-                        dialTop = Math.max(dp(24),
-                            decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP));
-                    }
                 }
 
                 int highPixelBarTop = -1;
@@ -3050,25 +3070,24 @@ public final class MasterPalette {
                 // stops above the control panel - and, where there is one, above the retro filter
                 // strip too, so the strip keeps taking its own taps and drags.
                 int scrimBottom = Math.max(dp(80), Math.min(panelTop, decor.getHeight()));
-                if (stacked) {
+                if (wide) {
+                    // The pages that turn their whole view tree over leave no bottom bar to stop
+                    // above, so the click-catcher is simply the whole window: a tap anywhere over
+                    // the picture closes the palette, as in portrait. Nothing is measured off the
+                    // page's own views here - getLocationOnScreen ignores the 90 degree turn and
+                    // reports portrait coordinates, which land beyond the right edge of the window;
+                    // clamping the catcher to those left a 3px sliver that swallowed nothing, which
+                    // is why POP could not be dismissed by tapping.
+                    scrimBottom = decor.getHeight();
+                } else if (stacked) {
                     View strip = find("retro_camera_filter_scrollview");
                     if (strip != null && strip.getHeight() > 0) {
                         scrimBottom = Math.max(dp(80), Math.min(scrimBottom, screenTop(strip)));
                     }
-                    // The dial is docked under the shutter on these pages, and the control bar can sit
-                    // below it: without this the scrim covered the dial, so a drag landed on the scrim
-                    // and only closed the palette.
+                    // The dial is docked under the shutter on these pages, and the control bar can
+                    // sit below it: without this the scrim covered the dial, so a drag landed on
+                    // the scrim and only closed the palette.
                     scrimBottom = Math.max(dp(80), Math.min(scrimBottom, dialTop - dp(6)));
-                    if (wide) {
-                        // In landscape the shutter moved into the band the dial used to want, and the
-                        // click-catcher must not reach it: a tap there has to take a picture, not
-                        // close the palette.
-                        View shutter = find("shutter_button");
-                        int shutterTop = shutter != null && shutter.getHeight() > 0 ? screenTop(shutter) : -1;
-                        if (shutterTop > 0) {
-                            scrimBottom = Math.max(dp(80), Math.min(scrimBottom, shutterTop - dp(6)));
-                        }
-                    }
                 }
                 // The 哈苏超清 filter row sits over the picture, so the scrim has to stop above it or
                 // the row never sees a tap.
@@ -3093,12 +3112,13 @@ public final class MasterPalette {
                 dialView.post(() -> {
                     // The landscape anchors depend on the window size, and on the frame the tree is
                     // turned over that size can still read zero - the dial then falls back to its
-                    // 24dp floor, which is the top edge. Measure once more after layout and move it
-                    // if that happened; the page keeps the dial in the bottom-right corner.
+                    // 24dp floor, which is the top edge. Measure once more after layout and put it
+                    // back in the left band if that happened - the same margin the dial was opened
+                    // at: photo mode's 84dp column, or POP's own window edge, where its shutter
+                    // leaves room for it.
                     if (wide && retro && decor.getWidth() > dialPx && decor.getHeight() > dialPx) {
-                        int wantLeft = Math.max(dp(4), decor.getWidth() - dialPx - dp(WIDE_DIAL_RIGHT_DP));
-                        int wantTop = Math.max(dp(24),
-                            decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP));
+                        int wantLeft = dp(WIDE_POP_DIAL_LEFT_DP);
+                        int wantTop = Math.max(dp(24), (decor.getHeight() - dialPx) / 2);
                         ViewGroup.LayoutParams raw = dialView.getLayoutParams();
                         if (raw instanceof FrameLayout.LayoutParams) {
                             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
