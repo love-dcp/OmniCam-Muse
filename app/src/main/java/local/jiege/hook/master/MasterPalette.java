@@ -198,6 +198,14 @@ public final class MasterPalette {
      */
     private static final int WIDE_DIAL_LEFT_DP = 84;
     /**
+     * Landscape, POP only: the dial docks to the right of the preview card instead. POP rotates its
+     * tree exactly like master does, but its shutter is not in a bottom bar - portrait's bottom row
+     * (shutter, 交换镜头, mode strip) turns into the left edge, so the 84dp band lands on the button
+     * itself. The right edge is the mirror image of it and stays empty: the AI and grid buttons sit
+     * at the top and bottom corners, and the page hides them anyway while a palette is up.
+     */
+    private static final int WIDE_DIAL_RIGHT_DP = 4;
+    /**
      * The preview card photo mode draws while its palette is up: the image is inset 14dp on both
      * sides (42px at 3x) and rounded with a 16dp radius (48px) - measured off the screenshots.
      */
@@ -2948,13 +2956,20 @@ public final class MasterPalette {
                 // anchor is then wrong - master's control panel starts at the top of the window, so
                 // "117dp below it" lands in the middle of the picture, and POP's "empty band under
                 // the shutter" is picture too, because the shutter itself moved to the left edge.
-                // What those pages do leave empty is the band to the left of the preview card (the
-                // mode strip, POP's filter strip and the parameter column all live elsewhere), so the
-                // dial docks there, vertically centred. Same numbers photo mode uses in landscape,
-                // measured off its own palette at 84dp from the left edge.
+                // Master leaves the band to the left of the preview card empty (the mode strip, the
+                // parameter column and photo mode's own landscape palette all live elsewhere), so the
+                // dial docks there, vertically centred, at the same 84dp photo mode uses - measured
+                // off its own palette. POP does not: its shutter is in that band, see below.
                 boolean wide = decor.getWidth() > decor.getHeight();
                 int wideLeft = wide ? dp(WIDE_DIAL_LEFT_DP) : 0;
-                if (wide) dialTop = Math.max(dp(24), (decor.getHeight() - dialPx) / 2);
+                if (wide) {
+                    dialTop = Math.max(dp(24), (decor.getHeight() - dialPx) / 2);
+                    if (retro) {
+                        // POP keeps the shutter where portrait's bottom row went - the left edge -
+                        // so this page docks the dial on the other side instead.
+                        wideLeft = Math.max(dp(4), decor.getWidth() - dialPx - dp(WIDE_DIAL_RIGHT_DP));
+                    }
+                }
 
                 int highPixelBarTop = -1;
                 if (filterBar != null && !highPixel) {
