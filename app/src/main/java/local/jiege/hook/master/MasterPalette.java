@@ -207,18 +207,6 @@ public final class MasterPalette {
      */
     private static final int WIDE_POP_DIAL_LEFT_DP = 8;
     /**
-     * The POP page's filter strip, dropped while the palette is up: photo mode hides its own strip
-     * in that state, and the band is where the dial goes. The strip cannot simply be pushed aside -
-     * it is a scroll view the camera keeps relaying out, so it is put away like the other borrowed
-     * views and handed back on {@code hide()}.
-     */
-    private static final String[] POP_STRIP_IDS = {
-        "retro_camera_filter_scrollview",
-        "retro_camera_filter_selected_item_anim",
-        "retro_camera_filter_selected_bg_anim",
-        "retro_camera_filter_function_introduction",
-    };
-    /**
      * The preview card photo mode draws while its palette is up: the image is inset 14dp on both
      * sides (42px at 3x) and rounded with a 16dp radius (48px) - measured off the screenshots.
      */
@@ -1559,14 +1547,10 @@ public final class MasterPalette {
                         if (shelf != null && thumb != null) {
                             thumb.setTranslationY(thumbBase + thumbShift);
                         }
-                        // POP's filter strip is the camera's, so it is free to bring it back the next
-                        // time it relays the page out. The dial is docked in the far-left band, so the
-                        // strip has to be put away again on every tick - the same way the thumbnail
-                        // above is held in place. The shutter is left exactly where the page puts it:
-                        // moving it up the screen only ever parked it on the thumbnail.
-                        if (shelf != null && retro && decor.getWidth() > decor.getHeight()) {
-                            for (String id : POP_STRIP_IDS) hideView(id);
-                        }
+                        // POP's filter strip is left exactly as the page draws it - it used to be
+                        // put away while the palette was up, back when the dial docked in its band;
+                        // the dial now sits at the window's left edge instead and the strip keeps
+                        // its icons and its background.
                         // Opening the filter page has to take the palette down: the click-catcher
                         // covers the preview, so the filter pager would never see the drag.
                         boolean filterOpen = findByIds(FILTER_PANEL_IDS) != null;
@@ -2929,13 +2913,6 @@ public final class MasterPalette {
                         view.setVisibility(View.GONE);
                     }
                     dialTop = decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP);
-                    // Landscape puts the dial in the band the filter strip fills in portrait, so the
-                    // strip goes away for as long as the palette is up - photo mode drops its own
-                    // strip in that state too. Nothing else about the page moves: the shutter is
-                    // lifted separately, further down.
-                    if (decor.getWidth() > decor.getHeight()) {
-                        for (String id : POP_STRIP_IDS) hideView(id);
-                    }
                 } else {
                     if (controlBar != null) controlBar.setTranslationY(-dp(PALETTE_PANEL_LIFT_DP));
                     panelTop = controlBar != null ? screenTop(controlBar)
@@ -3038,23 +3015,28 @@ public final class MasterPalette {
                     decor.bringChildToFront(panel);
                 }
 
-                // 哈苏超清: the row goes inside the card, where photo mode draws its own filter
-                // carousel - just above the shutter, not under the picture with the dial.
+                // 哈苏超清: portrait keeps the row inside the card, where photo mode draws its own
+                // filter carousel - just above the shutter, not under the picture with the dial.
                 if (filterBar != null && highPixel) {
                     View card = find("frame_layout");
                     int frameBottom = card != null && card.getHeight() > 0
                         ? screenTop(card) + card.getHeight() : decor.getHeight() - dp(500);
-                    highPixelBarTop = Math.max(dp(140), frameBottom - dp(HIGHPIXEL_FILTER_BOTTOM_DP) - filterBarH);
                     FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
-                        wide ? dialPx + dp(16) : ViewGroup.LayoutParams.MATCH_PARENT,
-                        filterBarH, wide ? Gravity.TOP | Gravity.START : Gravity.TOP);
+                        ViewGroup.LayoutParams.MATCH_PARENT, filterBarH, Gravity.TOP);
+                    barParams.leftMargin = dp(4);
+                    barParams.rightMargin = dp(4);
                     if (wide) {
-                        // Same left band as the dial, immediately above it.
-                        barParams.leftMargin = wideLeft;
-                        highPixelBarTop = Math.max(dp(24), dialTop - filterBarH - dp(6));
+                        // Landscape: the row stays a full-width strip across the window, the way
+                        // photo mode keeps its carousel. It used to be squeezed into the dial's
+                        // 84dp column right above the dial, which stacked the filter name and the
+                        // dots on top of the palette and left nowhere to swipe. Low enough to clear
+                        // the 重置 under the dial and the gesture pill; the click-catcher stops
+                        // just above it (highPixelBarTop), so a swipe along the row reaches the
+                        // chips instead of closing the palette.
+                        highPixelBarTop = Math.max(dp(140), decor.getHeight() - filterBarH - dp(40));
                     } else {
-                        barParams.leftMargin = dp(4);
-                        barParams.rightMargin = dp(4);
+                        highPixelBarTop = Math.max(dp(140),
+                            frameBottom - dp(HIGHPIXEL_FILTER_BOTTOM_DP) - filterBarH);
                     }
                     barParams.topMargin = highPixelBarTop;
                     decor.addView(filterBar, barParams);

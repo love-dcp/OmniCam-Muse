@@ -30,6 +30,8 @@ $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/masterfilter/MasterProParams.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/settings/DiagnosticsContract.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Settings.java')
+# Settings 会直接解析偏好文件（PreferencesFile），漏掉它离线测试就报「找不到符号 PreferencesFile」。
+$sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/PreferencesFile.java')
 # FilterGroupInjector reaches the camera through Symbols (DexKit-backed); compile against the DexKit AAR.
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/Symbols.java')
 $sources += (Join-Path $project 'app/src/main/java/local/jiege/hook/common/PortReport.java')
