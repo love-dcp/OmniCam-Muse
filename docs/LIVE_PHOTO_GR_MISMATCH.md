@@ -82,3 +82,80 @@ IMG20261114170419  封面 0.329  视频 0.267  -0.062   ← 正常
 
 更保守的做法：把 profile 缓存到进程生命周期（跟大师色彩一样，改设置需重启相机），实现简单、
 不会碰到录制中途的时序，但会牺牲 GR 效果的即时性。
+
+---
+
+## 5. r361 复核：三处堵点都在，但现象仍在（2026-11-14 17:46）
+
+r361 加了三处防线后按同样流程复现（GR 一张 17:46:00 → 切大师 → 17:46:04 拍实况），
+用户反馈「还是鲜艳」。逐项核对日志后，**可以确认三条 GR 通道这次都没碰上**：
+
+```
+17:45:56.866  Lut3d.load mode=gr grMode=true            ← 进 GR
+17:46:00.736  GR effect source=presenter-table len=63   ← GR 拍摄
+17:46:02.516  Lut3d.load mode=retroCamera grMode=false  ← 离开 GR，预览不再指向 GR 树
+17:46:03.561  IPU filter capture_mode=professional filter_type=default   ← 预览滤镜已回大师
+17:46:04.457  APS 请求：capture_mode=master, retro_camera_mode=false,
+              gr_mode_particle_size=0, ultra_hdr_enable=1               ← 请求里没有 GR
+17:46:05.37   BasicTone profile=master-colour（封面）
+17:46:07.17   BasicTone profile=master-colour（主图）
+```
+
+`Lut3d.load`、`CombineLutHelper.init`、`GRCapMode.updateCaptureRequestTag` 三条路都没有在
+非 GR 状态下被调用（后两条在本版相机里根本没被调用过：dex 里没有 `mGrEffectParam` 字段，
+`updateCaptureRequestTag` 也不是原名，`hookAllMethods` 装了个空壳）。也就是说
+**a. GR 的 LMT 树、b. 预览 CombineLut、c. 请求 tag 上的 GR 参数，这三条都不是这次的元凶。**
+
+### 5.1 实况视频到底从哪来
+
+```
+17:45:55.769  OCAM_LivePhoto.Session[244c5e35] 建立（相机启动时）
+17:45:55.770  OCAM_LivePhoto.VideoEncoder[...] setCameraId 0 => 12
+17:46:03.565  OCAM_LivePhoto.Rgba2YuvConversion, width 1920 height 1440
+17:46:03.565  OCAM_LivePhoto.Session[244c7bcf] genImageDataPool format 54 1920x1440
+```
+
+实况的「动态部分」是**把预览的 RGBA 纹理转成 YUV 再编码**（`Rgba2YuvConversion`，
+固定 1920x1440），不是第二条成片管线。所以视频的色彩＝**预览画面在转 YUV 那一刻的样子**。
+整段录制期间再没有任何 `IPU_FilterProcessUnitSDK.processImage` 参数变化、也没有第二次
+`BasicTone`，即视频不会单独再过一次大师 LMT —— 它继承预览。
+
+### 5.2 唯一还没被排除的开关：`mbPreviewHdr`
+
+`OCAM_LivePhotoPresenter.onResume` 只在日志里出现过两次，而且是这次复现的关键：
+
+```
+17:45:55.501  onResume, mbPreviewHdr: true,  mLutType: 7    ← 启动时（大师）
+17:46:02.503  onResume, mbPreviewHdr: false, mLutType: 7    ← 正在从 GR 切回大师
+```
+
+**GR → 大师 这次切换把 LivePhoto presenter 的预览 HDR 关掉了，之后再没回到 true。**
+大师色彩（MasterColor）的 LMT 是挂在 HDR 预览链上的：预览一旦不是 HDR，转给视频编码器的
+RGBA 就是**没过大仕 LMT 的原厂 professional 画面**（原厂比大师更艳），而封面走静态成片管线，
+永远带大师 LMT —— 于是「视频鲜艳、封面正常」，且只有大师实况中招（其它模式的 LMT 不走这条路），
+并且除重启相机（presenter 重新 onResume）之外不会自己恢复。
+
+这条能同时解释：只有大师实况、只有 GR 之后、重启相机就好、换预设管理/重启也顺带好（会重建 presenter）。
+
+### 5.3 像素比对为什么给不出结论（别再走这条路）
+
+实况视频是 BT.2020 / HLG 10bit，封面是 SDR 基底 + gain map（`hdrgm:Version="1.0"`）。
+用任何没做 HLG 反变换的管线去比，视频彩度都会是封面的 ~2 倍 —— 这在**所有**样本上都一样
+（坏样本 Lab C=28.6 / 封面 12.3，正常样本 28.3 / 12.4），差异全落在噪点里。
+`work/lp/hdr.py` 做了 HLG 反 OETF + OOTF + 9020→709 + Reinhard，仍受白点与 tone map 选择影响，
+只能用作「同一场景 A/B」的辅助，不能当判据。
+
+**结论：这个问题的判据只能是「相册里播放 vs 封面」的人眼，或者让视频重新带上大师 LMT。**
+
+### 5.4 下一步（未实施）
+
+1. 先取证：在 `ModeStateSplit` 或新增钩子里，每次拍摄时打印 LivePhoto presenter 的
+   `mbPreviewHdr` / `mLutType`，确认「GR 之后 = false」是不是稳定规律（本次只有一条样本）。
+2. 再修：GR→非 GR 切换后把预览 HDR 重新打开（或重建 presenter），让视频重新继承大师 LMT。
+   落点候选：`LivePhotoPresenter.onResume` 的 `mbPreviewHdr` 赋值处，或 mode switch 完成回调。
+3. 对照实验（最省事）：**同一次开机里，先强停相机 → 直接大师拍实况（不进 GR）**，看是否也鲜艳。
+   若也鲜艳，说明跟 GR 无关，是「大师实况视频不带 LMT」的固有行为，修法完全不同。
+
+本地留档（2026-11-14 18:00 拉取）：`work/lp/logs/logcat_full_1759.txt`（本进程 34MB）、
+`logcat_all_1759.txt`（全 buffer 355MB）、`work/lp/dcim/*.jpg`（当天 24 张）、
+`work/lp/dcim/*.mp4`（2 段视频）、`module_settings.xml`、`getprop.txt`、`media_camera.txt`。

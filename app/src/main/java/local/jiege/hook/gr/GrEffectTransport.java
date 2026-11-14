@@ -21,6 +21,10 @@ import local.jiege.hook.common.Symbols;
 final class GrEffectTransport {
     private static final String TAG = "RicohGrPort";
     private static final String GR_LMT_DIR = "/data/user/0/com.oplus.camera/files/ricoh_gr/lmt";
+    /** Last Lut3d mode / combine-LUT directory / request residue state reported, so each is one line. */
+    private static volatile String tracedMode;
+    private static volatile String tracedInit;
+    private static volatile String tracedResidue;
 
     private GrEffectTransport() {}
 
@@ -35,6 +39,14 @@ final class GrEffectTransport {
         final ThreadLocal<Boolean> loadingGrLut = new ThreadLocal<>();
         XposedBridge.hookMethod(symbols.method("Lut3d.load"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                String mode = String.valueOf(param.args[2]);
+                if (!mode.equals(tracedMode)) {
+                    tracedMode = mode;
+                    // One line per mode the preview pipeline loads: a live photo records from a
+                    // second stream, and "which mode did that stream load" is the question that
+                    // decides whether GR can still be bound while the camera is in master mode.
+                    Log.i(TAG, "Lut3d.load mode=" + mode + " grMode=" + GrState.isGrMode());
+                }
                 boolean gr = "gr".equals(param.args[2]);
                 // Entering or leaving GR invalidates the cached LUT (index = -1).
                 if (gr != "gr".equals(symbols.get("Lut3d.mode", param.thisObject))) {
@@ -50,7 +62,23 @@ final class GrEffectTransport {
         XposedBridge.hookAllMethods(XposedHelpers.findClass("com.oplus.ocs.camera.CombineLutHelper", classLoader), "init",
             new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (Boolean.TRUE.equals(loadingGrLut.get())) param.args[0] = GR_LMT_DIR;
+                    if (!Boolean.TRUE.equals(loadingGrLut.get())) return;
+                    if (!GrState.isGrMode()) {
+                        // A "gr" load while the camera is in another mode is a leftover: pointing
+                        // the preview pipeline at the GR tree from here is what kept the GR look on
+                        // the live-photo video after a GR shot. Left on the vendor's own tree; the
+                        // next load in GR mode sets it again.
+                        if (!tracedInit.equals("stale")) {
+                            tracedInit = "stale";
+                            Log.i(TAG, "gr LUT load outside GR mode: preview left on the vendor tree");
+                        }
+                        return;
+                    }
+                    param.args[0] = GR_LMT_DIR;
+                    if (!tracedInit.equals("gr")) {
+                        tracedInit = "gr";
+                        Log.i(TAG, "CombineLut init -> GR tree");
+                    }
                 }
             });
     }
@@ -86,7 +114,8 @@ final class GrEffectTransport {
         Class<?> grCapMode = XposedHelpers.findClass("com.oplus.ocs.camera.producer.mode.GRCapMode", classLoader);
         XposedBridge.hookAllMethods(grCapMode, "updateCaptureRequestTag", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args.length != 3 || !GrState.isGrMode()) return;
+                if (param.args.length != 3) return;
+                if (!GrState.isGrMode()) { releaseResidue(classLoader, param.args[0], param.args[1], "build"); return; }
                 try {
                     Object builder = param.args[0];
                     Object key = XposedHelpers.getStaticObjectField(
@@ -100,7 +129,8 @@ final class GrEffectTransport {
             }
 
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (param.args.length != 3 || !GrState.isGrMode()) return;
+                if (param.args.length != 3) return;
+                if (!GrState.isGrMode()) { releaseResidue(classLoader, param.args[0], param.args[1], "tag"); return; }
                 try {
                     Object tag = param.args[1];
                     Object current = XposedHelpers.getObjectField(tag, "mGrEffectParam");
@@ -116,6 +146,51 @@ final class GrEffectTransport {
                 }
             }
         });
+    }
+
+    /**
+     * Outside GR mode the request tag must carry no GR effect.
+     *
+     * <p>A live photo in master mode records its video from a second stream, configured from the
+     * request tag that was current when the session was set up. The GR effect param written here
+     * during a GR shot is a field on that tag object, and the camera reuses the object: leaving GR
+     * never cleared it, so the video stream kept the GR params (gr_effect_size stays 63 in the HAL
+     * settings) while the still of the same shot was processed with the master look. The result was
+     * a live photo whose video is GR and whose cover is master colour -- and it survived every
+     * later shot until the camera process restarted, because nothing else writes that field.
+     *
+     * <p>Null is the normal state outside GR (it is what a master-mode request carries when GR has
+     * never run), so re-clearing it is a restore, not a new behaviour. Reported once per change.
+     */
+    private static void releaseResidue(ClassLoader classLoader, Object builder, Object tag, String where) {
+        try {
+            Object holder = null;
+            try {
+                holder = XposedHelpers.getObjectField(tag, "mGrEffectParam");
+            } catch (Throwable ignored) {
+                // A tag without the field means this build never had a GR param: nothing to clear.
+            }
+            byte[] params = null;
+            if (holder != null) {
+                Object raw = XposedHelpers.callMethod(holder, "getGrEffectParams");
+                if (raw instanceof byte[]) params = (byte[]) raw;
+            }
+            boolean inBuilder = false;
+            try {
+                Object key = XposedHelpers.getStaticObjectField(
+                    XposedHelpers.findClass("com.oplus.ocs.camera.metadata.UPreviewKeys", classLoader), "KEY_GR_MODE_PARAM");
+                inBuilder = Boolean.TRUE.equals(XposedHelpers.callMethod(builder, "containCustomKey", key));
+            } catch (Throwable ignored) {}
+            boolean residue = holder != null && (params == null || params.length != 0);
+            if (residue) XposedHelpers.setObjectField(tag, "mGrEffectParam", null);
+            String state = where + " tag=" + (params == null ? (holder == null ? "none" : "?") : params.length + "B")
+                + " builder=" + inBuilder + (residue ? " cleared" : "");
+            if (state.equals(tracedResidue)) return;
+            tracedResidue = state;
+            Log.i(TAG, "outside GR request: " + state);
+        } catch (Throwable error) {
+            Log.e(TAG, "GR residue release failed", error);
+        }
     }
 
     private static Bundle effectBundle(byte[] effect) {

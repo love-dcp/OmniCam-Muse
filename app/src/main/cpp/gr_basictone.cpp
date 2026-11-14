@@ -10,6 +10,7 @@
 // Offsets are for PMA110 Camera 7.006.77 (libAlgoInterface.so / libBasicTonePhoto*.so).
 #include <android/log.h>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
@@ -108,6 +109,17 @@ thread_local int activeProfile = kUnknown;
 thread_local bool activeMaster = false;
 thread_local std::string activeMasterDir;
 
+// When the last GR frame went through. A load that carries no frame profile after this has been
+// quiet for GR_IDLE_MS belongs to a stream that is not the GR capture (the live-photo video is
+// exactly that), see applyLmtPath.
+constexpr int64_t kGrIdleMs = 800;
+std::atomic<int64_t> lastGrFrameMs{0};
+
+int64_t nowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 bool isGrFrame(void *frame) {
     // A build whose getSettingInt fingerprint did not match has no accessor: there is no way to
     // tell a GR frame apart, so none is claimed (the GR LUT tree is not swapped).
@@ -121,7 +133,9 @@ bool isGrFrame(void *frame) {
         lastSize.store(size, std::memory_order_relaxed);
         __android_log_print(ANDROID_LOG_INFO, kTag, "gr_effect_size=%d gr=%d", size, size == 63 ? 1 : 0);
     }
-    return size == 63;
+    bool gr = size == 63;
+    if (gr) lastGrFrameMs.store(nowMs(), std::memory_order_relaxed);
+    return gr;
 }
 
 // One line per distinct capture mode, so a capture can be told apart: GR, master, or neither.
@@ -246,8 +260,34 @@ uintptr_t processCore(void *object, void *input, void *output, void *parameters,
 // Point the object's LMT directory at the tree this frame belongs to. Intermediate ODT passes carry
 // no profile, so they keep the LUTs the object already has.
 void applyLmtPath(void *object) {
-    if (activeProfile == kUnknown) return;
-    char *lmtPath = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
+    char *held = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
+    if (activeProfile == kUnknown) {
+        // A load with no frame profile keeps whatever tree the object was last pointed at. That is
+        // right for a master capture's intermediate passes and wrong for the live-photo video,
+        // which records while the still of the same shot has not run yet: after a GR shot the
+        // object still holds the GR tree, so the video was encoded with the GR look and the cover
+        // with the master one. Take the object back to the host tree once GR has been quiet for a
+        // while; the next GR frame simply sets it again at its own load, so a wrong guess costs one
+        // reload and never a wrong picture. See docs/LIVE_PHOTO_GR_MISMATCH.md.
+        if (std::strcmp(held, kGrLmtPath) == 0 && nowMs() - lastGrFrameMs.load(std::memory_order_relaxed) > kGrIdleMs) {
+            std::strcpy(held, kHostLmtPath);
+            *reinterpret_cast<int *>(static_cast<char *>(object) + 0xeb0) = -1;
+            __android_log_print(ANDROID_LOG_INFO, kTag,
+                                "load without frame profile after GR: tree restored to host");
+            return;
+        }
+        // Reported once per tree so the log shows which tree such a load used.
+        int kind = std::strcmp(held, kGrLmtPath) == 0 ? 1 : std::strcmp(held, kHostLmtPath) == 0 ? 0 : 2;
+        static std::atomic<int> lastHeld{-1};
+        if (kind != lastHeld.load(std::memory_order_relaxed)) {
+            lastHeld.store(kind, std::memory_order_relaxed);
+            __android_log_print(ANDROID_LOG_INFO, kTag,
+                                "load without frame profile, tree kept: %s",
+                                kind == 1 ? "GR" : kind == 0 ? "host" : "master-colour or other");
+        }
+        return;
+    }
+    char *lmtPath = held;
     // The object offset is per firmware. The first frame of the process reports what is already in
     // the buffer, which is the only way to tell "the swap landed in the LMT directory" from "it
     // landed in some other member and the stock tree was used all along".
