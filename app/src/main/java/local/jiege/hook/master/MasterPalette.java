@@ -2966,8 +2966,14 @@ public final class MasterPalette {
                     dialTop = Math.max(dp(24), (decor.getHeight() - dialPx) / 2);
                     if (retro) {
                         // POP keeps the shutter where portrait's bottom row went - the left edge -
-                        // so this page docks the dial on the other side instead.
+                        // so this page docks the dial on the other side instead, at the same distance
+                        // from the bottom edge it keeps in portrait. Portrait's bottom band is the
+                        // only anchor that still means anything once the tree is turned 90 degrees:
+                        // the page's whole chrome (mode strip, shutter, lens switch, filter strip)
+                        // lives along the left edge, the right band holds nothing.
                         wideLeft = Math.max(dp(4), decor.getWidth() - dialPx - dp(WIDE_DIAL_RIGHT_DP));
+                        dialTop = Math.max(dp(24),
+                            decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP));
                     }
                 }
 
@@ -3053,6 +3059,16 @@ public final class MasterPalette {
                     // below it: without this the scrim covered the dial, so a drag landed on the scrim
                     // and only closed the palette.
                     scrimBottom = Math.max(dp(80), Math.min(scrimBottom, dialTop - dp(6)));
+                    if (wide) {
+                        // In landscape the shutter moved into the band the dial used to want, and the
+                        // click-catcher must not reach it: a tap there has to take a picture, not
+                        // close the palette.
+                        View shutter = find("shutter_button");
+                        int shutterTop = shutter != null && shutter.getHeight() > 0 ? screenTop(shutter) : -1;
+                        if (shutterTop > 0) {
+                            scrimBottom = Math.max(dp(80), Math.min(scrimBottom, shutterTop - dp(6)));
+                        }
+                    }
                 }
                 // The 哈苏超清 filter row sits over the picture, so the scrim has to stop above it or
                 // the row never sees a tap.
@@ -3075,6 +3091,27 @@ public final class MasterPalette {
                 // line, posted after layout, says whether the panel is on screen at all.
                 final View dialView = panel;
                 dialView.post(() -> {
+                    // The landscape anchors depend on the window size, and on the frame the tree is
+                    // turned over that size can still read zero - the dial then falls back to its
+                    // 24dp floor, which is the top edge. Measure once more after layout and move it
+                    // if that happened; the page keeps the dial in the bottom-right corner.
+                    if (wide && retro && decor.getWidth() > dialPx && decor.getHeight() > dialPx) {
+                        int wantLeft = Math.max(dp(4), decor.getWidth() - dialPx - dp(WIDE_DIAL_RIGHT_DP));
+                        int wantTop = Math.max(dp(24),
+                            decor.getHeight() - dialPx - dp(RETRO_DIAL_BOTTOM_DP));
+                        ViewGroup.LayoutParams raw = dialView.getLayoutParams();
+                        if (raw instanceof FrameLayout.LayoutParams) {
+                            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
+                            if (lp.leftMargin != wantLeft || lp.topMargin != wantTop) {
+                                lp.leftMargin = wantLeft;
+                                lp.topMargin = wantTop;
+                                lp.gravity = Gravity.TOP | Gravity.START;
+                                dialView.setLayoutParams(lp);
+                                Log.i(TAG, "dial re-placed at " + wantLeft + "," + wantTop
+                                    + " (window " + decor.getWidth() + "x" + decor.getHeight() + ")");
+                            }
+                        }
+                    }
                     int[] loc = new int[2];
                     int[] decorLoc = new int[2];
                     dialView.getLocationOnScreen(loc);
