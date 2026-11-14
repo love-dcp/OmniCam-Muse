@@ -1972,6 +1972,37 @@ public final class MasterPalette {
         return dp(8);
     }
 
+        /**
+         * Landscape: 重置 sits under the dial, centred on it. The rotating pages leave the band to
+         * the left of the preview card free (see {@link #WIDE_DIAL_LEFT_DP}), so the button lands in
+         * the same place the dial does and cannot end up over the picture.
+         */
+        void placeUnderDial(View reset, View dial) {
+            int width = dial.getWidth() > 0 ? dial.getWidth() : dp(96);
+            int height = dial.getHeight() > 0 ? dial.getHeight() : dp(96);
+            int left = dial.getLeft();
+            int top = dial.getTop();
+            ViewGroup.LayoutParams dialParams = dial.getLayoutParams();
+            if (dialParams instanceof FrameLayout.LayoutParams) {
+                // The margins are what we just set; getLeft() stays 0 until the next layout pass.
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) dialParams;
+                left = params.leftMargin;
+                top = params.topMargin;
+            }
+            int size = Math.max(dp(44), Math.min(dp(56), width / 2));
+            FrameLayout.LayoutParams params = reset.getLayoutParams() instanceof FrameLayout.LayoutParams
+                ? (FrameLayout.LayoutParams) reset.getLayoutParams()
+                : new FrameLayout.LayoutParams(size, size);
+            params.width = size;
+            params.height = size;
+            params.gravity = Gravity.TOP | Gravity.START;
+            params.leftMargin = left + (width - size) / 2;
+            params.topMargin = top + height + dp(10);
+            reset.setLayoutParams(params);
+            reset.setRotation(0f);
+            reset.setAlpha(1f);
+        }
+
         void attachMasterReset() {
             if (resetButton != null) return;
             View thumbView = find("thumbnail");
@@ -1984,6 +2015,14 @@ public final class MasterPalette {
             resetButton = reset;
             // Mirror the thumbnail: same size, same height, the same distance from the opposite edge.
             Runnable place = () -> {
+                // Landscape on the rotating pages: the thumbnail is inside a view tree that has been
+                // turned 90°, so its screen rectangle says nothing about where 重置 should go - and
+                // mirroring it across the window put the button on the far side of the picture. Park
+                // it under the dial instead, which is the one spot on that page that is known good.
+                if (decor.getWidth() > decor.getHeight() && shelf != null) {
+                    placeUnderDial(reset, shelf);
+                    return;
+                }
                 int width = thumbView.getWidth() > 0 ? thumbView.getWidth() : dp(48);
                 int height = thumbView.getHeight() > 0 ? thumbView.getHeight() : dp(48);
                 int[] at = new int[2];
@@ -2052,8 +2091,15 @@ public final class MasterPalette {
             FrameLayout.LayoutParams resetParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
-            resetParams.leftMargin = dp(36);
-            resetParams.topMargin = dialTop + Math.max(0, (dialPx - dp(56)) / 2);
+            if (decor.getWidth() > decor.getHeight()) {
+                // Landscape: leave the dial column alone and put 重置 under it.
+                resetParams.leftMargin = dp(WIDE_DIAL_LEFT_DP)
+                    + Math.max(0, (dialPx - dp(56)) / 2);
+                resetParams.topMargin = dialTop + dialPx + dp(10);
+            } else {
+                resetParams.leftMargin = dp(36);
+                resetParams.topMargin = dialTop + Math.max(0, (dialPx - dp(56)) / 2);
+            }
             frame.addView(reset, resetParams);
 
             return attachChrome(frame);
@@ -2995,9 +3041,12 @@ public final class MasterPalette {
                 decor.addView(scrimView, new FrameLayout.LayoutParams(-1, Math.max(dp(1), scrimBottom), Gravity.TOP));
                 scrim = scrimView;
                 // Photo mode's chrome around the dial: the back arrow and 重置. Added after the
-                // scrim so they sit on top of it.
+                // scrim so they sit on top of it. 重置 is master's alone: it mirrors the thumbnail
+                // of a page that has one, and the video and POP pages have their own idea of where
+                // that corner goes - on those it used to show up next to the dial as well. `stacked`
+                // is exactly "no pro presenter", i.e. every page that is not master or 哈苏超清.
                 if (highPixel) chrome = buildHighPixelChrome(dialTop, dialPx);
-                else if (!retro) attachMasterReset();
+                else if (!stacked) attachMasterReset();
                 postDump("master-palette");
                 // Where the dial really ended up: the landscape pages rotate the camera's tree, so a
                 // margin that reads right in the log can still put the panel off the picture. One
