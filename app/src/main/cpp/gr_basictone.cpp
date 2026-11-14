@@ -115,9 +115,39 @@ thread_local std::string activeMasterDir;
 constexpr int64_t kGrIdleMs = 800;
 std::atomic<int64_t> lastGrFrameMs{0};
 
+// The master-colour tree most recently handed to a still. A stream that loads without a frame
+// profile (the live-photo video, whose frames never carry one) has no master tree of its own: it
+// kept whatever the object already held, so after a GR shot it played back with the GR look and,
+// once the GR tree was taken back, with the stock one -- either way not the master look the cover
+// of the same shot carries. Remember the last master tree so such a load can use it; the look is
+// what has to match, and a main-vs-thumbnail split only changes how the table was keyed.
+// See docs/LIVE_PHOTO_GR_MISMATCH.md.
+std::mutex masterDirMutex;
+std::string lastMasterDir;
+std::atomic<int64_t> lastMasterMs{0};
+constexpr int64_t kMasterDirFreshMs = 10 * 60 * 1000;
+// Capture mode of the frame that most recently ran through getLmtParams. A profile-less load only
+// takes the master tree while the camera is still feeding master frames; any other mode keeps the
+// tree it already holds, so nothing else is dragged onto the master look.
+std::atomic<uint32_t> lastModeSeen{0xffffffffu};
+
 int64_t nowMs() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+void rememberMasterDir(const std::string &dir) {
+    if (dir.empty()) return;
+    std::lock_guard<std::mutex> lock(masterDirMutex);
+    lastMasterDir = dir;
+    lastMasterMs.store(nowMs(), std::memory_order_relaxed);
+}
+
+std::string freshMasterDir() {
+    int64_t at = lastMasterMs.load(std::memory_order_relaxed);
+    if (at == 0 || nowMs() - at > kMasterDirFreshMs) return std::string();
+    std::lock_guard<std::mutex> lock(masterDirMutex);
+    return lastMasterDir;
 }
 
 bool isGrFrame(void *frame) {
@@ -153,6 +183,9 @@ void noteLmtParams(void *parameters, void *frame) {
     FrameProfile profile;
     profile.profile = gr ? kGr : kHost;
     uint32_t mode = *reinterpret_cast<uint32_t *>(static_cast<char *>(frame) + 0x18);
+    // Mode 0 shows up between stages; it says nothing about which look is on screen, so it is not
+    // allowed to overwrite the last real mode.
+    if (mode != 0) lastModeSeen.store(mode, std::memory_order_relaxed);
     profile.master = !gr && mode == kMasterCaptureMode;
     noteCaptureMode(mode, gr, profile.master);
     std::string look;
@@ -247,7 +280,11 @@ uintptr_t processCore(void *object, void *input, void *output, void *parameters,
             // BasicTone_OGL::processCore logs Image +0 / +4 as the width and height.
             int width = *static_cast<int32_t *>(input), height = static_cast<int32_t *>(input)[1];
             activeMasterDir = masterColorCaptureDir(profile.capture, width, height);
-            if (activeMasterDir.empty()) activeProfile = kHost;
+            if (activeMasterDir.empty()) {
+                activeProfile = kHost;
+            } else {
+                rememberMasterDir(activeMasterDir);
+            }
         }
     }
     uintptr_t result = originalProcessCore(object, input, output, parameters, metadata);
@@ -263,18 +300,42 @@ void applyLmtPath(void *object) {
     char *held = static_cast<char *>(object) + 0x008;  // 256-byte path buffer
     if (activeProfile == kUnknown) {
         // A load with no frame profile keeps whatever tree the object was last pointed at. That is
-        // right for a master capture's intermediate passes and wrong for the live-photo video,
-        // which records while the still of the same shot has not run yet: after a GR shot the
-        // object still holds the GR tree, so the video was encoded with the GR look and the cover
-        // with the master one. Take the object back to the host tree once GR has been quiet for a
-        // while; the next GR frame simply sets it again at its own load, so a wrong guess costs one
-        // reload and never a wrong picture. See docs/LIVE_PHOTO_GR_MISMATCH.md.
-        if (std::strcmp(held, kGrLmtPath) == 0 && nowMs() - lastGrFrameMs.load(std::memory_order_relaxed) > kGrIdleMs) {
-            std::strcpy(held, kHostLmtPath);
-            *reinterpret_cast<int *>(static_cast<char *>(object) + 0xeb0) = -1;
-            __android_log_print(ANDROID_LOG_INFO, kTag,
-                                "load without frame profile after GR: tree restored to host");
-            return;
+        // right for a master capture's intermediate passes and wrong for any other stream: the
+        // live-photo video loads once per session, its frames never carry a profile, so after a GR
+        // shot it played back with the GR tree and -- once that was taken back -- with the stock
+        // one, while the cover of the very same shot carried the master look. Point such a load at
+        // the master tree that is actually in use; fall back to the host tree once no master tree
+        // has been handed out for a while, and to nothing at all while GR is still running.
+        uint32_t mode = lastModeSeen.load(std::memory_order_relaxed);
+        bool grMode = mode == kGrCaptureMode;
+        // While the camera is still feeding GR frames (or nothing has been seen yet and a GR frame
+        // has just gone by) the tree is left alone: it belongs to that capture.
+        bool leaveAlone = grMode ||
+            (mode == 0xffffffffu && nowMs() - lastGrFrameMs.load(std::memory_order_relaxed) <= kGrIdleMs);
+        if (!leaveAlone) {
+            std::string master = mode == kMasterCaptureMode ? freshMasterDir() : std::string();
+            const char *desired = nullptr;
+            const char *why = nullptr;
+            if (!master.empty() && std::strcmp(held, master.c_str()) != 0) {
+                desired = master.c_str();
+                why = "master-colour";
+            } else if (master.empty() && std::strcmp(held, kGrLmtPath) == 0) {
+                desired = kHostLmtPath;
+                why = "host (no master tree)";
+            }
+            if (desired && std::strlen(desired) < 240) {
+                std::strcpy(held, desired);
+                // The path is not part of the vendor cache key, so a tree switch forces a reload.
+                *reinterpret_cast<int *>(static_cast<char *>(object) + 0xeb0) = -1;
+                static std::atomic<int> lastWhy{-1};
+                int kind = why[0] == 'm' ? 1 : 0;
+                if (kind != lastWhy.load(std::memory_order_relaxed)) {
+                    lastWhy.store(kind, std::memory_order_relaxed);
+                    __android_log_print(ANDROID_LOG_INFO, kTag,
+                                        "load without frame profile: tree switched to %s (%s)", why, desired);
+                }
+                return;
+            }
         }
         // Reported once per tree so the log shows which tree such a load used.
         int kind = std::strcmp(held, kGrLmtPath) == 0 ? 1 : std::strcmp(held, kHostLmtPath) == 0 ? 0 : 2;

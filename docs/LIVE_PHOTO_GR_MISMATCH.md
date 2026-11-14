@@ -231,3 +231,55 @@ GR 模式内不补（GR 自己有它的取值），且只补这个被查询污�
 > `sym_camera3.py` 里只有 `strings`。直接跑 `sym.py` 会把那两条约束删掉，所以这次是
 > 手工往 JSON 里加条目、同时把同样的条目写进 `sym_camera.py` 保持两边一致。
 > 下次动 `sym.py` 前先把这个不一致补上。
+
+---
+
+## 7. r363 仍复现 → 真因在 LMT 树的「无画像加载」（r364）
+
+r363 的 `mbPreviewHdr` 修复在日志里确实触发了 5 次（`live photo preview HDR restored`），
+但 19:24 复现的那条实况**依然鲜艳**。逐条比对 r363 下的「坏样本 19:24」与「好样本 19:40」
+（19:40 是重启相机后直接大师模式拍的），差别只有一个，且与预览 HDR 无关：
+
+| 项 | 19:24（坏） | 19:40（好） |
+| --- | --- | --- |
+| 视频编码参数 | HEVC Main10 / HLG / BT.2020 | 完全相同 |
+| 视频分辨率 | 2576×1428 | 2576×1428 |
+| `Rgba2YuvConversion` / `genImageDataPool` | 各 2 次 | **0 次** |
+| 视频/封面彩度比（同亮度区间） | **2.22** | **0.97** |
+| Y 平面中位数 | **180** | 128（与封面一致） |
+| `RicohGrPort: BasicTone profile=master-colour` | 2 次（`t04104_…` / `mb04104_…`） | **0 次** |
+| 预览 GL 滤镜 `processImage` | `gr` 54 帧 + `professional` 143 帧 | 全程 0 帧 |
+
+坏视频不是「GR 的 look 没退」——它比 19:24 那张 GR 照片还艳一倍；也不是「略艳」，
+是**整张亮 1.4 倍、彩度 2.2 倍**，边缘还带红青色边（低分辨率上采样的痕迹）。
+
+### 7.1 机制
+
+实况的「动态部分」是预览流的帧（2576×1428，与 `OCAM_LivePhoto.VideoEffectPipeline` 一致），
+不是成片管线。这条流**只在会话开始时 load 一次 LMT，帧本身不带画像**，于是
+`applyLmtPath` 走的是 `activeProfile == kUnknown` 分支：它保留对象上一次指着的树。
+
+- GR 拍完，对象指着 `.../ricoh_gr/lmt`；
+- 切回大师后视频流的那次 load 没有画像 → **继续用 GR 树**（r361 之后被改成 host 树）；
+- 封面是成片，`BasicTone profile=master-colour` 每次现算目录 → 大师 look。
+
+于是同一次拍摄，视频和封面用了两棵不同的树。host 就是原厂 professional，本身比大师亮、
+比大师艳，所以观感是「视频很鲜艳、封面正常」。其它模式不吃这套 LMT，所以只有大师实况中招；
+树挂在长命对象上，所以除重启相机外不会自愈。
+
+### 7.2 修复（r364）
+
+`app/src/main/cpp/gr_basictone.cpp`：
+
+1. `rememberMasterDir()` / `freshMasterDir()`：记住最近一次交给成片的大师 LMT 目录（10 分钟内有效）；
+2. `lastModeSeen`：记录最近一个非 0 的 capture mode（0 是阶段切换的过渡值，不覆盖）；
+3. `applyLmtPath` 的 `kUnknown` 分支改为：
+   - GR 模式（或未见过 mode 且 GR 帧刚过）→ 不动，仍归 GR；
+   - 大师模式（mode 33）且有新鲜目录 → 把树切到该大师目录，并 `-0xeb0 = -1` 强制重载；
+   - 其它模式 → 若树上还留着 GR，退回 host。
+
+日志新增一行（每次切换类型只打一次）：
+`load without frame profile: tree switched to master-colour (…)`。
+
+这样视频流与封面用同一棵大师树，观感才对得上；GR 自身的捕获不受影响（带动画帧时
+`activeProfile == kGr`，走的是上面那条正常分支）。
