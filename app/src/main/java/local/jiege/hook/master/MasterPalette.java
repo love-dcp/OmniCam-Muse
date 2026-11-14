@@ -192,6 +192,12 @@ public final class MasterPalette {
     /** Dial top relative to the lifted control panel top (photo mode: 1836 - 1485 = 351px at 3x). */
     private static final int PALETTE_DIAL_TOP_DP = 117;
     /**
+     * Landscape only: how far the dial sits from the left window edge on the pages that rotate the
+     * camera's view tree. Photo mode's own palette lands at the same 84dp, measured off its own
+     * layout with paldump - the dial keeps clear of the preview card and of POP's filter strip.
+     */
+    private static final int WIDE_DIAL_LEFT_DP = 84;
+    /**
      * The preview card photo mode draws while its palette is up: the image is inset 14dp on both
      * sides (42px at 3x) and rounded with a 16dp radius (48px) - measured off the screenshots.
      */
@@ -1332,6 +1338,9 @@ public final class MasterPalette {
         long lastPopLog;
         String lastTrigger = "";
         String lastError = "";
+        /** Window size the shelf was laid out for: landscape changes it, and the shelf has to follow. */
+        int laidOutW;
+        int laidOutH;
 
         Session(Activity activity) {
             this.activity = activity;
@@ -1399,6 +1408,28 @@ public final class MasterPalette {
                             if (!trigger.isEmpty() && !"0".equals(trigger)) {
                                 dumpModes("trigger-" + trigger);
                                 postDump("trigger-" + trigger, true);
+                            }
+                        }
+                        // Landscape: master, POP, video and 哈苏超清 rotate the camera's whole view
+                        // tree (photo and portrait keep theirs upright), and the panel is a child of
+                        // the window, so wherever it was docked while upright ends up somewhere else
+                        // on the picture - and it stays there when the phone is turned back, because
+                        // nothing re-runs the layout. Rebuild the shelf whenever the window size
+                        // changes either way; that is also what puts it back on a return to portrait.
+                        int windowW = decor.getWidth();
+                        int windowH = decor.getHeight();
+                        if (windowW > 0 && windowH > 0
+                            && (windowW != laidOutW || windowH != laidOutH)) {
+                            boolean first = laidOutW == 0;
+                            laidOutW = windowW;
+                            laidOutH = windowH;
+                            if (!first && shelf != null && !grActive) {
+                                Log.i(TAG, "window now " + windowW + "x" + windowH
+                                    + ": laying the palette out again");
+                                // No early return: the tick's own re-post lives at the end of this
+                                // method, and skipping it would stop the layout from being held.
+                                hide();
+                                open();
                             }
                         }
                         // The retro-camera (POP) page is a different page from master's; record who is
@@ -2860,6 +2891,18 @@ public final class MasterPalette {
                     }
                 }
 
+                // Landscape, on the pages that rotate the camera's whole view tree: every portrait
+                // anchor is then wrong - master's control panel starts at the top of the window, so
+                // "117dp below it" lands in the middle of the picture, and POP's "empty band under
+                // the shutter" is picture too, because the shutter itself moved to the left edge.
+                // What those pages do leave empty is the band to the left of the preview card (the
+                // mode strip, POP's filter strip and the parameter column all live elsewhere), so the
+                // dial docks there, vertically centred. Same numbers photo mode uses in landscape,
+                // measured off its own palette at 84dp from the left edge.
+                boolean wide = decor.getWidth() > decor.getHeight();
+                int wideLeft = wide ? dp(WIDE_DIAL_LEFT_DP) : 0;
+                if (wide) dialTop = Math.max(dp(24), (decor.getHeight() - dialPx) / 2);
+
                 int highPixelBarTop = -1;
                 if (filterBar != null && !highPixel) {
                     LinearLayout block = new LinearLayout(activity);
@@ -2872,8 +2915,15 @@ public final class MasterPalette {
                     block.addView(panel, dialInBlock);
                     FrameLayout.LayoutParams blockParams = new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
-                    blockParams.leftMargin = dp(4);
-                    blockParams.rightMargin = dp(4);
+                    if (wide) {
+                        // A full-width row would stretch the filter strip across the picture.
+                        blockParams.width = dialPx + dp(16);
+                        blockParams.gravity = Gravity.TOP | Gravity.START;
+                        blockParams.leftMargin = wideLeft;
+                    } else {
+                        blockParams.leftMargin = dp(4);
+                        blockParams.rightMargin = dp(4);
+                    }
                     blockParams.topMargin = dialTop;
                     decor.addView(block, blockParams);
                     shelf = block;
@@ -2885,7 +2935,9 @@ public final class MasterPalette {
                         + " dial=" + panel.getHeight() + " dialTop=" + barTop));
                 } else {
                     FrameLayout.LayoutParams dialParams = new FrameLayout.LayoutParams(
-                        dialPx, dialPx, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                        dialPx, dialPx, wide ? Gravity.TOP | Gravity.START
+                            : Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                    if (wide) dialParams.leftMargin = wideLeft;
                     dialParams.topMargin = dialTop;
                     decor.addView(panel, dialParams);
                     shelf = panel;
@@ -2900,9 +2952,16 @@ public final class MasterPalette {
                         ? screenTop(card) + card.getHeight() : decor.getHeight() - dp(500);
                     highPixelBarTop = Math.max(dp(140), frameBottom - dp(HIGHPIXEL_FILTER_BOTTOM_DP) - filterBarH);
                     FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, filterBarH, Gravity.TOP);
-                    barParams.leftMargin = dp(4);
-                    barParams.rightMargin = dp(4);
+                        wide ? dialPx + dp(16) : ViewGroup.LayoutParams.MATCH_PARENT,
+                        filterBarH, wide ? Gravity.TOP | Gravity.START : Gravity.TOP);
+                    if (wide) {
+                        // Same left band as the dial, immediately above it.
+                        barParams.leftMargin = wideLeft;
+                        highPixelBarTop = Math.max(dp(24), dialTop - filterBarH - dp(6));
+                    } else {
+                        barParams.leftMargin = dp(4);
+                        barParams.rightMargin = dp(4);
+                    }
                     barParams.topMargin = highPixelBarTop;
                     decor.addView(filterBar, barParams);
                     decor.bringChildToFront(filterBar);
@@ -2940,6 +2999,29 @@ public final class MasterPalette {
                 if (highPixel) chrome = buildHighPixelChrome(dialTop, dialPx);
                 else if (!retro) attachMasterReset();
                 postDump("master-palette");
+                // Where the dial really ended up: the landscape pages rotate the camera's tree, so a
+                // margin that reads right in the log can still put the panel off the picture. One
+                // line, posted after layout, says whether the panel is on screen at all.
+                final View dialView = panel;
+                dialView.post(() -> {
+                    int[] loc = new int[2];
+                    int[] decorLoc = new int[2];
+                    dialView.getLocationOnScreen(loc);
+                    decor.getLocationOnScreen(decorLoc);
+                    Log.i(TAG, "dial at " + (loc[0] - decorLoc[0]) + "," + (loc[1] - decorLoc[1])
+                        + " " + dialView.getWidth() + "x" + dialView.getHeight()
+                        + " v=" + dialView.getVisibility() + " shown=" + dialView.isShown()
+                        + " decor=" + decor.getWidth() + "x" + decor.getHeight()
+                        + " wide=" + wide);
+                    Readout r = readout;
+                    if (r != null && r.view != null) {
+                        int[] rl = new int[2];
+                        r.view.getLocationOnScreen(rl);
+                        Log.i(TAG, "readout at " + (rl[0] - decorLoc[0]) + "," + (rl[1] - decorLoc[1])
+                            + " " + r.view.getWidth() + "x" + r.view.getHeight()
+                            + " shown=" + r.view.isShown());
+                    }
+                });
                 // Two later snapshots: if the user goes on to open the filter page, the state that
                 // broke the drag is captured even when the auto-close above does not fire.
                 if (diagnostics) {
