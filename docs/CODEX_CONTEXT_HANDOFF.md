@@ -2,6 +2,32 @@
 
 工作目录：`E:\OmniCam-Muse-main`
 
+## 2026-11-15：r380 修复 XPAN 拍照闪退（已实机验证当前路径）
+
+用户报告 XPAN 一点拍照就闪退。直接原因是 `LutParameters.e` 保留了已释放内部
+`float[] A` 的 `Raw3dTexture` 空壳，XPAN 水印二次合成把空壳重新交给原厂
+`GLRenderer`，在 `FloatBuffer.wrap(null)` 崩溃。
+
+r380 在 `XpanLiveFeature` 中增加 BasicTone 数据完整性检查：优先使用当帧渲染器纹理，
+参数纹理只有在内部数组和尺寸完整时才可使用；两者都失效时保留原厂水印路径。临时改写
+`LutParameters.e` 后会恢复原值。
+
+已热安装 `local.jiege.camera / Muse 4.4.5-r380 / 820`，未重启手机。实机在 XPAN 开启
+实况和水印时完成：单拍 1 张、同会话 10 张、退出后重新进入 XPAN 再拍 10 张。重新进入时
+日志实际命中：
+
+```text
+XPAN watermark composite replaced stale BasicTone texture
+with this frame's valid texture, mode=xpan
+```
+
+全程相机 PID 保持 `11405`，未再出现 `FATAL EXCEPTION`、`FloatBuffer.wrap` 或
+`Raw3dTexture.java:56`。根因、修改、构建哈希和日志路径已补到
+`docs/LIVE_PHOTO_GR_MISMATCH.md` 第 23 节。
+
+当前验收只覆盖本轮 XPAN 闪退；实况附件内容及此前的颜色、亮度问题仍需分别复测，不合并
+宣称已修复。
+
 ## 2026-11-10：r229 人像首次进入默认 1×（用户已确认）
 
 r228 只覆写 `com.oplus.portrait.zoom.value.default`，日志中该配置值已经从 `3.0` 变为

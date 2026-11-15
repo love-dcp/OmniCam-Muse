@@ -44,6 +44,7 @@ public final class XpanLiveFeature {
     private static final String VIDEO_EFFECT_PIPELINE = "gh.p3";
     private static final String GL_RENDERER = "com.oplus.camera.common.gl.a0";
     private static final String GL_SHADER = "com.oplus.camera.common.gl.y0";
+    private static final String RAW_3D_TEXTURE = "com.oplus.camera.common.gl.t0";
     private static final String LIVE_WARP_RENDERER = "ch.g";
     private static final String LUT_MANAGER = "com.oplus.camera.common.utils.Lut3dDataManager";
     private static final String LUT_MANAGER_HOLDER = LUT_MANAGER + "$b";
@@ -153,6 +154,7 @@ public final class XpanLiveFeature {
     private static volatile boolean watermarkCopyErrorLogged;
     private static volatile boolean watermarkCompositeLogged;
     private static volatile boolean watermarkCompositeSkippedLogged;
+    private static volatile boolean watermarkCompositeStaleTextureLogged;
     private static volatile int watermarkCompositeProbe;
     /** LutParameters of the frame currently being drawn, reused by the watermark composite. */
     private static volatile Object activeLutParameters;
@@ -1571,16 +1573,29 @@ public final class XpanLiveFeature {
                      * draw gets one from the renderer field the workaround above fills in. Hand
                      * the same texture to the composite, otherwise uNeedBasicTone=1 samples an
                      * unbound unit and the frame comes out white.
+                     *
+                     * p3.E() stores that renderer texture in LutParameters.e for the sub-video
+                     * path. The field is not cleared when the renderer is destroyed, however, so
+                     * the next shot can see a non-null Raw3dTexture whose internal float[] data
+                     * has already been released by t0.l(). Passing that shell to t0.k() crashes
+                     * at FloatBuffer.wrap(null). Prefer this frame's live renderer texture and
+                     * only accept a parameter texture whose backing table is still complete.
                      */
-                    Object basicTexture = XposedHelpers.getObjectField(graded, "e");
-                    if (basicTexture == null) {
-                        basicTexture = rendererBasicToneTexture();
-                    }
+                    Object previousBasicTexture =
+                        XposedHelpers.getObjectField(graded, "e");
+                    Object rendererBasicTexture = rendererBasicToneTexture();
+                    Object basicTexture = hasBasicToneData(rendererBasicTexture)
+                        ? rendererBasicTexture : previousBasicTexture;
+                    boolean rendererTextureUsable = hasBasicToneData(rendererBasicTexture);
+                    boolean parameterTextureUsable = hasBasicToneData(previousBasicTexture);
+                    if (!hasBasicToneData(basicTexture)) basicTexture = null;
                     if (basicTexture == null) {
                         if (!watermarkCompositeSkippedLogged) {
                             watermarkCompositeSkippedLogged = true;
-                            Log.i(TAG, "XPAN watermark composite left stock"
-                                + ", no BasicTone texture yet"
+                            Log.i(TAG, "XPAN watermark composite left stock, no valid"
+                                + " BasicTone texture"
+                                + ", rendererValid=" + rendererTextureUsable
+                                + ", parameterValid=" + parameterTextureUsable
                                 + ", mode=" + currentCameraMode);
                         }
                         return;
@@ -1589,8 +1604,10 @@ public final class XpanLiveFeature {
                         watermarkCompositeProbe++;
                         Log.i(TAG, "XPAN watermark composite #" + watermarkCompositeProbe
                             + ", stock=" + (stock == null ? "null" : "present")
-                            + ", basicTexture=" + (XposedHelpers.getObjectField(graded, "e")
-                                == null ? "borrowed" : "own")
+                            + ", basicTexture=" + (basicTexture == rendererBasicTexture
+                                ? "renderer" : "parameter")
+                            + ", rendererValid=" + rendererTextureUsable
+                            + ", parameterValid=" + parameterTextureUsable
                             + ", g=" + XposedHelpers.getBooleanField(graded, "g")
                             + ", vigSize=" + XposedHelpers.getIntField(graded, "d")
                             + ", lutSize=" + XposedHelpers.getFloatField(graded, "a")
@@ -1598,10 +1615,26 @@ public final class XpanLiveFeature {
                             + ", frameDraws=" + (XPAN_MAIN_FRAME.get() == null
                                 ? -1 : XPAN_MAIN_FRAME.get().commonDraws));
                     }
-                    if (XposedHelpers.getObjectField(graded, "e") == null) {
+                    if (previousBasicTexture != basicTexture) {
+                        if (!rendererTextureUsable && parameterTextureUsable
+                            && !watermarkCompositeStaleTextureLogged) {
+                            watermarkCompositeStaleTextureLogged = true;
+                            Log.i(TAG, "XPAN watermark composite kept parameter BasicTone"
+                                + " texture because renderer texture is invalid"
+                                + ", mode=" + currentCameraMode);
+                        } else if (previousBasicTexture != null
+                            && !parameterTextureUsable
+                            && !watermarkCompositeStaleTextureLogged) {
+                            watermarkCompositeStaleTextureLogged = true;
+                            Log.i(TAG, "XPAN watermark composite replaced stale BasicTone"
+                                + " texture with this frame's valid texture"
+                                + ", mode=" + currentCameraMode);
+                        }
                         XposedHelpers.setObjectField(graded, "e", basicTexture);
                         param.setObjectExtra(
-                            "xpanCompositeBorrowedBasicTone", Boolean.TRUE);
+                            "xpanCompositePreviousBasicTone", previousBasicTexture);
+                        param.setObjectExtra(
+                            "xpanCompositeChangedBasicTone", Boolean.TRUE);
                     }
                     param.args[7] = graded;
                     if (!watermarkCompositeLogged) {
@@ -1620,13 +1653,16 @@ public final class XpanLiveFeature {
 
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!Boolean.TRUE.equals(
-                    param.getObjectExtra("xpanCompositeBorrowedBasicTone"))) {
+                    param.getObjectExtra("xpanCompositeChangedBasicTone"))) {
                     return;
                 }
                 try {
                     Object graded = param.args[7];
                     if (graded != null) {
-                        XposedHelpers.setObjectField(graded, "e", null);
+                        XposedHelpers.setObjectField(
+                            graded,
+                            "e",
+                            param.getObjectExtra("xpanCompositePreviousBasicTone"));
                     }
                 } catch (Throwable error) {
                     logWatermarkCopyError(error);
@@ -1645,6 +1681,23 @@ public final class XpanLiveFeature {
             return renderer == null ? null : XposedHelpers.getObjectField(renderer, "s");
         } catch (Throwable error) {
             return null;
+        }
+    }
+
+    /** A Raw3dTexture is usable only while its complete packed RGB table is still allocated. */
+    private static boolean hasBasicToneData(Object texture) {
+        if (texture == null) return false;
+        try {
+            if (!RAW_3D_TEXTURE.equals(texture.getClass().getName())) return false;
+            float[] data = (float[]) XposedHelpers.getObjectField(texture, "A");
+            int size = XposedHelpers.getIntField(texture, "z");
+            int width = XposedHelpers.getIntField(texture, "a");
+            int height = XposedHelpers.getIntField(texture, "b");
+            if (data == null || size <= 0 || width != size || height != size) return false;
+            long expected = (long) size * size * size * 3L;
+            return data.length == expected;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -1931,20 +1984,27 @@ public final class XpanLiveFeature {
         Class<?> managerHolder,
         String source) {
         Object existing = XposedHelpers.getObjectField(renderer, "s");
-        if (existing != null) return true;
-
         Object manager = XposedHelpers.getStaticObjectField(managerHolder, "a");
         int lutSize = XposedHelpers.getIntField(manager, "t");
         float[] lutData = (float[]) XposedHelpers.getObjectField(manager, "c");
+        if (existing != null && hasBasicToneData(existing)) return true;
         if (lutSize <= 0 || lutData == null || lutData.length == 0) {
             if (!basicToneTextureUnavailableLogged) {
                 basicToneTextureUnavailableLogged = true;
                 Log.i(TAG, "XPAN live BasicTone texture data unavailable"
                     + ", source=" + source
+                    + ", existing=" + (existing == null ? "null" : "invalid")
                     + ", size=" + lutSize
                     + ", dataLength=" + (lutData == null ? -1 : lutData.length));
             }
             return false;
+        }
+        if (existing != null && !basicToneTextureUnavailableLogged) {
+            basicToneTextureUnavailableLogged = true;
+            Log.i(TAG, "XPAN live BasicTone texture data lost, rebuilding"
+                + ", source=" + source
+                + ", size=" + lutSize
+                + ", dataLength=" + lutData.length);
         }
 
         Object texture = XposedHelpers.callStaticMethod(
