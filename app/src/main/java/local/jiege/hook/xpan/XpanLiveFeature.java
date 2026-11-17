@@ -3,8 +3,10 @@ package local.jiege.hook.xpan;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.graphics.Rect;
+import android.media.MediaFormat;
 import android.util.Size;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
 import de.robv.android.xposed.XC_MethodHook;
@@ -13,6 +15,7 @@ import de.robv.android.xposed.XposedHelpers;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -46,6 +49,12 @@ public final class XpanLiveFeature {
     private static final String GL_SHADER = "com.oplus.camera.common.gl.y0";
     private static final String RAW_3D_TEXTURE = "com.oplus.camera.common.gl.t0";
     private static final String LIVE_WARP_RENDERER = "ch.g";
+    private static final String LIVE_VIDEO_ENCODER = "eh.c0";
+    private static final String EGL_HELPER = "com.oplus.camera.common.gl.j";
+    private static final String EIS_PROCESSOR = "gh.g";
+    private static final String EIS_WRAPPER = "gh.v";
+    private static final String EIS_GRID_DATA = "bh.j";
+    private static final String EIS_METADATA_QUEUE_FIELD = "z";
     private static final String LUT_MANAGER = "com.oplus.camera.common.utils.Lut3dDataManager";
     private static final String LUT_MANAGER_HOLDER = LUT_MANAGER + "$b";
     private static final String CAMERA_METADATA_KEY = "bb.s";
@@ -57,6 +66,10 @@ public final class XpanLiveFeature {
     private static final String WATERMARK_COMPOSITE = "ch.h";
     private static final String LUT_PARAMETERS = "bh.o";
     private static final String XPAN_LIVE_WATERMARK_PROPERTY = "persist.omnicam.xpan.livewm";
+    private static final String XPAN_EIS_BYPASS_PROPERTY =
+        "persist.omnicam.xpan.eisbypass";
+    private static final String XPAN_EIS_GRID_PROPERTY =
+        "persist.omnicam.xpan.eisgrid";
     private static final String XPAN_GYRO_KEY =
         "com.oplus.camera.gyro.value.gyrotoeis";
     private static final String BASE_MODE_NAME_FIELD = "U0";
@@ -107,12 +120,25 @@ public final class XpanLiveFeature {
         "persist.omnicam.xpan.liveev";
     private static final int DEFAULT_XPAN_LIVE_EV_UNITS = 660;
     private static final int MAX_AE_EV_UNITS = 990;
+    /**
+     * The stock XPAN live clip is tagged BT.2020 / HLG even though the XPAN preview shown to the
+     * user is SDR. Gallery decodes those SDR pixel values through the HLG transfer curve, so the
+     * moving picture is slightly brighter than the still cover. Keep these legacy DataSpace
+     * values explicit because the camera uses the platform-specific packed representation.
+     */
+    private static final int DATASPACE_BT2020_HLG_LIMITED = 0x12060000;
+    private static final int DATASPACE_BT709_LIMITED = 0x10C10000;
+    private static final int XPAN_LIVE_WIDTH = 2484;
+    private static final int XPAN_LIVE_HEIGHT = 952;
     private static final ThreadLocal<Boolean> XPAN_RESUME_OVERRIDE =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> LIVE_STATE_SYNC =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> EIS_GRID_INIT_ALLOW =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<XpanMainFrame> XPAN_MAIN_FRAME = new ThreadLocal<>();
     private static final ThreadLocal<String> XPAN_RENDER_STAGE = new ThreadLocal<>();
+    private static final Set<String> LIVE_EIS_ROUTE_PROBES = new LinkedHashSet<>();
     private static volatile String currentCameraMode = "";
     private static volatile String exposureFixLogSignature = "";
     private static volatile Object livePhotoSharedDataKey;
@@ -139,6 +165,8 @@ public final class XpanLiveFeature {
     private static volatile boolean exposureWheelGestureConsumed;
     private static volatile boolean gyroFallbackLogged;
     private static volatile boolean eisBypassLogged;
+    private static volatile boolean eisMetadataQueueRepairLogged;
+    private static volatile boolean eisMetadataQueueRepairErrorLogged;
     private static volatile boolean xpanEisBypassActive;
     private static volatile boolean videoCropFallbackLogged;
     private static volatile boolean basicToneParametersLogged;
@@ -177,6 +205,9 @@ public final class XpanLiveFeature {
     private static volatile int lastSelectedLutHash;
     private static volatile int mainFrameSequence;
     private static volatile String lastLivePhotoMenuState = "";
+    private static volatile boolean xpanLiveSdrArmed;
+    private static volatile boolean xpanLiveSdrFormatLogged;
+    private static volatile boolean xpanLiveSdrSurfaceLogged;
 
     /**
      * Per-frame diagnostic context. It is intentionally recording-only: all values are captured
@@ -285,6 +316,11 @@ public final class XpanLiveFeature {
             Log.e(TAG, "XPAN live EIS bypass unavailable", error);
         }
         try {
+            hookXpanEisGridRouteDiagnostics(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live EIS grid route diagnostics unavailable", error);
+        }
+        try {
             hookXpanGyroFallback(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN synthetic gyro fallback unavailable", error);
@@ -308,6 +344,11 @@ public final class XpanLiveFeature {
             hookXpanLiveLutDiagnostics(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN live LUT diagnostics unavailable", error);
+        }
+        try {
+            hookXpanLiveSdrOutput(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live SDR output correction unavailable", error);
         }
         try {
             hookMenuVisibility(classLoader);
@@ -786,9 +827,14 @@ public final class XpanLiveFeature {
 
         XposedBridge.hookMethod(isEisBypass, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (Boolean.TRUE.equals(EIS_GRID_INIT_ALLOW.get())) {
+                    param.setResult(Boolean.FALSE);
+                    return;
+                }
                 if (param.hasThrowable()
                     || !XPAN_MODE.equals(currentCameraMode)
-                    || !isLivePhotoStoredOn(presenter)) {
+                    || !isLivePhotoStoredOn(presenter)
+                    || property(XPAN_EIS_BYPASS_PROPERTY, 1) == 0) {
                     xpanEisBypassActive = false;
                     return;
                 }
@@ -817,6 +863,279 @@ public final class XpanLiveFeature {
             }
         });
         Log.i(TAG, "XPAN live EIS bypass armed");
+    }
+
+    /**
+     * Record the stock EIS life cycle without changing it. The decisive test is whether
+     * {@code EISProcessor.c(width, height, cameraId)} creates the grid and whether a later
+     * {@code ImageData.e(grid)} copies it into {@code ImageData.o}, which is the object consumed
+     * by the Warp renderer.
+     */
+    private static void hookXpanEisGridRouteDiagnostics(ClassLoader classLoader) {
+        final Class<?> featureFlags =
+            XposedHelpers.findClass(LIVE_PHOTO_FEATURE_FLAGS, classLoader);
+        final Class<?> processor =
+            XposedHelpers.findClass(EIS_PROCESSOR, classLoader);
+        final Class<?> wrapper =
+            XposedHelpers.findClass(EIS_WRAPPER, classLoader);
+        final Class<?> imageData =
+            XposedHelpers.findClass(VIDEO_IMAGE_DATA, classLoader);
+        final Class<?> gridData =
+            XposedHelpers.findClass(EIS_GRID_DATA, classLoader);
+
+        XposedBridge.hookAllMethods(featureFlags, "e", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (param.hasThrowable()) return;
+                logLiveEisRouteOnce(
+                    "flags|" + liveEisRouteMode() + "|result=" + param.getResult(),
+                    "XPAN live EIS route flags"
+                        + ", mode=" + liveEisRouteMode()
+                        + ", bypass=" + param.getResult());
+            }
+        });
+
+        XposedBridge.hookAllMethods(processor, "c", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length != 3) return;
+                if (XPAN_MODE.equals(currentCameraMode)
+                    && property(XPAN_EIS_BYPASS_PROPERTY, 1) != 0
+                    && property(XPAN_EIS_GRID_PROPERTY, 0) != 0) {
+                    EIS_GRID_INIT_ALLOW.set(Boolean.TRUE);
+                }
+                logEisProcessorState(param.thisObject, "init-before", param.args);
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (param.args.length != 3) return;
+                try {
+                    if (!param.hasThrowable()
+                        && Boolean.TRUE.equals(EIS_GRID_INIT_ALLOW.get())) {
+                        ensureEisMetadataQueue(param.thisObject, "grid-init");
+                    }
+                } finally {
+                    EIS_GRID_INIT_ALLOW.remove();
+                    logEisProcessorState(param.thisObject, "init-after", param.args);
+                }
+            }
+        });
+
+        XposedBridge.hookAllMethods(processor, "f", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length != 1
+                    || !XPAN_MODE.equals(currentCameraMode)
+                    || !xpanEisBypassActive) {
+                    return;
+                }
+                ensureEisMetadataQueue(param.thisObject, "before-frame");
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (param.args.length != 1 || param.hasThrowable()) return;
+                int status = param.getResult() instanceof Number
+                    ? ((Number) param.getResult()).intValue() : Integer.MIN_VALUE;
+                Object grid = safeObjectField(param.thisObject, "x");
+                logLiveEisRouteOnce(
+                    "processor-status|" + liveEisRouteMode() + "|" + status
+                        + "|gridNull=" + (grid == null),
+                    "XPAN live EIS route processor"
+                        + ", mode=" + liveEisRouteMode()
+                        + ", status=" + status
+                        + ", gridNull=" + (grid == null)
+                        + ", input=" + (param.args[0] == null ? "null" : "present"));
+            }
+        });
+
+        XposedBridge.hookAllMethods(wrapper, "f8", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                logEisWrapperState(param, "send");
+            }
+        });
+        XposedBridge.hookAllMethods(wrapper, "e8", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                logEisWrapperState(param, "meta");
+            }
+        });
+        XposedBridge.hookAllMethods(wrapper, "c8", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (param.hasThrowable()) return;
+                Object handle = param.getResult();
+                Object output = safeObjectField(handle, "e");
+                Object directGrid = safeObjectField(output, "o");
+                logLiveEisRouteOnce(
+                    "output|" + liveEisRouteMode() + "|gridNull=" + (directGrid == null),
+                    "XPAN live EIS route output"
+                        + ", mode=" + liveEisRouteMode()
+                        + ", handleNull=" + (handle == null)
+                        + ", imageNull=" + (output == null)
+                        + ", directGridNull=" + (directGrid == null));
+            }
+        });
+
+        XposedBridge.hookAllMethods(imageData, "e", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length != 1
+                    || (param.args[0] != null
+                        && !gridData.isInstance(param.args[0]))) {
+                    return;
+                }
+                Object grid = param.args[0];
+                Object previousGrid = safeObjectField(param.thisObject, "o");
+                String gridState = grid == null ? "null" : "present";
+                logLiveEisRouteOnce(
+                    "grid-copy-before|" + liveEisRouteMode()
+                        + "|gridState=" + gridState,
+                    "XPAN live EIS route grid copy"
+                        + ", mode=" + liveEisRouteMode()
+                        + ", phase=before"
+                        + ", inputGridNull=" + (grid == null)
+                        + ", gridSize=" + describeEisGridSize(grid)
+                        + ", previousDirectGridNull=" + (previousGrid == null));
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                if (param.args.length != 1
+                    || (param.args[0] != null
+                        && !gridData.isInstance(param.args[0]))) {
+                    return;
+                }
+                Object directGrid = safeObjectField(param.thisObject, "o");
+                String gridState = param.args[0] == null ? "null" : "present";
+                logLiveEisRouteOnce(
+                    "grid-copy-after|" + liveEisRouteMode()
+                        + "|inputGrid=" + gridState
+                        + "|directGrid=" + (directGrid == null ? "null" : "present"),
+                    "XPAN live EIS route grid copy"
+                        + ", mode=" + liveEisRouteMode()
+                        + ", phase=after"
+                        + ", inputGridNull=" + (param.args[0] == null)
+                        + ", directGridNull=" + (directGrid == null)
+                        + ", throwable=" + param.hasThrowable());
+            }
+        });
+
+        Log.i(TAG, "XPAN live EIS grid route diagnostics armed"
+            + ", forceWarp=" + (property(XPAN_EIS_GRID_PROPERTY, 0) != 0));
+    }
+
+    /**
+     * The stock grid-creation branch returns without initializing the metadata queue, because that
+     * branch normally runs only while EIS bypass is disabled. XPAN needs the grid while the native
+     * processor remains bypassed, so the following frame would otherwise call {@code z.offer()}
+     * on null. Initialize only the exact stock field used by the bypass drain path.
+     */
+    private static void ensureEisMetadataQueue(Object processor, String phase) {
+        if (processor == null) return;
+        Object queue;
+        try {
+            queue = XposedHelpers.getObjectField(
+                processor, EIS_METADATA_QUEUE_FIELD);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live EIS metadata queue probe failed at " + phase, error);
+            return;
+        }
+        if (queue != null) return;
+        try {
+            XposedHelpers.setObjectField(
+                processor, EIS_METADATA_QUEUE_FIELD, new ArrayDeque<Long>());
+        } catch (Throwable error) {
+            if (!eisMetadataQueueRepairErrorLogged) {
+                eisMetadataQueueRepairErrorLogged = true;
+                Log.e(TAG, "XPAN live EIS metadata queue init failed at " + phase, error);
+            }
+            return;
+        }
+        if (!eisMetadataQueueRepairLogged) {
+            eisMetadataQueueRepairLogged = true;
+            Log.i(TAG, "XPAN live EIS metadata queue initialized at " + phase
+                + ", mode=" + liveEisRouteMode());
+        }
+    }
+
+    private static void logEisProcessorState(
+        Object processor,
+        String phase,
+        Object[] args
+    ) {
+        boolean bypass;
+        boolean eisEnabled;
+        try {
+            Class<?> featureFlags = XposedHelpers.findClass(
+                LIVE_PHOTO_FEATURE_FLAGS, processor.getClass().getClassLoader());
+            bypass = Boolean.TRUE.equals(
+                XposedHelpers.callStaticMethod(featureFlags, "e"));
+            eisEnabled = Boolean.TRUE.equals(
+                XposedHelpers.callStaticMethod(featureFlags, "f"));
+        } catch (Throwable ignored) {
+            bypass = false;
+            eisEnabled = false;
+        }
+        Object grid = safeObjectField(processor, "x");
+        String signature = "processor-" + phase + "|" + liveEisRouteMode()
+            + "|bypass=" + bypass + "|eis=" + eisEnabled
+            + "|gridNull=" + (grid == null);
+        logLiveEisRouteOnce(
+            signature,
+            "XPAN live EIS route processor"
+                + ", mode=" + liveEisRouteMode()
+                + ", phase=" + phase
+                + ", size=" + args[0] + "x" + args[1]
+                + ", cameraId=" + args[2]
+                + ", bypass=" + bypass
+                + ", eisEnabled=" + eisEnabled
+                + ", gridNull=" + (grid == null));
+    }
+
+    private static void logEisWrapperState(
+        XC_MethodHook.MethodHookParam param,
+        String phase
+    ) {
+        if (param.hasThrowable()) return;
+        Object wrapper = param.thisObject;
+        Object processor = safeObjectField(wrapper, "g");
+        Object status = safeObjectField(wrapper, "q");
+        Object grid = safeObjectField(processor, "x");
+        logLiveEisRouteOnce(
+            "wrapper-" + phase + "|" + liveEisRouteMode()
+                + "|status=" + status + "|gridNull=" + (grid == null),
+            "XPAN live EIS route wrapper"
+                + ", mode=" + liveEisRouteMode()
+                + ", phase=" + phase
+                + ", status=" + status
+                + ", gridNull=" + (grid == null)
+                + ", args=" + param.args.length);
+    }
+
+    private static String describeEisGridSize(Object grid) {
+        if (grid == null) return "null";
+        try {
+            Object size = XposedHelpers.getObjectField(grid, "c");
+            return size instanceof Size
+                ? ((Size) size).getWidth() + "x" + ((Size) size).getHeight()
+                : String.valueOf(size);
+        } catch (Throwable ignored) {
+            return "unknown";
+        }
+    }
+
+    private static Object safeObjectField(Object target, String name) {
+        if (target == null) return null;
+        try {
+            return XposedHelpers.getObjectField(target, name);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static String liveEisRouteMode() {
+        String mode = currentCameraMode;
+        return mode == null || mode.isEmpty() ? "unknown" : mode;
+    }
+
+    private static void logLiveEisRouteOnce(String key, String message) {
+        synchronized (LIVE_EIS_ROUTE_PROBES) {
+            if (!LIVE_EIS_ROUTE_PROBES.add(key)) return;
+        }
+        Log.i(TAG, message);
     }
 
     /**
@@ -1949,6 +2268,104 @@ public final class XpanLiveFeature {
         });
 
         Log.i(TAG, "XPAN live LUT diagnostics armed");
+    }
+
+    /**
+     * XPAN's still cover is SDR, while the stock dynamic attachment is configured as
+     * BT.2020 / HLG. The encoder receives the surface DataSpace independently of the
+     * {@link MediaFormat}, so both have to be corrected to avoid an HLG/SDR luminance mismatch
+     * during gallery playback.
+     */
+    private static void hookXpanLiveSdrOutput(ClassLoader classLoader) {
+        final Class<?> encoder = XposedHelpers.findClass(LIVE_VIDEO_ENCODER, classLoader);
+        XposedBridge.hookAllMethods(encoder, "q8", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length < 2
+                    || !(param.args[1] instanceof MediaFormat)) {
+                    return;
+                }
+                MediaFormat format = (MediaFormat) param.args[1];
+                if (!XPAN_MODE.equals(currentCameraMode)
+                    && !isXpanLiveFormat(format)) {
+                    return;
+                }
+                try {
+                    int oldStandard = format.getInteger(
+                        MediaFormat.KEY_COLOR_STANDARD, Integer.MIN_VALUE);
+                    int oldTransfer = format.getInteger(
+                        MediaFormat.KEY_COLOR_TRANSFER, Integer.MIN_VALUE);
+                    int oldRange = format.getInteger(
+                        MediaFormat.KEY_COLOR_RANGE, Integer.MIN_VALUE);
+                    format.setInteger(
+                        MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);
+                    format.setInteger(
+                        MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO);
+                    format.setInteger(
+                        MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
+                    xpanLiveSdrArmed = true;
+                    if (!xpanLiveSdrFormatLogged) {
+                        xpanLiveSdrFormatLogged = true;
+                        Log.i(TAG, "XPAN live SDR format corrected"
+                            + ", mime=" + format.getString(MediaFormat.KEY_MIME)
+                            + ", size=" + format.getInteger(MediaFormat.KEY_WIDTH)
+                            + "x" + format.getInteger(MediaFormat.KEY_HEIGHT)
+                            + ", color=" + oldRange + "/" + oldStandard + "/" + oldTransfer
+                            + " -> " + MediaFormat.COLOR_RANGE_LIMITED
+                            + "/" + MediaFormat.COLOR_STANDARD_BT709
+                            + "/" + MediaFormat.COLOR_TRANSFER_SDR_VIDEO);
+                    }
+                } catch (Throwable error) {
+                    Log.e(TAG, "XPAN live SDR format correction failed", error);
+                }
+            }
+        });
+
+        final Class<?> eglHelper = XposedHelpers.findClass(EGL_HELPER, classLoader);
+        XposedBridge.hookAllMethods(eglHelper, "b", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length != 5
+                    || !(param.args[0] instanceof Surface)
+                    || !(param.args[3] instanceof Size)
+                    || !(param.args[4] instanceof Integer)) {
+                    return;
+                }
+                int oldDataSpace = (Integer) param.args[4];
+                if (oldDataSpace != DATASPACE_BT2020_HLG_LIMITED) return;
+                Size size = (Size) param.args[3];
+                if (!XPAN_MODE.equals(currentCameraMode)
+                    && !xpanLiveSdrArmed
+                    && !isXpanLiveSize(size)) {
+                    return;
+                }
+                param.args[4] = DATASPACE_BT709_LIMITED;
+                if (!xpanLiveSdrSurfaceLogged) {
+                    xpanLiveSdrSurfaceLogged = true;
+                    Log.i(TAG, "XPAN live SDR surface corrected, dataSpace=0x"
+                        + Integer.toHexString(oldDataSpace) + " -> 0x"
+                        + Integer.toHexString(DATASPACE_BT709_LIMITED)
+                        + ", size=" + size.getWidth() + "x" + size.getHeight()
+                        + ", mode=" + currentCameraMode);
+                }
+            }
+        });
+
+        Log.i(TAG, "XPAN live SDR output correction armed");
+    }
+
+    private static boolean isXpanLiveFormat(MediaFormat format) {
+        try {
+            return isXpanLiveSize(new Size(
+                format.getInteger(MediaFormat.KEY_WIDTH),
+                format.getInteger(MediaFormat.KEY_HEIGHT)));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isXpanLiveSize(Size size) {
+        return size != null
+            && size.getWidth() == XPAN_LIVE_WIDTH
+            && size.getHeight() == XPAN_LIVE_HEIGHT;
     }
 
     private static String describeTransform(String label, Object transform) {

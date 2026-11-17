@@ -40,6 +40,13 @@ final class GrModeHooks {
         Log.guard(TAG, "master effect entry", () -> GrMasterEffectEntry.install(symbols));
         Log.guard(TAG, "GR style feature", () -> hookStyleFeature(classLoader));
         Log.guard(TAG, "GR mode arrangement", () -> GrModeArrange.install(symbols));
+        Log.guard(TAG, "GR tone env restore", () -> GrPreviewStreamRestore.install(symbols, classLoader));
+        Log.guard(TAG, "master live texture sync",
+            () -> GrMasterLiveLutRestore.install(classLoader));
+        Log.guard(TAG, "master live LUT diagnostic",
+            () -> GrMasterLiveLutDiagnostic.install(classLoader));
+        Log.guard(TAG, "master live YUV output diagnostic",
+            () -> GrMasterLiveOutputDiagnostic.install(classLoader));
         Log.i(TAG, "GR mode hooks installed");
     }
 

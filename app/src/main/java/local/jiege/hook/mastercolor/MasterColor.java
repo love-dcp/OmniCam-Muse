@@ -45,6 +45,15 @@ public final class MasterColor {
     private static final String MASTER_MODE = "professional";
     private static final String ROOT = "/data/user/0/com.oplus.camera/files/jiege/mastercolor";
     private static final String LIVE = ROOT + "/live/";
+    /**
+     * Pinned copy of {@link #previewDir} for the native half. BasicTone's preview and live-photo
+     * video frames carry no capture profile, so they never reach the loadLut hook that points the
+     * LMT buffer at a live directory: after a GR shot their object is rebuilt from the ODM dataset
+     * and keeps the stock tone table, while the cover of the same shot carries the look. The path
+     * is dropped whenever the preview table is cleared or the look changes, so it only exists while
+     * a master preview is current.
+     */
+    private static final String PIN = ROOT + "/preview";
     private static final int PREVIEW_INTERVAL_MS = 600;
     // Some streams (dual-camera portrait) alternate two physical cameras frame by frame; the preview follows a
     // new camera only after it has been the only one reporting for this long.
@@ -52,6 +61,15 @@ public final class MasterColor {
     private static final int CCT_STEP = 400;
     private static final int CCT_HYSTERESIS = 80;
     private static final float PREVIEW_MATRIX_CHANGE = 0.02f;
+    /**
+     * The camera publishes one transitional AWB/CCM result shortly after GR/retroCamera enters
+     * master. Its CCT can still land in the normal bucket while its CCM is visibly warm, so a
+     * regular preview key makes that transitional table current even when the next metadata
+     * arrives less than a second later. Hold the first publish through that short switch window,
+     * then require two consecutive matching results before committing the table.
+     */
+    private static final long MASTER_TRANSITION_SETTLE_MS = 900L;
+    private static final int MASTER_TRANSITION_STABLE_RESULTS = 2;
     private static final long SETTING_INTERVAL_MS = 1000;
 
     /**
@@ -84,6 +102,21 @@ public final class MasterColor {
      */
     private static volatile boolean compositionActive;
 
+    /**
+     * Why the preview chain last stood down, reported once per distinct reason.
+     *
+     * <p>Without this the only visible symptom of a stopped chain is a stale pin file, and the log
+     * cannot tell "the user is not in master mode" from "a capture is holding it" -- both look like
+     * silence. One line per reason turns that into an answer.
+     */
+    private static volatile String previewIdle;
+
+    private static void idle(String why) {
+        if (why.equals(previewIdle)) return;
+        previewIdle = why;
+        Log.i(TAG, "preview chain idle: " + why);
+    }
+
     /** Composition has begun: stop the preview table from chasing every CCT hop. */
     public static void compositionStart() {
         compositionActive = true;
@@ -110,6 +143,13 @@ public final class MasterColor {
     private static long previewResultAt;
     private static String candidateCameraId;
     private static long candidateSince;
+    private static long masterTransitionUntil;
+    private static String masterTransitionFrom;
+    private static String transitionCameraId;
+    private static int transitionCct;
+    private static float[] transitionCcm;
+    private static int transitionStableResults;
+    private static boolean transitionGateLogged;
 
     // Current source metadata and its preview directory.
     private static String keyIdentity;
@@ -119,6 +159,15 @@ public final class MasterColor {
     private static volatile String previewDir;
     private static volatile String loadedDir;
     private static volatile int generation;   // bumped by every look change; a request of an older one is not published
+
+    /**
+     * The live directory holding the table the still pipeline is currently using, or null. The live
+     * photo renderer samples its own BasicTone table, so this is the one source that guarantees the
+     * moving picture is graded by the same numbers as the cover.
+     */
+    public static String previewTableDir() {
+        return previewDir;
+    }
 
     // Preview table worker: one thread. Requests queued while a table is baking are reduced to the latest; a table
     // that is baking always finishes and is published (the preview then follows the newest within one bake), and it is
@@ -224,6 +273,8 @@ public final class MasterColor {
             keyIdentity = null; // the next result writes a key for the new look
             previewResultAt = 0;
             previewDir = null;
+            unpinPreviewDir();
+            resetMasterTransitionCandidate();
             ++generation;
         }
         Log.i(TAG, "master colour " + id + (blend ? " blend tone " + tone + "% colour " + colour + "%" : ""));
@@ -240,7 +291,16 @@ public final class MasterColor {
                 manager = param.thisObject;
                 boolean master = MASTER_MODE.equals(param.args[2]);
                 boolean wasMaster = MASTER_MODE.equals(symbols.get("Lut3d.mode", param.thisObject));
-                inMaster = master;
+                // Only a load *for* master may claim master here; it may not take it away. The camera
+                // refreshes the manager with internal names of its own ("commonVideo" after a mode
+                // switch or a capture) while the user is still on the master screen, and treating
+                // those as "left master" froze the whole preview chain: onPreviewResult stops at
+                // once, the preview table pin is never refreshed, and a live photo recorded hours
+                // later still reads whatever tree the pin held (observed 2026-11-16: the pin was
+                // ten hours old while the cover used a table baked a minute earlier, so the video
+                // looked one look away from its own cover). HookModeSwitch below is the authority
+                // for leaving master, because it is the one place that knows the screen changed.
+                if (master) inMaster = true;
                 if (master) lastLoadArgs = param.args.clone();
                 String dir = master && enabled ? previewDir : null;
                 // Entering / leaving master or a new look table invalidates the cached LUT (index -1).
@@ -317,6 +377,7 @@ public final class MasterColor {
                 if (request.generation != generation) return;
                 previewDir = dir;
             }
+            pinPreviewDir(dir);
             Log.i(TAG, "preview table " + dir);
         }
         reload(dir);
@@ -339,14 +400,37 @@ public final class MasterColor {
     private static void hookModeSwitch() {
         XposedBridge.hookMethod(Symbols.get().method("ModeSwitch.switch"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
+                String from = (String) param.args[0];
                 String to = (String) param.args[1];
                 if (to == null || to.isEmpty()) return;
                 boolean master = MASTER_MODE.equals(to);
                 if (master == inMaster) return;
                 inMaster = master;
-                if (!master) leaveMaster();
+                if (master) beginMaster(from);
+                else leaveMaster();
             }
         });
+    }
+
+    private static synchronized void beginMaster(String from) {
+        resetMasterTransitionCandidate();
+        masterTransitionFrom = from;
+        if ("gr".equals(from) || "retroCamera".equals(from)) {
+            masterTransitionUntil = System.currentTimeMillis() + MASTER_TRANSITION_SETTLE_MS;
+            Log.i(TAG, "preview metadata settling after " + from + " -> " + MASTER_MODE
+                + ", hold=" + MASTER_TRANSITION_SETTLE_MS + "ms");
+        } else {
+            masterTransitionUntil = 0;
+        }
+    }
+
+    private static synchronized void resetMasterTransitionCandidate() {
+        transitionCameraId = null;
+        transitionCct = 0;
+        transitionCcm = null;
+        transitionStableResults = 0;
+        transitionGateLogged = false;
+        if (masterTransitionUntil != 0L) masterTransitionUntil = 0L;
     }
 
     private static void leaveMaster() {
@@ -355,6 +439,8 @@ public final class MasterColor {
             keyIdentity = null;
             candidateCameraId = null;
             previewResultAt = 0;
+            resetMasterTransitionCandidate();
+            masterTransitionFrom = null;
         }
     }
 
@@ -364,7 +450,8 @@ public final class MasterColor {
         // every result still becomes a public TotalCaptureResult, read after construction.
         XposedBridge.hookAllConstructors(android.hardware.camera2.TotalCaptureResult.class, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!inMaster || param.hasThrowable()) return;
+                if (param.hasThrowable()) return;
+                if (!inMaster) { idle("not on the master screen"); return; }
                 Object result = param.thisObject;
                 try {
                     syncSetting();
@@ -436,20 +523,37 @@ public final class MasterColor {
         keyIdentity = null;
         if (previewDir != null) {
             previewDir = null;
+            unpinPreviewDir();
             submit(CLEAR);
         }
     }
 
+    /** Hands the current preview table to the native half (see {@link #PIN}). */
+    private static void pinPreviewDir(String dir) {
+        try {
+            try (FileOutputStream out = new FileOutputStream(PIN)) {
+                out.write(dir.getBytes(StandardCharsets.US_ASCII));
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "preview pin", error);
+        }
+    }
+
+    private static void unpinPreviewDir() {
+        File pin = new File(PIN);
+        if (pin.exists() && !pin.delete()) Log.i(TAG, "preview pin delete failed");
+    }
+
     private static synchronized void onPreviewResult(Object metadata) throws Exception {
-        if (!enabled || look == null) return;
+        if (!enabled || look == null) { idle("no look enabled (" + look + ")"); return; }
         // A shutter is in flight. Rebuilding the preview table now bakes a 19MB blend table inside
         // the same native library the capture path is using, and a rebuild landing mid-save leaves
         // the camera unable to take another photo until it is restarted. holdPreview() is called
         // from the capture hook, so this only covers the save window.
-        if (System.currentTimeMillis() < previewHoldUntil) return;
+        if (System.currentTimeMillis() < previewHoldUntil) { idle("capture in flight"); return; }
         // Composition drives its own white balance, so the CCT hops every frame; baking a table per
         // hop is the whole storm. Sit out the session instead.
-        if (compositionActive) return;
+        if (compositionActive) { idle("composition"); return; }
         String id = (String) read(metadata, CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
         if (id == null) id = (String) XposedHelpers.callMethod(metadata, "getCameraId");
         if (id == null) { clearPreview("preview: physical camera identity unavailable"); return; }
@@ -461,14 +565,23 @@ public final class MasterColor {
             candidateCameraId = null;
             if (now - previewResultAt < PREVIEW_INTERVAL_MS) return;
         }
-        previewResultAt = now;
         String lens = lens(id);
         Integer cct = (Integer) read(metadata, AWB_CCT);
         float[] ccm = matrix((ColorSpaceTransform) read(metadata, CaptureResult.COLOR_CORRECTION_TRANSFORM));
         if (lens == null || cct == null || cct < 1500 || cct > 20000 || ccm == null) {
+            if (now < masterTransitionUntil) {
+                if (!transitionGateLogged) {
+                    transitionGateLogged = true;
+                    Log.i(TAG, "preview metadata settling: incomplete colour metadata ignored"
+                        + " camera=" + id);
+                }
+                return;
+            }
             clearPreview("preview: incomplete colour metadata for camera " + id); return;
         }
         for (int i = 0; i < ccm.length; ++i) ccm[i] = Math.round(ccm[i] * 256f) / 256f;
+        if (!transitionMetadataStable(id, cct, ccm, now)) return;
+        previewResultAt = now;
         int bucket = previewCct;
         if (!id.equals(keyIdentity) || Math.abs(cct - previewCct) > CCT_STEP / 2 + CCT_HYSTERESIS)
             bucket = Math.max(1700, Math.min(15000, (cct + CCT_STEP / 2) / CCT_STEP * CCT_STEP));
@@ -478,8 +591,59 @@ public final class MasterColor {
         keyIdentity = id;
         previewCct = bucket;
         previewCcm = ccm;
-        Log.i(TAG, "preview key camera=" + id + " look=" + look + " cct=" + bucket);
+        Log.i(TAG, "preview key camera=" + id + " look=" + look + " cct=" + bucket
+            + " ccmHash=" + Integer.toHexString(Arrays.hashCode(ccm))
+            + " ccm=" + ccmText(ccm));
         submit(new Request(generation, bucket, ccm, look, exposureEv, tonePercent, colourPercent, densityPercent, lens, paramValues));
+    }
+
+    /**
+     * Returns false while master's post-switch metadata is still being qualified. This runs only
+     * for GR/retroCamera entries; direct master startup and ordinary parameter changes keep the
+     * existing latency.
+     */
+    private static boolean transitionMetadataStable(
+        String cameraId, int cct, float[] ccm, long now) {
+        if (masterTransitionUntil == 0L) return true;
+        if (now < masterTransitionUntil) {
+            if (!transitionGateLogged) {
+                transitionGateLogged = true;
+                Log.i(TAG, "preview metadata settling: first publish held after "
+                    + masterTransitionFrom + " -> " + MASTER_MODE);
+            }
+            return false;
+        }
+
+        boolean matches = cameraId.equals(transitionCameraId)
+            && Math.abs(cct - transitionCct) <= CCT_HYSTERESIS
+            && transitionCcm != null
+            && maxDifference(ccm, transitionCcm) < PREVIEW_MATRIX_CHANGE;
+        if (!matches) {
+            transitionCameraId = cameraId;
+            transitionCct = cct;
+            transitionCcm = ccm.clone();
+            transitionStableResults = 1;
+            return false;
+        }
+        ++transitionStableResults;
+        if (transitionStableResults < MASTER_TRANSITION_STABLE_RESULTS) return false;
+
+        String from = masterTransitionFrom;
+        masterTransitionUntil = 0L;
+        resetMasterTransitionCandidate();
+        Log.i(TAG, "preview metadata settled after " + from + " -> " + MASTER_MODE
+            + " camera=" + cameraId + " cct=" + cct
+            + " ccmHash=" + Integer.toHexString(Arrays.hashCode(ccm)));
+        return true;
+    }
+
+    private static String ccmText(float[] ccm) {
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < ccm.length; ++i) {
+            if (i != 0) out.append(',');
+            out.append(String.format(Locale.ROOT, "%.6f", ccm[i]));
+        }
+        return out.append(']').toString();
     }
 
     private static float maxDifference(float[] a, float[] b) {

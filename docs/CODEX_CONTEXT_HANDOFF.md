@@ -2,6 +2,110 @@
 
 工作目录：`E:\OmniCam-Muse-main`
 
+## 2026-11-16：r397 暂停大师延迟补刀，处理亮屏/切换后再次灰化（待实机验证）
+
+r396 的实机日志已经证明“大师延迟 `e(1,2,"common")`”不是无副作用的视频槽补刀。熄屏再亮后，
+相机先以 `SimTool_Master / cap=0` 正常启动，约 1.5 秒后被模块切成
+`SimTool_Dolby / cap=2`，预览同步变灰。正常截图平均饱和度 `0.4662`，灰图
+`0.1858`，后者与此前确认的真灰图 `0.1795` 接近。
+
+r397 仅暂停大师模式的这条延迟补刀，XPAN 原逻辑保留。完整时间线、证据路径和后续验收
+要求见 `docs/LIVE_PHOTO_GR_MISMATCH.md` 第 26 节。该版不能只凭预览短暂不灰就宣布修复；
+还必须在熄屏再亮、模式往返和 GR → 大师实况完整路径上验证，并另拆实况内嵌视频核对颜色。
+
+## 2026-11-15：r396 恢复大师实况视频槽延迟补刀（待实机验证）
+
+当前要修的单一问题是“GR 拍一张 → 切大师 → 实况播放比封面更鲜艳”。本地已拆出 r395 样片的
+内嵌视频并逐帧比较：封面平均 RGB 为 `148.193 / 148.694 / 143.025`、饱和度 `85.709`；
+视频首、中、末帧平均 RGB 约为 `172 / 156 / 130`，饱和度 `92.710 / 95.370 / 95.105`。
+整段持续偏暖、偏饱和，不是单帧或封面选时问题。
+
+同一轮的 LUT 渲染回调没有失败：
+
+```text
+callbackSeen=true
+taskCompleted=true
+taskFailed=false
+rendererRNull=false
+rendererSNull=false
+watermarkNull=false
+```
+
+关键差异是 r395 日志只有 `e(1,0,"professional")`，整段没有大师视频槽的
+`e(1,2,"common")` 补刀。r396 恢复 r376 已实机验证过的 1.5 秒延迟补刀，并保留 XPAN 原有
+同类逻辑；同时修复 `GrEffectTransport` 的 `String.equals on null object`。
+
+r396 已完整构建并通过 APK 版本回读、DEX 探针、v3 签名、模块包内外 APK 一致性及
+`tools/verify_port_artifacts.py` 六组检查：
+
+```text
+E:\OmniCam-Muse-main\module\omnicam-muse-4.4.5-r396.apk
+7,501,235 字节
+SHA-256 C01BA14594AEC5D0CD9A0D575589C5A40DB440751D6D18515D9C6C44B266CDA6
+
+E:\OmniCam-Muse-main\OmniCam-Muse-4.4.5-r396-KSU.zip
+305,515,091 字节
+SHA-256 7336422E744C62C157874D21AA78EE0ED55DE082F30A6F7AFF321CE50E62AA4C
+```
+
+本轮手机已撤走，r396 尚未实机验证，不能据此宣布颜色问题闭环。手机回来后不重启设备，
+安装 r396 后按 `docs/LIVE_PHOTO_GR_MISMATCH.md` 第 25.5 节依次验证日志、预览、连续两张
+实况和本地颜色指标。
+
+## 2026-11-15：r392 XPAN 实况播放空白（已实机验证恢复真实画面）
+
+r391 强制创建 EIS 网格后确实进入了 Warp，但最终 `transformNull=true`，动态附件 79 帧
+均为约 RGB `[190,190,190]` 至 `[235,235,235]` 的白灰画面，因此用户看到的
+“播放画面是空白的”来自动态附件本身，不是相册播放器。
+
+r392 将 XPAN 强制创建 EIS 网格改为显式诊断能力：`persist.omnicam.xpan.eisgrid`
+默认 `0`，只有设为 `1` 时才进入 r391 的 Warp 实验链。默认路径不设置
+`EIS_GRID_INIT_ALLOW`，恢复此前能输出真实相机内容的 common 路线，同时保留
+BT.2020/HLG 到 BT.709/SDR 的实况输出校正。
+
+已在 `PKJ110 / 95c2d261` 上覆盖安装 r392，只重启相机进程，未重启手机。实拍后的
+动态附件解码结果为 79 帧、约 3.2 秒，主帧稳定为 `path=common`、`warpDraws=0`；
+相册能识别“实况照片”，点击播放后画面有变化，不再空白。相机 PID 全程为 `5933`，
+没有 `FATAL EXCEPTION`。
+
+本地验证材料：
+
+```text
+E:\OmniCam-Muse-main\output\xpan_live_photo\r392_validation_20261115\IMG20261115202251_final.jpg
+E:\OmniCam-Muse-main\output\xpan_live_photo\r392_validation_20261115\analysis_202251_final\xpan_r392_zoom_cover_video_contact_preview.jpg
+E:\OmniCam-Muse-main\output\xpan_live_photo\r392_validation_20261115\r392_xpan_validation.log
+```
+
+当前闭环范围仅是“播放不再空白且有真实动态画面”。动态视频仍比封面略亮、偏灰，
+说明 common 路线的亮度/色彩一致性还需单独校准；不能把本次修复表述成 Warp 已修复。
+
+## 2026-11-15：r391 XPAN 实况 EIS 网格/元数据队列修复（待实机验证）
+
+XPAN 实况强制 EIS bypass 后，原厂 `gh.g.c()` 会创建网格并直接返回，跳过 bypass 分支中的
+`gh.g.z = new ArrayDeque<>()`。结果是网格存在、元数据队列为空，下一帧在
+`gh.g.f()` 调用 `z.offer()` 时崩溃。r391 只在 XPAN 实况且 EIS bypass 生效时补建该队列，
+并在每帧入口增加同类空值防呆。
+
+反编译后确认后续路径能够闭合：bypass 分支先入队并返回 101，`gh.v` 再把 `gh.g.x`
+交给 `ImageData.e()`，后者生成 Warp 所需的 `ImageData.o`。目前仍不能宣称实机成功，
+手机已撤走；必须以 `path=warp`、`warpDraws>0`、动态附件连续且颜色/亮度正常为验收依据。
+
+已按更新后的构建脚本重新完整构建并核验：
+
+```text
+E:\OmniCam-Muse-main\module\omnicam-muse-4.4.5-r391.apk
+7,484,851 字节
+SHA-256 231F73A3CC833F6A1E93E77E2E00A930A3C7EC1D524106E1609E98ABD82B46EB
+
+E:\OmniCam-Muse-main\OmniCam-Muse-4.4.5-r391-KSU.zip
+305,507,868 字节
+SHA-256 46C7035081180C2CD304848E7140AFD7A19F91E7B9792976C5522A70F4F6C5B0
+```
+
+APK 为 `Muse 4.4.5-r391 / versionCode 831`，v3 签名、ZIP 一致性、XPAN 57 条探针和
+`tools/verify_port_artifacts.py` 六组检查均已通过。完整根因和明早测试顺序见
+`docs/LIVE_PHOTO_GR_MISMATCH.md` 第 24 节。不要在手机回来后重启设备。
+
 ## 2026-11-15：r380 修复 XPAN 拍照闪退（已实机验证当前路径）
 
 用户报告 XPAN 一点拍照就闪退。直接原因是 `LutParameters.e` 保留了已释放内部

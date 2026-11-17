@@ -223,7 +223,39 @@ foreach ($sentinel in $requiredPortraitZoomStrings) {
     }
 }
 Write-Output "APK portrait default-zoom probes verified: $($requiredPortraitZoomStrings.Count) strings"
+$requiredMasterLiveLutStrings = @(
+    'master live texture sync installed',
+    'master live BasicTone texture synced',
+    'master live LUT diagnostic installed',
+    'master live LUT diagnostic init armed',
+    'master live LUT diagnostic callback',
+    'master live LUT diagnostic task enter',
+    'master live LUT diagnostic task complete',
+    'master live LUT diagnostic task failed',
+    'master live LUT diagnostic render state',
+    'master live LUT diagnostic manager e',
+    'master live LUT diagnostic manager release',
+    'master live LUT diagnostic manager process',
+    'master live YUV output diagnostic installed',
+    'live YUV conversion created',
+    'live YUV shader selected',
+    'live YUV shader resource map unavailable',
+    'preview metadata settling after ',
+    'preview metadata settled after ',
+    'first publish held after ',
+    'preview metadata settling: incomplete colour metadata ignored'
+)
+foreach ($sentinel in $requiredMasterLiveLutStrings) {
+    if (-not $dexAll.Contains($sentinel)) {
+        Stop-Build "Stale or incomplete APK: missing master live LUT probe string '$sentinel'."
+    }
+}
+Write-Output "APK master live LUT probes verified: $($requiredMasterLiveLutStrings.Count) strings"
 $requiredXpanStrings = @(
+    'cover SDR mode=',
+    'XPAN live SDR output correction armed',
+    'XPAN live SDR format corrected',
+    'XPAN live SDR surface corrected',
     'XPAN menu visibility hook failed',
     'XPAN capture request live photo t1=',
     'XPAN capture request live photo hook failed',
@@ -250,6 +282,9 @@ $requiredXpanStrings = @(
     'XPAN live EIS bypass active',
     'XPAN live EIS bypass unavailable',
     'XPAN live EIS bypass probe failed',
+    'XPAN live EIS metadata queue initialized at ',
+    'XPAN live EIS metadata queue init failed at ',
+    'XPAN live EIS grid route diagnostics armed',
     'XPAN synthetic gyro fallback armed',
     'XPAN synthetic gyro injected',
     'XPAN synthetic gyro injection failed',

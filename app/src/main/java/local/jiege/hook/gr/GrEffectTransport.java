@@ -23,6 +23,53 @@ final class GrEffectTransport {
     private static final String GR_LMT_DIR = "/data/user/0/com.oplus.camera/files/ricoh_gr/lmt";
     /** Last Lut3d mode / combine-LUT directory / request residue state reported, so each is one line. */
     private static volatile String tracedMode;
+
+    /**
+     * Camera id -> the mode its preview LUT was last built for.
+     *
+     * <p>The live-photo recorder reads a second preview stream on its own camera id (12 on PKJ110).
+     * Nothing rebuilds that id's LUT when the shooting mode changes, so after a GR shot it keeps the
+     * GR table while the still and the viewfinder move on -- the moving picture then plays back with
+     * a look one table away from its own cover. Kept for the replay below.
+     */
+    private static final java.util.Map<Integer, String> lutModes = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Opt-in marker: replays the current LUT onto ids still holding the GR one. */
+    private static final java.io.File LUT_REPLAY =
+        new java.io.File("/data/user/0/com.oplus.camera/files/jiege/lut_replay");
+    private static final ThreadLocal<Boolean> replayingLut = new ThreadLocal<>();
+
+    private static boolean replaying() {
+        return Boolean.TRUE.equals(replayingLut.get());
+    }
+
+    /** Rebuilds every camera id whose LUT still says "gr" with the mode that is current now. */
+    private static void replayLut(Symbols symbols, XC_MethodHook.MethodHookParam param, int id, int arg,
+        String mode) {
+        Method load;
+        try {
+            load = symbols.method("Lut3d.load");
+        } catch (Throwable ignored) {
+            return;
+        }
+        replayingLut.set(true);
+        try {
+            for (java.util.Map.Entry<Integer, String> entry : lutModes.entrySet()) {
+                int other = entry.getKey();
+                if (other == id || !"gr".equals(entry.getValue())) continue;
+                Object result;
+                try {
+                    result = load.invoke(param.thisObject, other, arg, mode);
+                } catch (Throwable error) {
+                    Log.e(TAG, "Lut3d.replay id=" + other + " failed", error);
+                    continue;
+                }
+                lutModes.put(other, mode);
+                Log.i(TAG, "Lut3d.replay id=" + other + " gr -> " + mode + " ret=" + result);
+            }
+        } finally {
+            replayingLut.remove();
+        }
+    }
     private static volatile String tracedInit;
     private static volatile String tracedResidue;
 
@@ -37,17 +84,27 @@ final class GrEffectTransport {
 
     private static void hookPreviewLut(final Symbols symbols, ClassLoader classLoader) {
         final ThreadLocal<Boolean> loadingGrLut = new ThreadLocal<>();
+        final ThreadLocal<Boolean> replaying = new ThreadLocal<>();
         XposedBridge.hookMethod(symbols.method("Lut3d.load"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 String mode = String.valueOf(param.args[2]);
-                if (!mode.equals(tracedMode)) {
-                    tracedMode = mode;
-                    // One line per mode the preview pipeline loads: a live photo records from a
-                    // second stream, and "which mode did that stream load" is the question that
-                    // decides whether GR can still be bound while the camera is in master mode.
-                    Log.i(TAG, "Lut3d.load mode=" + mode + " grMode=" + GrState.isGrMode());
+                int id = param.args[0] instanceof Integer ? (Integer) param.args[0] : -1;
+                int arg = param.args[1] instanceof Integer ? (Integer) param.args[1] : -1;
+                boolean gr = "gr".equals(mode);
+                String previous = lutModes.put(id, mode);
+                if (!replaying()) {
+                    String key = id + "/" + mode + "/" + GrState.isGrMode();
+                    if (!key.equals(tracedMode)) {
+                        tracedMode = key;
+                        // One line per camera id and mode the LUT manager builds for. A live photo
+                        // records from a second preview stream on its own camera id; "was that id
+                        // ever rebuilt after GR" is the question this settles.
+                        Log.i(TAG, "Lut3d.load id=" + id + " arg=" + arg + " mode=" + mode
+                            + " grMode=" + GrState.isGrMode() + " inst="
+                            + Integer.toHexString(System.identityHashCode(param.thisObject)));
+                    }
+                    if (LUT_REPLAY.exists() && !gr && !GrState.isGrMode()) replayLut(symbols, param, id, arg, mode);
                 }
-                boolean gr = "gr".equals(param.args[2]);
                 // Entering or leaving GR invalidates the cached LUT (index = -1).
                 if (gr != "gr".equals(symbols.get("Lut3d.mode", param.thisObject))) {
                     symbols.set("Lut3d.index", param.thisObject, -1);
@@ -59,6 +116,22 @@ final class GrEffectTransport {
                 loadingGrLut.remove();
             }
         });
+        try {
+            XposedBridge.hookMethod(symbols.method("Lut3d.update"), new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    Log.i(TAG, "Lut3d.update before "
+                        + describeLutState(param.thisObject)
+                        + " caller=" + lutUpdateCaller());
+                }
+
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Log.i(TAG, "Lut3d.update after "
+                        + describeLutState(param.thisObject));
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "Lut3d.update hook failed", error);
+        }
         XposedBridge.hookAllMethods(XposedHelpers.findClass("com.oplus.ocs.camera.CombineLutHelper", classLoader), "init",
             new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -68,19 +141,85 @@ final class GrEffectTransport {
                         // the preview pipeline at the GR tree from here is what kept the GR look on
                         // the live-photo video after a GR shot. Left on the vendor's own tree; the
                         // next load in GR mode sets it again.
-                        if (!tracedInit.equals("stale")) {
+                        if (!"stale".equals(tracedInit)) {
                             tracedInit = "stale";
                             Log.i(TAG, "gr LUT load outside GR mode: preview left on the vendor tree");
                         }
                         return;
                     }
                     param.args[0] = GR_LMT_DIR;
-                    if (!tracedInit.equals("gr")) {
+                    if (!"gr".equals(tracedInit)) {
                         tracedInit = "gr";
                         Log.i(TAG, "CombineLut init -> GR tree");
                     }
                 }
             });
+    }
+
+    /**
+     * Capture the state changed by {@code Lut3dDataManager.p()}. This is deliberately read-only:
+     * the post-shot grey regression currently coincides with two updates, and the previous probe
+     * (instance id only) could not tell whether p() changed the mode memo, the selected table or
+     * only the BasicTone float array.
+     */
+    private static String describeLutState(Object manager) {
+        try {
+            float[] basic = (float[]) XposedHelpers.getObjectField(manager, "c");
+            int[] sizeHolder = (int[]) XposedHelpers.getObjectField(manager, "l");
+            String selected = String.valueOf(XposedHelpers.getObjectField(manager, "P"));
+            int combine = XposedHelpers.getIntField(manager, "M");
+            int capMode = XposedHelpers.getIntField(manager, "O");
+            int selectedIndex = XposedHelpers.getIntField(manager, "Q");
+            int lutSize = XposedHelpers.getIntField(manager, "t");
+            boolean initialized = XposedHelpers.getBooleanField(manager, "N");
+            boolean palette = XposedHelpers.getBooleanField(manager, "W");
+            boolean hdr = XposedHelpers.getBooleanField(manager, "X");
+            String hash = basic == null ? "null" : Integer.toHexString(java.util.Arrays.hashCode(basic));
+            String samples = basic == null ? "null" : sampleFloats(basic, 8);
+            int holder = sizeHolder != null && sizeHolder.length != 0 ? sizeHolder[0] : -1;
+            return "inst=" + Integer.toHexString(System.identityHashCode(manager))
+                + " grMode=" + GrState.isGrMode()
+                + " selected=" + selected
+                + " combine=" + combine
+                + " cap=" + capMode
+                + " selectedIndex=" + selectedIndex
+                + " initialized=" + initialized
+                + " palette=" + palette
+                + " hdr=" + hdr
+                + " lutSize=" + lutSize
+                + " holderSize=" + holder
+                + " basicLen=" + (basic == null ? -1 : basic.length)
+                + " basicHash=" + hash
+                + " basicSamples=" + samples;
+        } catch (Throwable error) {
+            return "inst=" + Integer.toHexString(System.identityHashCode(manager))
+                + " grMode=" + GrState.isGrMode()
+                + " state=unreadable:" + error.getClass().getSimpleName();
+        }
+    }
+
+    private static String sampleFloats(float[] values, int count) {
+        int end = Math.min(values.length, count);
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < end; i++) {
+            if (i != 0) out.append(',');
+            out.append(String.format(java.util.Locale.US, "%.6f", values[i]));
+        }
+        if (end < values.length) out.append(",...");
+        return out.append(']').toString();
+    }
+
+    private static String lutUpdateCaller() {
+        for (StackTraceElement frame : new Throwable().getStackTrace()) {
+            String name = frame.getClassName();
+            if (name.startsWith("local.jiege.")
+                || name.startsWith("de.robv.android.xposed.")
+                || name.startsWith("java.lang.Thread")) {
+                continue;
+            }
+            return name + "." + frame.getMethodName() + ":" + frame.getLineNumber();
+        }
+        return "unknown";
     }
 
     private static void hookCaptureStage(final Symbols symbols, final ClassLoader classLoader) {

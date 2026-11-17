@@ -12,8 +12,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -131,9 +133,71 @@ constexpr int64_t kMasterDirFreshMs = 10 * 60 * 1000;
 // tree it already holds, so nothing else is dragged onto the master look.
 std::atomic<uint32_t> lastModeSeen{0xffffffffu};
 
+// The object that was most recently pointed at a tree by a profiled (capture) frame, and when. A
+// still's later passes carry no profile, so without this a capture's own object is fair game for
+// the stream reconciliation below and gets re-pointed milliseconds after it was set up. The grace
+// window only has to outlast one capture's pass sequence on that object.
+constexpr int64_t kAppliedGraceMs = 1500;
+std::mutex appliedMutex;
+void *appliedObject = nullptr;
+std::atomic<int64_t> appliedMs{0};
+
 int64_t nowMs() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// The preview table the Java half currently has on screen (MasterColor writes the directory there
+// while a master look is active and deletes it otherwise). A stream frame with no profile is given
+// this tree, because that is the look the user is looking at and the one the cover will carry.
+constexpr char kPreviewPin[] = "/data/user/0/com.oplus.camera/files/jiege/mastercolor/preview";
+constexpr char kLivePrefix[] = "/data/user/0/com.oplus.camera/files/jiege/mastercolor/live/";
+// Arguments of the most recent loadLut call, replayed when a stream frame needs a load of its own:
+// the stream never calls the loader itself, so there is nothing else to copy them from.
+std::mutex loadArgsMutex;
+int lastLoadMode = 0;
+std::string lastLoadSetting;
+bool lastLoadFlag = false;
+// Object -> tree the stream object actually held after its last reload. The vendor loader can
+// resolve the requested preview tree to another live tree, so remembering only the requested path
+// is wrong: a later Object allocation can reuse the address while holding a different tree, and the
+// stale cache then suppresses the reload that live-photo video needs.
+struct StreamTreeState {
+    std::mutex mutex;
+    std::string loaded;
+};
+std::mutex streamTreeMutex;
+std::unordered_map<void *, std::unique_ptr<StreamTreeState>> streamTree;
+
+std::string pinnedPreviewDir() {
+    FILE *file = std::fopen(kPreviewPin, "r");
+    if (!file) return std::string();
+    char text[256] = {0};
+    size_t read = std::fread(text, 1, sizeof(text) - 1, file);
+    std::fclose(file);
+    if (read == 0) return std::string();
+    text[read] = 0;
+    if (std::strncmp(text, kLivePrefix, sizeof(kLivePrefix) - 1) != 0) return std::string();
+    return std::string(text, read);
+}
+
+// processCore runs for every frame of every stream, so the pin is not re-read per frame.
+constexpr int64_t kPinCheckMs = 500;
+std::mutex pinMutex;
+std::string pinCache;
+std::atomic<int64_t> pinCheckedAt{0};
+
+std::string cachedPreviewDir() {
+    int64_t now = nowMs();
+    if (now - pinCheckedAt.load(std::memory_order_relaxed) < kPinCheckMs) {
+        std::lock_guard<std::mutex> lock(pinMutex);
+        return pinCache;
+    }
+    pinCheckedAt.store(now, std::memory_order_relaxed);
+    std::string dir = pinnedPreviewDir();
+    std::lock_guard<std::mutex> lock(pinMutex);
+    pinCache = dir;
+    return dir;
 }
 
 void rememberMasterDir(const std::string &dir) {
@@ -254,6 +318,10 @@ int filterProcessV2(void *frame, int stage) {
     return result;
 }
 
+// Defined below applyLmtPath; declared here because processCore (which runs earlier in the file)
+// is the only place that can see a frame with no capture profile at all.
+void reloadStreamTree(void *object);
+
 uintptr_t processCore(void *object, void *input, void *output, void *parameters, void *metadata) {
     // Defence in depth: never call through a trampoline the hook framework refused to build.
     if (!originalProcessCore) return 0;
@@ -286,6 +354,13 @@ uintptr_t processCore(void *object, void *input, void *output, void *parameters,
                 rememberMasterDir(activeMasterDir);
             }
         }
+    } else {
+        // A frame with no profile is either an intermediate pass of a still or a frame off a stream
+        // that never gets one (preview, live-photo video). Such a stream keeps whatever tone table
+        // its object was built with -- for a master mode object that is the ODM dataset, whose SC /
+        // CWCM stages stay live while the look table does not, which is what made the live-photo
+        // video of a master shot play back warm and saturated next to a normal cover.
+        reloadStreamTree(object);
     }
     uintptr_t result = originalProcessCore(object, input, output, parameters, metadata);
     activeProfile = previous;
@@ -365,11 +440,104 @@ void applyLmtPath(void *object) {
         __android_log_print(ANDROID_LOG_INFO, kTag, "BasicTone profile=%s path=%s",
                             activeProfile == kGr ? "GR" : activeProfile == kMaster ? "master-colour" : "host", desired);
     }
+    // A still's passes do not all carry a profile: the first one names the tree, the rest just run.
+    // Remember which object was just pointed at a tree so the stream reconciliation below cannot
+    // take it away again a few milliseconds later -- that is exactly what happened before (a cover
+    // set to its own table was re-pointed at the preview table 44 ms later, so the look the cover
+    // was toned with and the one the video kept did not match).
+    {
+        std::lock_guard<std::mutex> lock(appliedMutex);
+        appliedObject = object;
+        appliedMs.store(nowMs(), std::memory_order_relaxed);
+    }
+}
+
+// A frame with no capture profile came in on a stream the camera never profiles. The object it runs
+// on was built from a dataset that may not be the look on screen (that is exactly the state a
+// master mode lands in after a GR shot), and nothing will ever ask the loader to repoint it: the
+// stream does not call loadLut. Do that here, once per tree per object, with the look table the
+// Java half says is on screen. Guarded by the GR idle window so a GR capture in flight is never
+// repointed mid-save.
+std::string heldTree(void *object) {
+    const char *held = static_cast<const char *>(object) + 0x008;
+    return std::string(held, strnlen(held, 256));
+}
+
+void reloadStreamTree(void *object) {
+    if (!object) return;
+    if (nowMs() - lastGrFrameMs.load(std::memory_order_relaxed) <= kGrIdleMs) return;
+    // This object was just set up for a still (see appliedObject). A still's own passes carry no
+    // profile, so without this check the reconciliation would undo the cover's tree a few
+    // milliseconds after the capture set it, and the still and the video would end up toned by
+    // different tables.
+    {
+        std::lock_guard<std::mutex> lock(appliedMutex);
+        if (appliedObject == object &&
+            nowMs() - appliedMs.load(std::memory_order_relaxed) <= kAppliedGraceMs) return;
+    }
+    std::string dir = cachedPreviewDir();
+    if (dir.empty()) return;
+    StreamTreeState *state;
+    {
+        std::lock_guard<std::mutex> lock(streamTreeMutex);
+        auto &entry = streamTree[object];
+        if (!entry) entry = std::make_unique<StreamTreeState>();
+        state = entry.get();
+    }
+    std::lock_guard<std::mutex> objectLock(state->mutex);
+    std::string actual = heldTree(object);
+    // The cache records what the object actually holds after the prior load, not what was requested.
+    // If neither side has changed, this object has already been reconciled.
+    if (state->loaded == actual) return;
+    const std::string cached = state->loaded.empty() ? "(none)" : state->loaded;
+    if (actual == dir) {
+        state->loaded = actual;
+        __android_log_print(ANDROID_LOG_INFO, kTag,
+                            "stream tree adopted: cache=%s actual=%s target=%s reason=already-held",
+                            cached.c_str(), actual.c_str(), dir.c_str());
+        return;
+    }
+    if (!originalLoadLut3 && !originalLoadLut) return;
+    char *heldBuffer = static_cast<char *>(object) + 0x008;
+    int mode;
+    std::string setting;
+    bool flag;
+    {
+        std::lock_guard<std::mutex> lock(loadArgsMutex);
+        mode = lastLoadMode;
+        setting = lastLoadSetting;
+        flag = lastLoadFlag;
+    }
+    std::strncpy(heldBuffer, dir.c_str(), 240);
+    heldBuffer[240] = 0;
+    // The path is not part of the vendor cache key; force the reload that gives the stream a table.
+    *reinterpret_cast<int *>(static_cast<char *>(object) + 0xeb0) = -1;
+    __android_log_print(ANDROID_LOG_INFO, kTag,
+                        "stream tree reload: cache=%s actual=%s target=%s reason=cache-actual-mismatch",
+                        cached.c_str(), actual.c_str(), dir.c_str());
+    if (originalLoadLut3) {
+        __android_log_print(ANDROID_LOG_INFO, kTag, "stream tree -> %s (mode=%d setting=%s)",
+                            dir.c_str(), mode, setting.c_str());
+        originalLoadLut3(object, mode, setting.c_str(), flag);
+    } else if (originalLoadLut) {
+        __android_log_print(ANDROID_LOG_INFO, kTag, "stream tree -> %s (mode=%d)", dir.c_str(), mode);
+        originalLoadLut(object, mode);
+    }
+    const std::string finalHeld = heldTree(object);
+    state->loaded = finalHeld;
+    __android_log_print(ANDROID_LOG_INFO, kTag,
+                        "stream tree result: cache=%s actual=%s target=%s", finalHeld.c_str(),
+                        finalHeld.c_str(), dir.c_str());
 }
 
 uintptr_t loadLut(void *object, int mode) {
     if (!originalLoadLut) return 0;
     applyLmtPath(object);
+    {
+        std::lock_guard<std::mutex> lock(loadArgsMutex);
+        lastLoadMode = mode;
+        lastLoadFlag = false;
+    }
     return originalLoadLut(object, mode);
 }
 
@@ -378,6 +546,12 @@ uintptr_t loadLut(void *object, int mode) {
 uintptr_t loadLut3(void *object, int mode, const char *settingPath, bool flag) {
     if (!originalLoadLut3) return 0;
     applyLmtPath(object);
+    {
+        std::lock_guard<std::mutex> lock(loadArgsMutex);
+        lastLoadMode = mode;
+        lastLoadSetting = settingPath ? settingPath : "";
+        lastLoadFlag = flag;
+    }
     __android_log_print(ANDROID_LOG_INFO, kTag, "loadLut mode=%d setting=%s flag=%d",
                         mode, settingPath ? settingPath : "(null)", flag ? 1 : 0);
     return originalLoadLut3(object, mode, settingPath, flag);

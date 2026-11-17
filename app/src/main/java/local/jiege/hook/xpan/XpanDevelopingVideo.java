@@ -44,7 +44,9 @@ final class XpanDevelopingVideo {
     /** Bits per pixel per frame, about the camera's own live clips. */
     private static final float BITS_PER_PIXEL = 0.4f;
     private static final int MAX_BIT_RATE = 80_000_000;
-    private static final String[] MIMES = {MediaFormat.MIMETYPE_VIDEO_HEVC, MediaFormat.MIMETYPE_VIDEO_AVC};
+    // Prefer AVC for the synthetic SDR clip. The vendor HEVC surface encoder on PKJ110
+    // ignores KEY_COLOR_* and writes BT.2020/HLG metadata, while AVC stays in the SDR path.
+    private static final String[] MIMES = {MediaFormat.MIMETYPE_VIDEO_AVC, MediaFormat.MIMETYPE_VIDEO_HEVC};
     private static final int EGL_RECORDABLE_ANDROID = 0x3142;
     private static final float[] QUAD = {
         -1f, -1f, 0f, 1f,
@@ -157,6 +159,12 @@ final class XpanDevelopingVideo {
         try {
             MediaFormat format = MediaFormat.createVideoFormat(mime, width, height);
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            // The source bitmaps are SDR JPEGs. Without explicit tags some HEVC encoders inherit
+            // the camera's HDR preview configuration and mark the clip BT.2020/HLG, making the SDR
+            // pixels play back brighter and flatter than the cover.
+            format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);
+            format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO);
+            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
             format.setInteger(MediaFormat.KEY_BIT_RATE, (int) Math.min(MAX_BIT_RATE, (long) width * height * FPS * BITS_PER_PIXEL));
             format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
