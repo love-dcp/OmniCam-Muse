@@ -41,24 +41,46 @@ import local.jiege.hook.common.Symbols;
  * on the palette branch.</li>
  * </ul>
  *
- * <p>Scope: nothing runs before the first GR visit, nothing runs in GR, and only master/XPAN are
- * considered by the environment hook. r397 deliberately suspends the master delayed re-arm: live
- * evidence showed it changes the singleton from {@code SimTool_Master / cap=0} to
- * {@code SimTool_Dolby / cap=2} about 1.5 seconds after wake or a mode switch, exactly when the
- * master preview turns grey. XPAN keeps its earlier re-arm because it has no stock
- * {@code (1, 2)} refresh of its own. A delayed task records both the mode and generation that
- * scheduled it; a newer refresh or any mode switch makes the old task a no-op. Re-arms re-enter
- * this hook as {@code (1, 2, "common")}, which matches no branch, so there is no recursion.
+ * <p>Scope: nothing runs before the first GR visit, nothing runs in GR, and only XPAN is
+ * considered by the delayed environment hook. r397 suspended the master re-arm because the plain
+ * {@code e(1,2,"common")} re-arm left the singleton on {@code SimTool_Dolby / cap=2} and the
+ * master preview turned grey 1.5 s after the switch; the r419 "two-step wash" variant was measured
+ * on 2026-11-18 to be a no-op on the master table (hash before == hash after) and did not change
+ * the post-GR video, so r420 removes the master branch entirely -- the actual post-GR master-live
+ * defect turned out to be the stale {@code LutParameters.g} handled in
+ * {@link GrMasterLiveLutRestore}. XPAN keeps its earlier single-step re-arm because it has no
+ * stock {@code (1, 2)} refresh of its own. A delayed task records both the mode and generation
+ * that scheduled it; a newer refresh or any mode switch makes the old task a no-op. The re-arm
+ * runs on its own thread with {@link #rearming} set, so its own {@code e()} calls do not
+ * schedule a follow-up task.
  */
 public final class GrPreviewStreamRestore {
     private static final String TAG = "RicohGrPort";
     private static final long REARM_DELAY_MS = 1500;
+
     /**
-     * r397 diagnostic switch. Keep master on its native {@code SimTool_Master / cap=0} stream
-     * after GR; the old global palette re-arm is still available in source for comparison but
-     * must not run while validating the post-wake regression.
+     * Shares {@code persist.omnicam.aura.livetable} with GrMasterLiveLutRestore, opt-in since
+     * r418. The video-slot rewrite below ({@code e(1,2,"")} -> {@code "common"}) forces the live
+     * video to rebuild with the still pipeline's palette; builds where it was active graded the
+     * video 0.01-0.09 warmer than its own cover while the stock camera comes out about 0.02
+     * cooler -- and on the current camera build the rewrite never fires at all. Default off means
+     * "the module does not grade the live video in any way", which is also what the reference
+     * builds (Muse 3.4.1, X8U port) ship.
      */
-    private static final boolean MASTER_DELAYED_REARM_ENABLED = false;
+    private static final boolean VIDEO_SLOT_REWRITE =
+        "on".equalsIgnoreCase(prop("persist.omnicam.aura.livetable"));
+
+    private static boolean rewriteSkipLogged;
+
+    private static String prop(String key) {
+        try {
+            Class<?> properties = Class.forName("android.os.SystemProperties");
+            Object value = properties.getMethod("get", String.class).invoke(null, key);
+            return value == null ? "" : value.toString();
+        } catch (Throwable error) {
+            return "";
+        }
+    }
 
     /** Set once this camera process has left GR; only then are env re-arms scheduled. */
     private static volatile boolean leftGr;
@@ -66,6 +88,12 @@ public final class GrPreviewStreamRestore {
     /** Internal name of the current camera mode, kept in step by the ModeSwitch hook
      *  ("professional" is master, "xpan" XPAN; "gr"/"highPixel"/"retroCamera" the others). */
     private static volatile String currentMode;
+
+    /**
+     * Marks the gr-tone-rearm thread while it re-issues e() calls, so the afterHook below does
+     * not treat the re-arm's own e(1,2,"common") as a fresh refresh and schedule itself again.
+     */
+    private static final ThreadLocal<Boolean> rearming = new ThreadLocal<>();
 
     /** Invalidates an older master/XPAN task whenever a newer refresh arrives. */
     private static final AtomicLong rearmGeneration = new AtomicLong();
@@ -130,20 +158,26 @@ public final class GrPreviewStreamRestore {
                         if (!(param.args[0] instanceof Integer) || (Integer) param.args[0] != 1) return;
                         if (!(param.args[1] instanceof Integer) || (Integer) param.args[1] != 2) return;
                         if (param.args[2] != null && !String.valueOf(param.args[2]).isEmpty()) return;
+                        if (!VIDEO_SLOT_REWRITE) {
+                            if (!rewriteSkipLogged) {
+                                rewriteSkipLogged = true;
+                                Log.i(TAG, "video slot rebuild left alone"
+                                    + " (default since r418; enable with livetable=on)");
+                            }
+                            return;
+                        }
                         param.args[2] = "common";
                         Log.i(TAG, "video slot rebuild: e(1,2,\"\") -> e(1,2,\"common\")");
                     }
 
                     @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (Boolean.TRUE.equals(rearming.get())) return;
                         if (!leftGr || GrState.isGrMode()) return;
                         if (!(param.args[0] instanceof Integer) || (Integer) param.args[0] != 1) return;
                         if (!(param.args[1] instanceof Integer) || (Integer) param.args[1] != 0) return;
                         String name = param.args[2] == null ? "" : String.valueOf(param.args[2]);
-                        boolean masterRefresh = MASTER_DELAYED_REARM_ENABLED
-                            && inMasterMode()
-                            && (name.isEmpty() || "professional".equals(name));
                         boolean xpanRefresh = inXpanMode() && "xpan".equals(name);
-                        if (!masterRefresh && !xpanRefresh) return;
+                        if (!xpanRefresh) return;
                         final Object manager = param.thisObject;
                         final String from = name;
                         final String armedMode = currentMode;
@@ -155,15 +189,17 @@ public final class GrPreviewStreamRestore {
                                 // both mode and generation before touching the env. Only the
                                 // mode that scheduled this task may consume the re-arm.
                                 if (!leftGr || GrState.isGrMode()) return;
-                                if (!armedMode.equals(currentMode)
-                                    || (!inMasterMode() && !inXpanMode())) return;
+                                if (!armedMode.equals(currentMode) || !inXpanMode()) return;
                                 if (armedGeneration != rearmGeneration.get()) return;
+                                rearming.set(Boolean.TRUE);
                                 Object rearmed = XposedHelpers.callMethod(
                                     manager, "e", 1, 2, "common");
                                 Log.i(TAG, armedMode + " video slot re-armed after e(1,0,\"" + from
                                     + "\") -> e(1,2,\"common\") = " + rearmed);
                             } catch (Throwable error) {
                                 Log.e(TAG, "video slot re-arm failed", error);
+                            } finally {
+                                rearming.remove();
                             }
                         }, "gr-tone-rearm");
                         thread.start();

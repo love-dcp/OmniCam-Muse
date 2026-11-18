@@ -9,26 +9,27 @@ import java.util.WeakHashMap;
 import local.jiege.hook.common.Log;
 
 /**
- * Keeps the master live-photo video BasicTone texture in step with the still pipeline.
+ * Restores the master live-photo video to the state a fresh master session has.
  *
- * <p>Two things have to hold for the recorded frames to look like the cover, and r410 finally has
- * both in one place:
+ * <p><b>r420 root cause (2026-11-18 controlled A/B, same scene, same process):</b> stock master
+ * live runs with {@code LutParameters.g == false} -- the recorded frames never bind the BasicTone
+ * sampler. A GR visit turns that stock flag on (GR grades through BasicTone), and nothing on the
+ * GR -> master switch turns it back off. The very same pipeline then records the master live
+ * video with the sampler bound, so those frames get an extra BasicTone pass over the ordinary
+ * colour-space table and play back grey and washed-out (+27 V, -26 S against the same-session
+ * direct-master reference) while the still cover, graded by its own capture passes, looks right.
+ * Every other stage of the chain was verified identical between the two captures: the live LUT
+ * callback data (169adb06), the render textures, the ch.c/P010 converter, the HEVC VUI and the
+ * capture-time AWB. The flag is the whole difference.</p>
  *
- * <ul>
- * <li><b>The stage must be switched on.</b> Stock decides per frame from
- * {@code LutParameters.g} whether the BasicTone sampler is bound at all. Master's live-photo warp
- * renderer runs with that flag cleared, so the recorded frames never sample a table -- which is why
- * every texture upload of r374-r409 was invisible. {@code XpanLiveFeature} has always forced the
- * same flag for XPAN; this class now does it for master.</li>
- * <li><b>The stage must hold the current table.</b> {@code Lut3dDataManager.c} is one float[]
- * instance that the native side rewrites in place, so identity and self-comparison both answer
- * "already synced" while the GPU still holds whatever was uploaded at {@code onInit()}. The
- * fingerprint of the last real upload is therefore recorded here and compared instead.</li>
- * </ul>
+ * <p>The repair is minimal: while the camera is in master (not GR, not XPAN), every draw of the
+ * live warp renderer and every capture-frame callback clears {@code g} back to false -- restoring
+ * exactly what stock does on a fresh master entry. This runs by default.</p>
  *
- * <p>The sync runs on the vendor GL rendering thread, changes only {@code renderer.s} and the
- * per-frame enable flag, and deliberately leaves the selected LUT {@code renderer.r}, the watermark
- * renderer and the global CombineLut environment untouched.
+ * <p>The older experimental "grade the video through the cover's table" path (r408-r412: upload
+ * the cover {@code mb*} table into {@code renderer.s} and raise {@code g}) measured warm/saturated
+ * against the stock camera and stays opt-in behind
+ * {@code persist.omnicam.aura.livetable=on}; see {@link #VIDEO_LUT}.</p>
  */
 final class GrMasterLiveLutRestore {
     private static final String TAG = "RicohGrPort";
@@ -218,16 +219,39 @@ final class GrMasterLiveLutRestore {
         }
     }
 
+    /**
+     * r420: clear the GR-era {@code LutParameters.g} residue off a master live render. Stock
+     * master keeps this flag false (no BasicTone sampler on the recorded frames); GR needs it
+     * true and leaves it behind on the shared pipeline. XPAN live renders also set it on purpose,
+     * which is why the gate is the camera's current mode -- only master-mode draws are touched.
+     */
+    private static void clearStaleBasicToneGate(Object params, String where) {
+        if (params == null) return;
+        if (GrState.isGrMode() || !GrPreviewStreamRestore.inMasterMode()) return;
+        try {
+            if (!XposedHelpers.getBooleanField(params, "g")) return;
+            XposedHelpers.setBooleanField(params, "g", false);
+            reportOnce("post-GR basic tone gate cleared (" + where + ")"
+                + ": lutParams.g true -> false (stock master live keeps BasicTone off)"
+                + ", f=" + flag(params, "f"));
+        } catch (Throwable error) {
+            reportOnce("gate clear unreadable (" + where + "): " + error);
+        }
+    }
+
     private GrMasterLiveLutRestore() {}
 
     /**
-     * A/B switch for the live-photo video colour. {@code off} keeps the module away from the
-     * renderer's BasicTone texture and from LutParameters.g, which is the state r232 was in when
-     * the video still looked right -- if the video turns neutral in that state, the extra
-     * vividness is something this module adds rather than something stock does.
+     * Live-photo video grading is opt-in since r418. Uploading the cover's {@code mb*} table into
+     * the video renderer's BasicTone texture (r408-r412) was measured to push the video warm and
+     * saturated relative to its own cover (R/G +0.012, S +0.013) while the stock camera grades the
+     * video slightly cooler and duller than the cover on the same scene -- so the default is to
+     * leave the video on the vendor pipeline entirely, matching the reference builds (Muse 3.4.1
+     * and the X8U port ship no video hooks at all). Set {@code persist.omnicam.aura.livetable=on}
+     * to re-enable the experimental texture sync.
      */
     private static final boolean VIDEO_LUT =
-        !"off".equalsIgnoreCase(prop("persist.omnicam.aura.livetable"));
+        "on".equalsIgnoreCase(prop("persist.omnicam.aura.livetable"));
 
     private static String prop(String key) {
         try {
@@ -282,8 +306,11 @@ final class GrMasterLiveLutRestore {
             new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     Object instance = param.thisObject;
+                    // r420: the pipeline's own LutParameters must be back on the stock master
+                    // state before any frame of this capture is rendered.
+                    clearStaleBasicToneGate(field(instance, "o0"), "capture frames");
                     if (!VIDEO_LUT) {
-                        reportOnce("video lut disabled by persist.omnicam.aura.livetable=off");
+                        reportOnce("video lut off (default since r418; enable with persist.omnicam.aura.livetable=on)");
                         return;
                     }
                     if (!isTargetMode()) {
@@ -308,6 +335,12 @@ final class GrMasterLiveLutRestore {
          */
         XposedBridge.hookAllMethods(liveRenderer, "p", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
+                // r420: every live video frame draws through here, so the stale GR gate is
+                // cleared per frame before stock reads it -- covering the pre-shutter frames a
+                // capture-time hook would miss. Mode-gated: GR and XPAN renders keep their own g.
+                if (param.args.length > 8) {
+                    clearStaleBasicToneGate(param.args[8], "draw p()");
+                }
                 if (!VIDEO_LUT) return;
                 if (!isTargetMode()) return;
                 Object renderer = param.thisObject;
@@ -347,8 +380,10 @@ final class GrMasterLiveLutRestore {
             }
         });
 
-        Log.i(TAG, "master live texture sync installed"
-            + (VIDEO_LUT ? "" : " (disabled by persist.omnicam.aura.livetable=off)"));
+        Log.i(TAG, "master live gate restore installed (post-GR lutParams.g -> false)"
+            + "; texture sync " + (VIDEO_LUT
+                ? "opt-in via persist.omnicam.aura.livetable=on"
+                : "off by default"));
     }
 
     private static final class ManagerTable {
@@ -451,6 +486,73 @@ final class GrMasterLiveLutRestore {
         }
     }
 
+    /*
+     * Deliberate colour calibration for the live video track.
+     *
+     * The video is graded by the VEP branch of the same look and reads warmer and more saturated
+     * than the still cover on every build we tried, r232 included -- so there is no regression to
+     * find, and the only way to bring the two together is to grade the video side on purpose.
+     * Gains are read from properties so a value can be dialled in from adb without a rebuild:
+     *   persist.omnicam.aura.live.gainr / gaing / gainb  (default 1.0, multiply that channel)
+     *   persist.omnicam.aura.live.sat                   (default 1.0, 1.0 = untouched)
+     * Everything defaults to identity, so a phone without the properties behaves as before.
+     */
+    private static float gainR = 1f;
+    private static float gainG = 1f;
+    private static float gainB = 1f;
+    private static float gainSat = 1f;
+    private static long gainReadAt;
+    private static float[] gainSource;
+    private static float[] gainResult;
+
+    private static synchronized float[] graded(float[] table, int size) {
+        long now = System.currentTimeMillis();
+        if (now - gainReadAt > 1500L) {
+            gainReadAt = now;
+            gainR = number(prop("persist.omnicam.aura.live.gainr"), 1f);
+            gainG = number(prop("persist.omnicam.aura.live.gaing"), 1f);
+            gainB = number(prop("persist.omnicam.aura.live.gainb"), 1f);
+            gainSat = number(prop("persist.omnicam.aura.live.sat"), 1f);
+        }
+        if (gainR == 1f && gainG == 1f && gainB == 1f && gainSat == 1f) return table;
+        if (gainResult != null && gainSource == table) return gainResult;
+        float[] out = new float[table.length];
+        for (int i = 0; i + 2 < table.length; i += 3) {
+            float r = table[i];
+            float g = table[i + 1];
+            float b = table[i + 2];
+            if (gainSat != 1f) {
+                float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                r = luma + (r - luma) * gainSat;
+                g = luma + (g - luma) * gainSat;
+                b = luma + (b - luma) * gainSat;
+            }
+            out[i] = clamp(r * gainR);
+            out[i + 1] = clamp(g * gainG);
+            out[i + 2] = clamp(b * gainB);
+        }
+        gainSource = table;
+        gainResult = out;
+        reportOnce("video colour correction: r=" + gainR + " g=" + gainG + " b=" + gainB
+            + " sat=" + gainSat + " size=" + size);
+        return out;
+    }
+
+    private static float clamp(float value) {
+        if (value < 0f) return 0f;
+        if (value > 1f) return 1f;
+        return value;
+    }
+
+    private static float number(String raw, float fallback) {
+        if (raw == null || raw.isEmpty()) return fallback;
+        try {
+            return Float.parseFloat(raw.trim());
+        } catch (Throwable error) {
+            return fallback;
+        }
+    }
+
     /**
      * Replaces {@code renderer.s} with a BasicTone texture built from {@code table}, unless that
      * exact content is already what was last uploaded to this texture instance.
@@ -462,7 +564,8 @@ final class GrMasterLiveLutRestore {
             return;
         }
         Object currentTable = XposedHelpers.getObjectField(currentTexture, "A");
-        int[] wanted = sample(table);
+        float[] upload = graded(table, size);
+        int[] wanted = sample(upload);
         int texture = System.identityHashCode(currentTexture);
         Uploaded last;
         synchronized (uploadedTables) {
@@ -482,7 +585,7 @@ final class GrMasterLiveLutRestore {
 
         Object replacement;
         try {
-            replacement = replace.invoke(null, currentTexture, size, table);
+            replacement = replace.invoke(null, currentTexture, size, upload);
         } catch (java.lang.reflect.InvocationTargetException error) {
             uploadAttempts++;
             Throwable cause = error.getCause();
