@@ -6,6 +6,7 @@ import de.robv.android.xposed.XposedHelpers;
 import java.util.concurrent.atomic.AtomicLong;
 import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Symbols;
+import local.jiege.hook.xpan.XpanLiveFeature;
 
 /**
  * Keeps the live-photo video slot readable after the process has been through GR.
@@ -56,7 +57,7 @@ import local.jiege.hook.common.Symbols;
  */
 public final class GrPreviewStreamRestore {
     private static final String TAG = "RicohGrPort";
-    private static final long REARM_DELAY_MS = 1500;
+    private static final long REARM_DELAY_MS = 300;
 
     /**
      * Shares {@code persist.omnicam.aura.livetable} with GrMasterLiveLutRestore, opt-in since
@@ -98,13 +99,31 @@ public final class GrPreviewStreamRestore {
     /** Invalidates an older master/XPAN task whenever a newer refresh arrives. */
     private static final AtomicLong rearmGeneration = new AtomicLong();
 
+    /**
+     * Incremented after a re-arm's {@code e(1,2,"common")} has actually completed -- i.e. after
+     * {@code Lut3dDataManager.c} was washed back to the palette table. XpanLiveFeature watches
+     * this counter: a BasicTone GL texture built from the pre-wash manager.c keeps serving the
+     * stale table forever, so its ensure-path rebuilds the texture whenever the counter moves.
+     */
+    public static final AtomicLong paletteWashes = new AtomicLong();
+
+    /**
+     * r424: defensive copy of the verified clean-env XPAN BasicTone table (basicHash
+     * -881252736 on r423 probes), published by the re-arm right after e(1,0,"xpan") returns.
+     * manager.c is natively re-computed in place (r423 saw it flip between -881252736 and
+     * cb792680 within milliseconds), so texture builders must NOT read manager.c live --
+     * they snapshot this copy instead.
+     */
+    public static volatile float[] cleanXpanTable;
+    public static volatile int cleanXpanTableSize;
+
     private GrPreviewStreamRestore() {}
 
     static boolean inMasterMode() {
         return "professional".equals(currentMode);
     }
 
-    private static boolean inXpanMode() {
+    static boolean inXpanMode() {
         return "xpan".equals(currentMode);
     }
 
@@ -172,12 +191,30 @@ public final class GrPreviewStreamRestore {
 
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         if (Boolean.TRUE.equals(rearming.get())) return;
-                        if (!leftGr || GrState.isGrMode()) return;
+                        if (GrState.isGrMode()) return;
                         if (!(param.args[0] instanceof Integer) || (Integer) param.args[0] != 1) return;
                         if (!(param.args[1] instanceof Integer) || (Integer) param.args[1] != 0) return;
                         String name = param.args[2] == null ? "" : String.valueOf(param.args[2]);
                         boolean xpanRefresh = inXpanMode() && "xpan".equals(name);
                         if (!xpanRefresh) return;
+                        /*
+                         * r423: the XPAN live attachment is toned by whatever manager.c holds when
+                         * the frames render. The verified-good r242 probe measured the clean-env
+                         * e(1,0,"xpan") table at basicHash=-881252736 -- that table IS the XPAN
+                         * developer. The earlier "palette" theory was a misread of the same probe:
+                         * palette (-1504930108, from e(1,2,"common")) tones XPAN frames Log-grey,
+                         * and so does any e(1,0,"xpan") recomputed on a GR/master-poisoned env.
+                         * So the re-arm no longer ends on palette: it washes the shared env with
+                         * e(1,2,"common") (restoring the fresh-process LMT state, r419 evidence)
+                         * and immediately re-issues e(1,0,"xpan") so the final manager.c is the
+                         * clean-env XPAN table, on every XPAN entry and after GR alike.
+                         *
+                         * The delay shrank from 1.5 s to 300 ms: a wash landing inside the
+                         * recording window (which starts ~2.6 s before the shutter) froze the
+                         * stream into the all-green attachment. If frames are already flowing
+                         * when the task fires, the wash is skipped entirely -- a toned-wrong
+                         * current shot is recoverable, a frozen one is not.
+                         */
                         final Object manager = param.thisObject;
                         final String from = name;
                         final String armedMode = currentMode;
@@ -188,14 +225,51 @@ public final class GrPreviewStreamRestore {
                                 // The window may have ended in another mode switch: re-check
                                 // both mode and generation before touching the env. Only the
                                 // mode that scheduled this task may consume the re-arm.
-                                if (!leftGr || GrState.isGrMode()) return;
+                                if (GrState.isGrMode()) return;
                                 if (!armedMode.equals(currentMode) || !inXpanMode()) return;
                                 if (armedGeneration != rearmGeneration.get()) return;
+                                if (XpanLiveFeature.isXpanLiveFrameFlowing()) {
+                                    Log.i(TAG, "xpan env wash skipped, live frames flowing");
+                                    return;
+                                }
                                 rearming.set(Boolean.TRUE);
-                                Object rearmed = XposedHelpers.callMethod(
+                                Object washed = XposedHelpers.callMethod(
                                     manager, "e", 1, 2, "common");
-                                Log.i(TAG, armedMode + " video slot re-armed after e(1,0,\"" + from
-                                    + "\") -> e(1,2,\"common\") = " + rearmed);
+                                Object recomputed = XposedHelpers.callMethod(
+                                    manager, "e", 1, 0, "xpan");
+                                String basicHash = "unknown";
+                                try {
+                                    Object basic = XposedHelpers.getObjectField(manager, "c");
+                                    if (basic instanceof float[]) {
+                                        basicHash = String.valueOf(
+                                            java.util.Arrays.hashCode((float[]) basic));
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                                // Published only after both e() calls returned, so watchers
+                                // rebuilding their textures always read the recomputed
+                                // clean-env XPAN table, not the transient palette state.
+                                try {
+                                    Object basic = XposedHelpers.getObjectField(manager, "c");
+                                    if (basic instanceof float[]) {
+                                        float[] table = (float[]) basic;
+                                        if (table.length > 0) {
+                                            float[] snapshot =
+                                                java.util.Arrays.copyOf(table, table.length);
+                                            cleanXpanTable = snapshot;
+                                            cleanXpanTableSize =
+                                                XposedHelpers.getIntField(manager, "t");
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                                paletteWashes.incrementAndGet();
+                                Log.i(TAG, "xpan env washed + xpan table recomputed"
+                                    + " after e(1,0,\"" + from + "\")"
+                                    + " -> e(1,2,\"common\") = " + washed
+                                    + ", e(1,0,\"xpan\") = " + recomputed
+                                    + ", basicHash=" + basicHash
+                                    + " (clean-env XPAN table expected)");
                             } catch (Throwable error) {
                                 Log.e(TAG, "video slot re-arm failed", error);
                             } finally {

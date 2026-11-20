@@ -10,8 +10,10 @@ import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -25,6 +27,8 @@ import local.jiege.hook.common.DataStore;
 import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Reflection;
 import local.jiege.hook.common.Symbols;
+import local.jiege.hook.common.SuperCall;
+import local.jiege.hook.gr.GrPreviewStreamRestore;
 
 /**
  * Restores the camera's original live-photo presenter in XPAN mode.
@@ -66,10 +70,46 @@ public final class XpanLiveFeature {
     private static final String WATERMARK_COMPOSITE = "ch.h";
     private static final String LUT_PARAMETERS = "bh.o";
     private static final String XPAN_LIVE_WATERMARK_PROPERTY = "persist.omnicam.xpan.livewm";
+    /**
+     * Opt-in for the SDR output relabel. Stock renders the XPAN live attachment HLG end to end
+     * (f2/mbPreviewHdr answers true on this build), and the r211-era verified-good files were
+     * BT.2020+HLG in both pixels and container labels. Relabeling only the MediaFormat keys to
+     * BT.709/SDR leaves HLG pixels under an SDR label, so every player gamma-decodes them and
+     * the clip plays back washed-out grey (measured S=21 against the cover's S=95, the same
+     * frame regains its colours when HLG-decoded). Default 0 keeps the stock HLG output;
+     * set 1 to restore the old relabel behaviour.
+     */
+    private static final String XPAN_LIVE_SDR_OUTPUT_PROPERTY =
+        "persist.omnicam.xpan.sdrout";
     private static final String XPAN_EIS_BYPASS_PROPERTY =
         "persist.omnicam.xpan.eisbypass";
     private static final String XPAN_EIS_GRID_PROPERTY =
         "persist.omnicam.xpan.eisgrid";
+    /**
+     * r435 A/B proof: healthy XPAN live photos are produced entirely by the native path —
+     * every capture-encoder feed carries ImageData handle 0x0 and the ch.e YUV converter
+     * never runs. gh.e2.Z2 only runs after a GR/master -> XPAN switch; it wires every
+     * preview frame into a fresh ch.e converter whose FBO colour attachment is invalid
+     * (0x8cd5 GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT), so every frame it paints encodes as
+     * a solid green clip. Default 1 keeps ImageData.l at 0 by skipping ch.e.k/l/b inside
+     * XPAN, restoring the exact native path direct XPAN uses. Set 0 to restore wiring.
+     */
+    private static final String XPAN_NO_CONV_PROPERTY = "persist.omnicam.xpan.noconv";
+    /**
+     * r437 proof: skipping Z2 outright starves the capture encoder (no video track at all)
+     * because Z2 is the ONLY frame producer on the 2D-texture branch — X2/b3 are the
+     * else-branch and never run. r435 proof: Z2's frames can never carry content because
+     * the event source texture is a dead shell after GR/master -> XPAN (bind texture=0,
+     * err=1282 for every frame of the whole session) — the GR filter chain is torn down
+     * on the switch and its output texture is deleted, yet preview events still dispatch
+     * through it. Fix (r438): redirect the frame to the hardware-buffer producers X2
+     * (HDR path) and b3 (plain YUV path) — both consume event.e.b() directly, never
+     * touch the dead texture, and are exactly what direct XPAN (which works) uses.
+     * Default 1 = redirect. Set 0 to restore stock Z2 conversion.
+     */
+    private static final String XPAN_SKIP_Z2_PROPERTY = "persist.omnicam.xpan.skipz2";
+    private static final String FRAME_SINK = "gh.i2";
+    private static final String YUV_CONVERSION_CLASS = "ch.e";
     private static final String XPAN_GYRO_KEY =
         "com.oplus.camera.gyro.value.gyrotoeis";
     private static final String BASE_MODE_NAME_FIELD = "U0";
@@ -140,10 +180,30 @@ public final class XpanLiveFeature {
     private static final ThreadLocal<String> XPAN_RENDER_STAGE = new ThreadLocal<>();
     private static final Set<String> LIVE_EIS_ROUTE_PROBES = new LinkedHashSet<>();
     private static volatile String currentCameraMode = "";
+    /**
+     * Wall clock of the last XPAN live main-frame pass. While the attachment records, frames
+     * arrive roughly every 33 ms, so a recent timestamp means the video is being rendered right
+     * now and the shared CombineLut env must not be touched (switching it mid-recording freezes
+     * the stream -- the all-green frozen attachment of r421/r422). Exposed for
+     * {@code GrPreviewStreamRestore} so its env wash can stay out of the recording window.
+     */
+    private static volatile long lastMainFrameAt;
+    /** True when an XPAN live attachment is rendering frames, i.e. the env is in active use. */
+    public static boolean isXpanLiveFrameFlowing() {
+        return System.currentTimeMillis() - lastMainFrameAt < 500L;
+    }
     private static volatile String exposureFixLogSignature = "";
     private static volatile Object livePhotoSharedDataKey;
     private static volatile String liveStateSyncLogSignature = "";
     private static volatile boolean stateMigrationChecked;
+    private static volatile int xpanConversionSkips;
+    private static volatile int xpanZ2Skips;
+    private static volatile int xpanFrameSinks;
+    private static volatile int xpanY1Calls;
+    private static volatile WeakReference<Object> xpanLivePresenterRef =
+        new WeakReference<>(null);
+    /** True between our capture-start stamp and the capture-end (wrapper 104) reset. */
+    private static volatile boolean xpanLiveCaptureActive;
     private static volatile boolean previewStageLogged;
     private static volatile boolean captureRequestLivePhotoLogged;
     private static volatile boolean captureStartedLivePhotoLogged;
@@ -170,7 +230,7 @@ public final class XpanLiveFeature {
     private static volatile boolean xpanEisBypassActive;
     private static volatile boolean videoCropFallbackLogged;
     private static volatile boolean basicToneParametersLogged;
-    private static volatile boolean basicToneTextureLogged;
+    private static volatile int basicToneTextureUploadLogs;
     private static volatile boolean basicToneTextureUnavailableLogged;
     private static volatile boolean basicToneBindingLogged;
     private static volatile boolean basicToneBindingErrorLogged;
@@ -178,6 +238,51 @@ public final class XpanLiveFeature {
     private static volatile boolean basicToneDirectShaderLogged;
     private static volatile boolean basicToneDirectFrameLogged;
     private static volatile boolean commonBasicToneBridgeLogged;
+
+    /**
+     * Value of {@link GrPreviewStreamRestore#paletteWashes} when the current renderer.s texture
+     * was built. The XPAN BasicTone GL texture holds a snapshot of {@code Lut3dDataManager.c};
+     * once a re-arm washes that array back to the palette table, any texture built earlier keeps
+     * grading frames with the stale initV2/GR table (measured 2026-11-18: Log-grey direct XPAN,
+     * green after GR). Watching the wash counter lets the ensure-path rebuild on demand.
+     */
+    /**
+     * r446: per-renderer BasicTone upload tracking. There are TWO warp-renderer instances in a
+     * session -- the preview attachment renderer (a0.i common draw) and the video pipeline
+     * renderer (gh.p3.w) -- and the r421/r424 staleness checks used a single global wash
+     * generation. Measured r445: the video-side ensure consumed the wash generation first, so
+     * the preview renderer's stock-filled stale texture (common/master palette, Log-grey on
+     * XPAN frames) was never rebuilt -- grey preview after photo->master->XPAN while captures
+     * stayed good. Keyed by renderer identity; entries are tiny and per-session.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<
+        Integer, Object[]> uploadsByRenderer = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Object[]{Long washGeneration, Object uploadedTexture} for that renderer instance. */
+
+    /**
+     * r445: failure latch for the gate-on stale rebuild. Key = wash generation combined with the
+     * current texture identity; when an attempt fails (e.g. no table data yet) the same key is not
+     * retried, so a persistent failure cannot turn into a per-frame GL upload storm.
+     */
+    private static volatile long staleRebuildFailedKey = Long.MIN_VALUE;
+    /** r445: per-frame heartbeat counter on the XPAN warp draw entry (diagnostics only). */
+    private static volatile int warpDrawProbeCalls;
+    /**
+     * r447 diagnostics: uniform enable/disable (u0.m) call counter, reset when a new XPAN
+     * session opens. Measured r446: the a0.i heartbeat fired only for capture frames, so a
+     * grey second-session preview produced no probe data at all. This census watches who
+     * raises uNeedBasicTone during plain preview.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong uniformProbeCalls =
+        new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong interestingUniformCalls =
+        new java.util.concurrent.atomic.AtomicLong();
+    /** r447 diagnostics: per-entry draw census, keyed "class.method#args". */
+    private static final java.util.concurrent.ConcurrentHashMap<String, long[]> drawCensus =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    /** r424: published for the pre-seed called from GrMasterLiveLutDiagnostic's task hook. */
+    private static volatile Class<?> installedGlRenderer;
+    private static volatile Class<?> installedManagerHolder;
     private static volatile boolean watermarkCopyLogged;
     private static volatile boolean watermarkCopyErrorLogged;
     private static volatile boolean watermarkCompositeLogged;
@@ -232,6 +337,9 @@ public final class XpanLiveFeature {
         final boolean rendererLut;
         final boolean rendererRNull;
         final boolean rendererSNull;
+        final boolean eisBypassOn;
+        final boolean eisEnabledOn;
+        volatile int drawTargetId;
         int commonDraws;
         int warpDraws;
         int subVideoCalls;
@@ -266,7 +374,9 @@ public final class XpanLiveFeature {
             boolean rendererHdr,
             boolean rendererLut,
             boolean rendererRNull,
-            boolean rendererSNull
+            boolean rendererSNull,
+            boolean eisBypassOn,
+            boolean eisEnabledOn
         ) {
             this.sequence = sequence;
             this.pictureId = pictureId;
@@ -286,6 +396,8 @@ public final class XpanLiveFeature {
             this.rendererLut = rendererLut;
             this.rendererRNull = rendererRNull;
             this.rendererSNull = rendererSNull;
+            this.eisBypassOn = eisBypassOn;
+            this.eisEnabledOn = eisEnabledOn;
         }
     }
 
@@ -321,6 +433,11 @@ public final class XpanLiveFeature {
             Log.e(TAG, "XPAN live EIS grid route diagnostics unavailable", error);
         }
         try {
+            hookXpanSessionLifecycleProbes(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN session lifecycle probes unavailable", error);
+        }
+        try {
             hookXpanGyroFallback(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN synthetic gyro fallback unavailable", error);
@@ -336,6 +453,11 @@ public final class XpanLiveFeature {
             Log.e(TAG, "XPAN live BasicTone binding unavailable", error);
         }
         try {
+            hookXpanDrawCensus(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN draw census unavailable", error);
+        }
+        try {
             hookXpanLiveWatermarkCopy(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN live watermark copy unavailable", error);
@@ -344,6 +466,23 @@ public final class XpanLiveFeature {
             hookXpanLiveLutDiagnostics(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN live LUT diagnostics unavailable", error);
+        }
+        if (propertyStr("persist.omnicam.xpan.filterprobe", "").equals("1")) {
+            try {
+                hookXpanFilterProbe(classLoader);
+            } catch (Throwable error) {
+                Log.e(TAG, "XPAN filter probe unavailable", error);
+            }
+        } else {
+            /*
+             * r456: the r453 filter probe hooks are opt-in now. The grey-preview rounds
+             * started exactly when this probe shipped (r449 = no grey across heavy switch
+             * testing, r453 = grey on direct XPAN entry), so the probe itself is a suspect;
+             * default it off until the bright-preview regression is closed. Re-enable with
+             * `setprop persist.omnicam.xpan.filterprobe 1` + force-stop when chasing the
+             * XPAN filter-to-video task.
+             */
+            Log.i(TAG, "XPAN filter probe left off (persist.omnicam.xpan.filterprobe!=1)");
         }
         try {
             hookXpanLiveSdrOutput(classLoader);
@@ -359,6 +498,11 @@ public final class XpanLiveFeature {
             hookExposureWheelTouchYield(classLoader);
         } catch (Throwable error) {
             Log.e(TAG, "XPAN exposure-wheel touch yield unavailable", error);
+        }
+        try {
+            hookXpanNativeConversion(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN native conversion hook unavailable", error);
         }
         Log.i(TAG, "installed");
     }
@@ -433,10 +577,9 @@ public final class XpanLiveFeature {
                     return;
                 }
                 param.setResult(Boolean.TRUE);
-                if (!supportOverrideLogged) {
-                    supportOverrideLogged = true;
-                    Log.i(TAG, "XPAN live photo support gate opened");
-                }
+                /* r442: per-event visibility — stock may re-query between captures. */
+                Log.i(TAG, "XPAN live photo support gate opened, mode="
+                    + presenterMode(param.thisObject));
             }
         });
 
@@ -456,10 +599,10 @@ public final class XpanLiveFeature {
                     return;
                 }
                 param.setResult(Boolean.TRUE);
-                if (!eligibilityOverrideLogged) {
-                    eligibilityOverrideLogged = true;
-                    Log.i(TAG, "XPAN live photo eligibility gate opened");
-                }
+                /* r442: per-event visibility — stock may re-query between captures. */
+                Log.i(TAG, "XPAN live photo eligibility gate opened, mode="
+                    + presenterMode(param.thisObject)
+                    + ", arg=" + param.args[0]);
             }
         });
 
@@ -657,14 +800,12 @@ public final class XpanLiveFeature {
                         return;
                     }
                     XposedHelpers.setBooleanField(requestTag, "t1", true);
-                    if (!captureRequestLivePhotoLogged) {
-                        captureRequestLivePhotoLogged = true;
-                        Log.i(TAG, "XPAN capture request live photo t1=false -> true"
-                            + ", x=" + XposedHelpers.getBooleanField(requestTag, "x")
-                            + ", d1=" + XposedHelpers.getBooleanField(requestTag, "d1")
-                            + ", multiBurstIndex="
-                            + XposedHelpers.getIntField(requestTag, "V1"));
-                    }
+                    /* r442: per-capture visibility — the once flag blinded shot 2+. */
+                    Log.i(TAG, "XPAN capture request live photo t1=false -> true"
+                        + ", x=" + XposedHelpers.getBooleanField(requestTag, "x")
+                        + ", d1=" + XposedHelpers.getBooleanField(requestTag, "d1")
+                        + ", multiBurstIndex="
+                        + XposedHelpers.getIntField(requestTag, "V1"));
                 } catch (Throwable error) {
                     Log.e(TAG, "XPAN capture request live photo stamp failed", error);
                 }
@@ -692,15 +833,17 @@ public final class XpanLiveFeature {
                         return;
                     }
                     XposedHelpers.setBooleanField(requestTag, "t1", true);
-                    if (!captureStartedLivePhotoLogged) {
-                        captureStartedLivePhotoLogged = true;
-                        Log.i(TAG, "XPAN capture started live photo t1=false -> true"
-                            + ", stage=" + XposedHelpers.getIntField(event, "w")
-                            + ", x=" + XposedHelpers.getBooleanField(requestTag, "x")
-                            + ", d1=" + XposedHelpers.getBooleanField(requestTag, "d1")
-                            + ", multiBurstIndex="
-                            + XposedHelpers.getIntField(requestTag, "V1"));
-                    }
+                    /* r443: fresh frame budget per shot — see resetLivePhotoFrameBudget. */
+                    xpanLivePresenterRef = new WeakReference<>(param.thisObject);
+                    xpanLiveCaptureActive = true;
+                    resetLivePhotoFrameBudget(param.thisObject, "capture-start");
+                    /* r442: per-capture visibility — the once flag blinded shot 2+. */
+                    Log.i(TAG, "XPAN capture started live photo t1=false -> true"
+                        + ", stage=" + XposedHelpers.getIntField(event, "w")
+                        + ", x=" + XposedHelpers.getBooleanField(requestTag, "x")
+                        + ", d1=" + XposedHelpers.getBooleanField(requestTag, "d1")
+                        + ", multiBurstIndex="
+                        + XposedHelpers.getIntField(requestTag, "V1"));
                 } catch (Throwable error) {
                     Log.e(TAG, "XPAN capture started live photo stamp failed", error);
                 }
@@ -793,6 +936,16 @@ public final class XpanLiveFeature {
         currentCameraMode = mode;
         Log.i(TAG, "XPAN exposure scope mode " + previous
             + " -> " + mode + ", source=" + source);
+        if (XPAN_MODE.equals(mode) && !XPAN_MODE.equals(previous)) {
+            // r457: each XPAN visit may inherit a foreign 64^3 table in gl.s field o
+            // (every mode pushes its own via s.r on entry, XPAN does not), so re-arm the
+            // wash-time repair regardless of what the last push contained.
+            previewRepairHash = 0;
+            // r447: per-session diagnostics reset so probes never blind-fold a second visit.
+            uniformProbeCalls.set(0);
+            interestingUniformCalls.set(0);
+            drawCensus.clear();
+        }
     }
 
     private static int property(String name, int fallback) {
@@ -801,6 +954,17 @@ public final class XpanLiveFeature {
             String value = (String) type.getMethod("get", String.class).invoke(null, name);
             return value == null || value.isEmpty()
                 ? fallback : Integer.parseInt(value.trim());
+        } catch (Throwable error) {
+            return fallback;
+        }
+    }
+
+    /** r456: string-valued variant for mode-switching switches without a rebuild. */
+    private static String propertyStr(String name, String fallback) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            String value = (String) type.getMethod("get", String.class).invoke(null, name);
+            return value == null || value.isEmpty() ? fallback : value.trim();
         } catch (Throwable error) {
             return fallback;
         }
@@ -831,11 +995,21 @@ public final class XpanLiveFeature {
                     param.setResult(Boolean.FALSE);
                     return;
                 }
+                /*
+                 * r428: split the merged gate so each rejection is individually observable.
+                 * The r427 logs were blind here -- a merged condition plus a once log flag
+                 * left no way to tell whether the bypass never activated or activated late.
+                 */
                 if (param.hasThrowable()
                     || !XPAN_MODE.equals(currentCameraMode)
                     || !isLivePhotoStoredOn(presenter)
                     || property(XPAN_EIS_BYPASS_PROPERTY, 1) == 0) {
                     xpanEisBypassActive = false;
+                    logLiveEisRouteOnce(
+                        "bypass-gate|" + liveEisRouteMode() + "|" + bypassGateReason(param, presenter),
+                        "XPAN live EIS bypass gate rejected"
+                            + ", reason=" + bypassGateReason(param, presenter)
+                            + ", mode=" + liveEisRouteMode());
                     return;
                 }
                 try {
@@ -843,6 +1017,10 @@ public final class XpanLiveFeature {
                         XposedHelpers.callStaticMethod(featureFlags, "f");
                     if (!Boolean.TRUE.equals(eisEnabled)) {
                         xpanEisBypassActive = false;
+                        logLiveEisRouteOnce(
+                            "bypass-eis-off|" + liveEisRouteMode(),
+                            "XPAN live EIS bypass inactive, stock eis disabled (f=false)"
+                                + ", mode=" + liveEisRouteMode());
                         return;
                     }
                     boolean stockBypass = Boolean.TRUE.equals(param.getResult());
@@ -863,6 +1041,200 @@ public final class XpanLiveFeature {
             }
         });
         Log.i(TAG, "XPAN live EIS bypass armed");
+    }
+
+    /**
+     * Keeps XPAN live photos on the native encoding path by neutralising the ch.e YUV
+     * converter that gh.e2.Z2 wires in after a GR/master -> XPAN switch. r435 proved the
+     * healthy path (direct XPAN) never touches this converter — every capture-encoder
+     * ImageData carries handle 0x0 — while the rewired path feeds the encoder frames
+     * produced by a converter whose FBO colour attachment is invalid (0x8cd5), which
+     * encodes as solid green. Skipping ch.e.k/l/b inside XPAN leaves ImageData.l at 0,
+     * exactly like the healthy path. Other modes are untouched.
+     */
+    private static void hookXpanNativeConversion(ClassLoader classLoader) {
+        final Class<?> conversion = XposedHelpers.findClass(
+            YUV_CONVERSION_CLASS, classLoader);
+        XC_MethodHook skipHook = new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (!XPAN_MODE.equals(currentCameraMode)
+                    || property(XPAN_NO_CONV_PROPERTY, 1) == 0) {
+                    return;
+                }
+                param.setResult(
+                    "b".equals(param.method.getName()) ? Long.valueOf(0L) : null);
+                int skips = ++xpanConversionSkips;
+                if (skips <= 3 || skips % 120 == 0) {
+                    Log.i(TAG, "XPAN YUV converter call skipped"
+                        + ", method=" + param.method.getName()
+                        + ", mode=" + currentCameraMode
+                        + ", skipCount=" + skips
+                        + " (set persist.omnicam.xpan.noconv=0 to restore stock)");
+                }
+            }
+        };
+        // Exact signatures only: ch.e also has b([I) which must not be touched.
+        XposedBridge.hookMethod(XposedHelpers.findMethodExact(conversion, "k",
+            XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader)), skipHook);
+        XposedBridge.hookMethod(XposedHelpers.findMethodExact(conversion, "l",
+            android.hardware.HardwareBuffer.class), skipHook);
+        XposedBridge.hookMethod(XposedHelpers.findMethodExact(conversion, "b",
+            float.class, float.class, int.class,
+            boolean.class, boolean.class, float[].class), skipHook);
+        Log.i(TAG, "XPAN native conversion bypass armed (noconv)");
+
+        /*
+         * r438: redirect instead of skip. Z2 is the only producer on the 2D-texture
+         * branch, so returning null starves the encoder (r437: no video track at all).
+         * Replicate Y1's native dispatch for an OES source: X2 only when its gates pass
+         * (s3 && !M0 && p1 != null && W0 && fh.a.a&0x800000 — checked here so X2's own
+         * failure path, which posts an error runnable per frame, is never entered),
+         * otherwise b3. b3 falls back to X2 failure. Both consume event.e.b() directly.
+         */
+        XC_MethodHook z2SkipHook = new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (!XPAN_MODE.equals(currentCameraMode)
+                    || property(XPAN_SKIP_Z2_PROPERTY, 1) == 0
+                    || param.args.length != 7) {
+                    return;
+                }
+                Object event = param.args[0];
+                String bufferState = "n/a";
+                try {
+                    Object holder = XposedHelpers.getObjectField(event, "e");
+                    Object buffer = holder == null
+                        ? null : XposedHelpers.callMethod(holder, "b");
+                    if (buffer instanceof android.hardware.HardwareBuffer) {
+                        android.hardware.HardwareBuffer hb =
+                            (android.hardware.HardwareBuffer) buffer;
+                        bufferState = hb.getWidth() + "x" + hb.getHeight()
+                            + ",fmt=" + hb.getFormat()
+                            + (hb.isClosed() ? ",closed" : "");
+                    } else {
+                        bufferState = "null";
+                    }
+                } catch (Throwable error) {
+                    bufferState = "err:" + error.getClass().getSimpleName();
+                }
+                Object redirected = null;
+                String via = "none";
+                if (x2GateOpen(param.thisObject)) {
+                    try {
+                        redirected = XposedHelpers.callMethod(
+                            param.thisObject, "X2", param.args);
+                        if (redirected != null) via = "X2";
+                    } catch (Throwable error) {
+                        Log.i(TAG, "XPAN Z2 redirect X2 failed: " + error);
+                    }
+                }
+                if (redirected == null) {
+                    try {
+                        redirected = XposedHelpers.callMethod(
+                            param.thisObject, "b3", param.args);
+                        if (redirected != null) via = "b3";
+                    } catch (Throwable error) {
+                        Log.i(TAG, "XPAN Z2 redirect b3 failed: " + error);
+                    }
+                }
+                param.setResult(redirected);
+                int skips = ++xpanZ2Skips;
+                if (skips <= 3 || skips % 120 == 0) {
+                    Log.i(TAG, "XPAN Z2 frame path redirected"
+                        + ", via=" + via
+                        + ", buffer=" + bufferState
+                        + ", mode=" + currentCameraMode
+                        + ", count=" + skips
+                        + " (set persist.omnicam.xpan.skipz2=0 to restore stock)");
+                }
+            }
+        };
+        XposedBridge.hookAllMethods(
+            XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader),
+            "Z2", z2SkipHook);
+        Log.i(TAG, "XPAN Z2 frame path bypass armed (redirect X2/b3)");
+
+        /*
+         * Observe the single downstream fan-out for all three ImageData producers
+         * (gh/i2.k). After the Z2 skip this tells us whether X2/b3 really took over the
+         * frame source and which handle they carry.
+         */
+        XposedBridge.hookAllMethods(
+            XposedHelpers.findClass(FRAME_SINK, classLoader),
+            "k", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)
+                        || param.args.length != 1
+                        || param.args[0] == null) {
+                        return;
+                    }
+                    int sinks = ++xpanFrameSinks;
+                    if (sinks <= 3 || sinks % 120 == 0) {
+                        Object image = param.args[0];
+                        Object handle = "n/a";
+                        try {
+                            handle = XposedHelpers.getLongField(image, "l");
+                        } catch (Throwable ignored) {
+                            // not the video ImageData subclass
+                        }
+                        Log.i(TAG, "XPAN frame sink"
+                            + ", image=" + Integer.toHexString(
+                                System.identityHashCode(image))
+                            + ", l=" + handle
+                            + ", sinkCount=" + sinks);
+                    }
+                }
+            });
+        Log.i(TAG, "XPAN frame sink probe armed");
+    }
+
+    /*
+     * Mirror of Y1's dispatch (dex 0x0535-0x055d) plus X2's own internal gate: X2 only
+     * produces an ImageData when s3() && p1 != null && W0 && (fh.a.a & 0x800000) != 0;
+     * when the gate fails it returns null AND posts an error runnable, so the gate is
+     * evaluated here first and b3 (ungated, plain YUV buffer path) handles the rest.
+     */
+    private static boolean x2GateOpen(Object presenter) {
+        try {
+            if (!(Boolean) XposedHelpers.callMethod(presenter, "s3")) return false;
+            Object p1 = XposedHelpers.getObjectField(presenter, "p1");
+            if (p1 == null) return false;
+            if (!(Boolean) XposedHelpers.getBooleanField(presenter, "W0")) return false;
+            int flags = XposedHelpers.getStaticIntField(
+                XposedHelpers.findClass("fh.a", presenter.getClass().getClassLoader()), "a");
+            return (flags & 0x800000) != 0;
+        } catch (Throwable error) {
+            Log.i(TAG, "XPAN X2 gate check failed: " + error);
+            return false;
+        }
+    }
+
+    private static String bypassGateReason(
+        XC_MethodHook.MethodHookParam param,
+        Object presenter
+    ) {
+        if (param.hasThrowable()) return "throwable";
+        if (!XPAN_MODE.equals(currentCameraMode)) return "mode";
+        if (!isLivePhotoStoredOn(presenter)) return "liveOff";
+        return "property";
+    }
+
+    /** Post-delegation status logging for the guarded EIS processor entry (see f hook). */
+    private static void logEisProcessorStatus(
+        XC_MethodHook.MethodHookParam param,
+        Object result
+    ) {
+        if (param.args.length != 1) return;
+        int status = result instanceof Number
+            ? ((Number) result).intValue() : Integer.MIN_VALUE;
+        Object grid = safeObjectField(param.thisObject, "x");
+        logLiveEisRouteOnce(
+            "processor-status|" + liveEisRouteMode() + "|" + status
+                + "|gridNull=" + (grid == null),
+            "XPAN live EIS route processor"
+                + ", mode=" + liveEisRouteMode()
+                + ", status=" + status
+                + ", gridNull=" + (grid == null)
+                + ", input=" + (param.args[0] == null ? "null" : "present"));
     }
 
     /**
@@ -919,31 +1291,55 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(processor, "f", new XC_MethodHook() {
-            @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args.length != 1
-                    || !XPAN_MODE.equals(currentCameraMode)
-                    || !xpanEisBypassActive) {
-                    return;
+        /*
+         * r438/r439 crash postmortem: after a GR -> XPAN switch the EIS processor init
+         * (gh.g.c) skips mesh allocation when the bypass flag was on, leaving
+         * gh.g.x == null. Frame sends take f's early-exit paths (150/101) which never
+         * touch the mesh, and the video comes out fine. When the flag flips at capture
+         * completion, the next f call reaches the deep path at offset 0x0377 which reads
+         * this.x.e unconditionally -> NPE -> EISProcessorThread dies -> camera process
+         * killed -> next shutter press dead. r439 skipped the meta send (e8) but the
+         * per-frame send (f8) and the VEP pipeline (gh.p3.o) call f as well, so the
+         * process still died after the first capture.
+         * Replace f with a guarded delegation: natural return values are preserved
+         * exactly (f8 dispatches on 150/101/-100), and only an NPE thrown while the
+         * mesh is null is downgraded to 101, the wrapper's normal "processed" status.
+         */
+        final Class<?> imageDataParam =
+            XposedHelpers.findClass(IMAGE_DATA, processor.getClassLoader());
+        try {
+            final Method fMethod = SuperCall.pin(
+                processor.getDeclaredMethod("f", imageDataParam));
+            XposedBridge.hookMethod(fMethod, new XC_MethodReplacement() {
+                @Override protected Object replaceHookedMethod(MethodHookParam param)
+                        throws Throwable {
+                    if (param.args.length == 1
+                        && XPAN_MODE.equals(currentCameraMode)
+                        && xpanEisBypassActive) {
+                        ensureEisMetadataQueue(param.thisObject, "before-frame");
+                    }
+                    try {
+                        Object result = XposedBridge.invokeOriginalMethod(
+                            fMethod, param.thisObject, param.args);
+                        logEisProcessorStatus(param, result);
+                        return result;
+                    } catch (Throwable error) {
+                        if (error instanceof NullPointerException
+                            && XPAN_MODE.equals(currentCameraMode)
+                            && safeObjectField(param.thisObject, "x") == null) {
+                            logLiveEisRouteOnce(
+                                "processor-npe-swallowed",
+                                "XPAN live EIS processor NPE swallowed, mesh null"
+                                    + " (returned 101, prevents process crash)");
+                            return 101;
+                        }
+                        throw error;
+                    }
                 }
-                ensureEisMetadataQueue(param.thisObject, "before-frame");
-            }
-
-            @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (param.args.length != 1 || param.hasThrowable()) return;
-                int status = param.getResult() instanceof Number
-                    ? ((Number) param.getResult()).intValue() : Integer.MIN_VALUE;
-                Object grid = safeObjectField(param.thisObject, "x");
-                logLiveEisRouteOnce(
-                    "processor-status|" + liveEisRouteMode() + "|" + status
-                        + "|gridNull=" + (grid == null),
-                    "XPAN live EIS route processor"
-                        + ", mode=" + liveEisRouteMode()
-                        + ", status=" + status
-                        + ", gridNull=" + (grid == null)
-                        + ", input=" + (param.args[0] == null ? "null" : "present"));
-            }
-        });
+            });
+        } catch (NoSuchMethodException error) {
+            Log.e(TAG, "XPAN live EIS processor f pin failed", error);
+        }
 
         XposedBridge.hookAllMethods(wrapper, "f8", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -951,8 +1347,44 @@ public final class XpanLiveFeature {
             }
         });
         XposedBridge.hookAllMethods(wrapper, "e8", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                /*
+                 * r441 postmortem (supersedes the r439/r440 skip): "sendMetaToEis" is the
+                 * ONLY place that closes the cached CaptureResult handles (offsets 0x015d
+                 * and 0x016c), posts the gh/m completion callback (0x019a) and logs
+                 * "sendMetaToEis, finish" (0x01b0). Skipping the whole method when the
+                 * mesh is null (r439/r440) therefore leaks every cached result handle and
+                 * never posts the completion -> the capture session hangs and the next
+                 * shutter press is dead (r440 eisgrid=0 test, pid 23375, 07:34). The mesh
+                 * itself is only read at 0x0132/0x0134 (ImageData.e(grid)) and that call
+                 * tolerates a null argument, and gh.g.f's mesh NPE is contained by the
+                 * protected-delegation hook below (swallow -> 101, a status the healthy
+                 * meta sequence itself produces). So e8 must always run natively in XPAN.
+                 */
+                if (!XPAN_MODE.equals(currentCameraMode) || param.args == null) {
+                    return;
+                }
+                Object processor = safeObjectField(param.thisObject, "g");
+                if (processor != null && safeObjectField(processor, "x") == null) {
+                    logLiveEisRouteOnce(
+                        "meta-null-mesh-observed",
+                        "XPAN live EIS meta send running with mesh null"
+                            + " (native run, f NPE contained by protected delegation)");
+                }
+            }
+
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 logEisWrapperState(param, "meta");
+                /* r443: 104 = capture finished; release the frame budget again. */
+                if (!param.hasThrowable()) {
+                    Object status = safeObjectField(param.thisObject, "q");
+                    if (status instanceof Number
+                        && ((Number) status).intValue() == 104) {
+                        xpanLiveCaptureActive = false;
+                        resetLivePhotoFrameBudget(
+                            xpanLivePresenterRef.get(), "capture-end");
+                    }
+                }
             }
         });
         XposedBridge.hookAllMethods(wrapper, "c8", new XC_MethodHook() {
@@ -976,6 +1408,21 @@ public final class XpanLiveFeature {
                 if (param.args.length != 1
                     || (param.args[0] != null
                         && !gridData.isInstance(param.args[0]))) {
+                    return;
+                }
+                /*
+                 * r441: with the EIS processor bypassed (mesh null) sendMetaToEis still
+                 * calls ImageData.e(grid) at offset 0x0134 with whatever gh.g.x holds —
+                 * null in XPAN. The stock method is only ever exercised with a real grid
+                 * upstream, so guard the null case here instead of risking a second NPE
+                 * inside the data class; the ImageData simply keeps its previous grid.
+                 */
+                if (param.args[0] == null) {
+                    param.setResult(null);
+                    logLiveEisRouteOnce(
+                        "grid-copy-null-skip|" + liveEisRouteMode(),
+                        "XPAN live EIS route grid copy skipped, inputGridNull=true"
+                            + ", mode=" + liveEisRouteMode());
                     return;
                 }
                 Object grid = param.args[0];
@@ -1015,6 +1462,134 @@ public final class XpanLiveFeature {
 
         Log.i(TAG, "XPAN live EIS grid route diagnostics armed"
             + ", forceWarp=" + (property(XPAN_EIS_GRID_PROPERTY, 0) != 0));
+    }
+
+    /**
+     * r442: map the live-photo session lifecycle around multi-capture. Y1's heartbeat tells
+     * whether the frame event stream itself dies after the first capture; G3/H3/I3 are the
+     * presenter's session close/toggle entries and their post-capture call order shows where
+     * stock stops re-arming the XPAN live session (the frame path died after capture 1 in
+     * every r438-r441 session while encoder feeds kept running).
+     */
+    private static void hookXpanSessionLifecycleProbes(ClassLoader classLoader) {
+        Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+
+        XposedBridge.hookAllMethods(presenter, "Y1", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (!XPAN_MODE.equals(currentCameraMode)) return;
+                xpanLivePresenterRef = new WeakReference<>(param.thisObject);
+                int calls = ++xpanY1Calls;
+                /*
+                 * r443 test follow-up (5/5 shots OK): between captures the pending
+                 * counters keep growing (frames are never closed in the redirect path)
+                 * and ~12s of idle preview is enough to re-arm the intercept flag
+                 * (h1=276, intercept=true at 08:35:57). The next capture-start reset
+                 * disarms it again, but while armed Y1 drops preview frames and the
+                 * pre-shutter cache starves. Recharge the budget during idle preview
+                 * every ~1s so it never approaches the cap outside a capture.
+                 */
+                if (!xpanLiveCaptureActive && calls % 30 == 0
+                    && pendingCount(param.thisObject, "h1") >= 200) {
+                    resetLivePhotoFrameBudget(param.thisObject, "preview-idle");
+                }
+                if (calls <= 3 || calls % 120 == 0) {
+                    Log.i(TAG, "XPAN Y1 frame events alive, count=" + calls
+                        + ", args=" + param.args.length
+                        + ", budget=" + livePhotoFrameBudget(param.thisObject));
+                }
+            }
+        });
+
+        XposedBridge.hookAllMethods(presenter, "G3", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                Log.i(TAG, "XPAN presenter G3 called, mode=" + liveEisRouteMode()
+                    + ", args=" + java.util.Arrays.toString(param.args));
+            }
+        });
+
+        XC_MethodHook toggleProbe = new XC_MethodHook() {
+            private volatile int calls;
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                int n = ++calls;
+                if (n <= 3 || n % 60 == 0) {
+                    Log.i(TAG, "XPAN presenter session toggle, method="
+                        + (param.method != null ? param.method.getName() : "?")
+                        + ", args=" + java.util.Arrays.toString(param.args)
+                        + ", mode=" + liveEisRouteMode() + ", nth=" + n);
+                }
+            }
+        };
+        XposedBridge.hookAllMethods(presenter, "H3", toggleProbe);
+        XposedBridge.hookAllMethods(presenter, "I3", toggleProbe);
+        Log.i(TAG, "XPAN session lifecycle probes armed");
+    }
+
+    /** Pending live-photo frame counts (gh.e2 h1/i1/j1) plus the intercept flag state. */
+    private static String livePhotoFrameBudget(Object presenter) {
+        if (presenter == null) return "no-presenter";
+        try {
+            Object intercept = safeObjectField(presenter, "V1");
+            int h = pendingCount(presenter, "h1");
+            int i = pendingCount(presenter, "i1");
+            int j = pendingCount(presenter, "j1");
+            int high = XposedHelpers.getIntField(presenter, "Y1");
+            return "h1=" + h + ", i1=" + i + ", j1=" + j
+                + ", highWater=" + high
+                + ", intercept=" + intercept;
+        } catch (Throwable error) {
+            return "unreadable(" + error.getClass().getSimpleName() + ")";
+        }
+    }
+
+    private static int pendingCount(Object presenter, String field) {
+        Object counter = safeObjectField(presenter, field);
+        if (counter == null) return -1;
+        Object value = XposedHelpers.callMethod(counter, "get");
+        return value instanceof Number ? ((Number) value).intValue() : -1;
+    }
+
+    /*
+     * r443 root cause (r442 instrumentation, session 412119dd 08:07): Y1's live-photo
+     * pending-frame counters gh.e2.h1/i1/j1 are drained by close listeners (gh.m1 /
+     * gh.n1 / gh.p1) that fire when the produced ImageData is closed. With the r438
+     * Z2->b3 redirect the frames are encoded fine but never closed, so the counters
+     * grow monotonically from session creation (08:07:52 totalFrameCount=314 = every
+     * frame since session start). Once the sum crosses Y1's intercept cap (275, or 145
+     * once armed) during a capture, Y1 enters intercept mode (V1=true) and DROPS frames
+     * ("checkInterceptCacheFrame, intercept cap") -> the recording starves (shot 2:
+     * 46 frames / 1.865s instead of a full 3.2s), the pipeline wedges and every later
+     * shutter press dies in CaptureProcessor.changeCaptureState
+     * ("failed after raising event" -> "Interval limit denied"). Until the close path
+     * is understood, reset the counters and the intercept flag at every capture
+     * start/end so each shot gets a fresh full budget.
+     */
+    private static void resetLivePhotoFrameBudget(Object presenter, String phase) {
+        if (presenter == null) return;
+        try {
+            int h = pendingCount(presenter, "h1");
+            int i = pendingCount(presenter, "i1");
+            int j = pendingCount(presenter, "j1");
+            if (h == 0 && i == 0 && j == 0
+                && !XposedHelpers.getBooleanField(presenter, "V1")) {
+                return;
+            }
+            for (String field : new String[]{"h1", "i1", "j1"}) {
+                Object counter = safeObjectField(presenter, field);
+                if (counter != null) {
+                    XposedHelpers.callMethod(counter, "set", 0);
+                }
+            }
+            XposedHelpers.setIntField(presenter, "Y1", 0);
+            XposedHelpers.setBooleanField(presenter, "V1", false);
+            XposedHelpers.setIntField(presenter, "l1", 0);
+            XposedHelpers.setIntField(presenter, "m1", 0);
+            XposedHelpers.setLongField(presenter, "W1", 0);
+            Log.i(TAG, "XPAN live photo frame budget reset at " + phase
+                + " (was h1=" + h + ", i1=" + i + ", j1=" + j + ")");
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live photo frame budget reset failed at " + phase, error);
+        }
     }
 
     /**
@@ -1255,12 +1830,25 @@ public final class XpanLiveFeature {
         Object imageData
     ) {
         if (!XPAN_MODE.equals(currentCameraMode)) return;
+        long frameNow = System.currentTimeMillis();
+        /*
+         * r428: live recording starts ~2.6s before the shutter, so the first frame of a new
+         * capture arrives well before the capture-started callback. Detect the frame-flow
+         * gap and reset the once-per-capture diagnostic state there: the once log flags
+         * otherwise stay consumed after the first capture and every later capture in the
+         * same session renders blind (the r423-r427 log analysis trap).
+         */
+        if (frameNow - lastMainFrameAt > 3000L) {
+            resetXpanLiveCaptureDiagnostics();
+        }
+        lastMainFrameAt = frameNow;
         Object previous = XPAN_MAIN_FRAME.get();
         param.setObjectExtra("xpanMainFramePrevious", previous);
         try {
             Object metadata = XposedHelpers.getObjectField(imageData, "f");
             Object renderer = XposedHelpers.getObjectField(pipeline, "w");
             Object directGrid = XposedHelpers.getObjectField(imageData, "o");
+            boolean eisEnabledOn = readLiveEisEnabled(pipeline);
             XpanMainFrame frame = new XpanMainFrame(
                 ++mainFrameSequence,
                 readMetadataLong(metadata, "image_picture_id"),
@@ -1279,7 +1867,9 @@ public final class XpanLiveFeature {
                 renderer != null && XposedHelpers.getBooleanField(renderer, "o"),
                 renderer != null && XposedHelpers.getBooleanField(renderer, "q"),
                 renderer == null || XposedHelpers.getObjectField(renderer, "r") == null,
-                renderer == null || XposedHelpers.getObjectField(renderer, "s") == null
+                renderer == null || XposedHelpers.getObjectField(renderer, "s") == null,
+                xpanEisBypassActive,
+                eisEnabledOn
             );
             XPAN_MAIN_FRAME.set(frame);
             param.setObjectExtra("xpanMainFrame", frame);
@@ -1289,6 +1879,68 @@ public final class XpanLiveFeature {
                 mainFrameDiagnosticErrorLogged = true;
                 Log.e(TAG, "XPAN main frame capture failed", error);
             }
+        }
+    }
+
+    /**
+     * Clear the once-per-capture diagnostic state at the start of every new live capture so
+     * later captures in the same session stay observable. UI/menu one-shot flags stay
+     * untouched; only capture-scoped probes reset.
+     */
+    private static void resetXpanLiveCaptureDiagnostics() {
+        synchronized (LIVE_EIS_ROUTE_PROBES) {
+            LIVE_EIS_ROUTE_PROBES.clear();
+        }
+        captureRequestLivePhotoLogged = false;
+        captureStartedLivePhotoLogged = false;
+        supportProbeLogged = false;
+        eligibilityProbeLogged = false;
+        supportOverrideLogged = false;
+        eligibilityOverrideLogged = false;
+        resumeOverrideLogged = false;
+        gyroFallbackLogged = false;
+        eisBypassLogged = false;
+        eisMetadataQueueRepairLogged = false;
+        eisMetadataQueueRepairErrorLogged = false;
+        basicToneParametersLogged = false;
+        basicToneTextureUploadLogs = 0;
+        basicToneTextureUnavailableLogged = false;
+        basicToneBindingLogged = false;
+        basicToneBindingErrorLogged = false;
+        basicToneDirectProbeLogged = false;
+        basicToneDirectShaderLogged = false;
+        basicToneDirectFrameLogged = false;
+        commonBasicToneBridgeLogged = false;
+        /*
+         * r428b: these were the remaining once flags missed in the first pass. The r428
+         * A/B kept producing phantom differences (selected-LUT-callback "missing",
+         * transform-capture "only after GR") that were really first-capture consumption
+         * of these flags. Reset every capture-scoped probe so later captures are
+         * individually readable.
+         */
+        videoCropFallbackLogged = false;
+        liveTransformBypassLogged = false;
+        liveTransformCaptureProbeLogged = false;
+        liveTransformDrawProbeLogged = false;
+        liveTransformUploadLogged = false;
+        ordinaryLutBindLogged = false;
+        basicToneBindLogged = false;
+        selectedLutCallbackLogged = false;
+        transformCaptureCallLogged = false;
+        commonDrawSignatureLogged = false;
+        warpDrawSignatureLogged = false;
+        Log.i(TAG, "XPAN live capture diagnostics reset, mode=" + liveEisRouteMode()
+            + ", eisBypassActive=" + xpanEisBypassActive);
+    }
+
+    private static boolean readLiveEisEnabled(Object context) {
+        try {
+            Class<?> featureFlags = XposedHelpers.findClass(
+                LIVE_PHOTO_FEATURE_FLAGS, context.getClass().getClassLoader());
+            return Boolean.TRUE.equals(
+                XposedHelpers.callStaticMethod(featureFlags, "f"));
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -1328,6 +1980,9 @@ public final class XpanLiveFeature {
                     + ", rendererLut=" + frame.rendererLut
                     + ", rendererRNull=" + frame.rendererRNull
                     + ", rendererSNull=" + frame.rendererSNull
+                    + ", eisBypass=" + frame.eisBypassOn
+                    + ", eisEnabled=" + frame.eisEnabledOn
+                    + ", drawTarget=" + Integer.toHexString(frame.drawTargetId)
                     + ", throwable=" + param.hasThrowable());
             }
         }
@@ -1437,6 +2092,537 @@ public final class XpanLiveFeature {
      * attempts to upload it. The manager data and texture helper are both stock. Scope remains
      * limited to XPAN live photo, and an already bound texture is never replaced.
      */
+    /*
+     * r448 diagnostics -- r447 proved the XPAN preview never touches a0's inherited methods
+     * (census: zero preview calls, capture frames only), so the per-frame preview draw must be
+     * a method declared on ch.g itself. This pass hooks every declared ch.g method too, and
+     * moves the uniform probe from u0 (which is the TEXTURE class -- r447 mistake) to y0, the
+     * shader class that owns uNeedBasicTone. Census lines now also snapshot the renderer's
+     * BasicTone texture identity so a stale grey preview shows up right in the census.
+     */
+    /*
+     * r449 diagnostics -- r448 proved the XPAN preview calls NO method on a0 or ch.g during
+     * plain preview (census stayed at the capture frames only), so the preview renderer lives
+     * somewhere else entirely. Hook GLES20.glDrawArrays/glDrawElements instead: every Java-side
+     * GL draw must pass through them, and a short stack trace names the real preview renderer
+     * no matter which class owns it.
+     */
+    private static void hookXpanDrawCensus(ClassLoader classLoader) {
+        final Class<?> gles = android.opengl.GLES20.class;
+        for (final String entry : new String[]{"glDrawArrays", "glDrawElements"}) {
+            XposedBridge.hookAllMethods(gles, entry, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    long calls = uniformProbeCalls.incrementAndGet();
+                    if (calls <= 30) {
+                        Log.i(TAG, "XPAN gl draw probe, calls=" + calls
+                            + ", fn=" + entry
+                            + ", mode=" + (param.args.length > 0 ? param.args[0] : "?")
+                            + stackSnippet());
+                    } else if (calls % 300 == 0) {
+                        Log.i(TAG, "XPAN gl draw probe, calls=" + calls
+                            + ", fn=" + entry);
+                    }
+                }
+            });
+        }
+
+        final Class<?> shaderClass = XposedHelpers.findClass(GL_SHADER, classLoader);
+        XposedBridge.hookAllMethods(shaderClass, "m", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (!XPAN_MODE.equals(currentCameraMode)) return;
+                if (param.args.length != 2
+                    || !(param.args[0] instanceof Integer)
+                    || !(param.args[1] instanceof String)) {
+                    return;
+                }
+                String name = (String) param.args[1];
+                boolean interesting = name.contains("BasicTone")
+                    || name.contains("HdrTransform")
+                    || name.contains("Vig");
+                if (interesting) {
+                    long calls = interestingUniformCalls.incrementAndGet();
+                    if (calls <= 24 || calls % 240 == 0) {
+                        Log.i(TAG, "XPAN uniform probe"
+                            + ", icalls=" + calls
+                            + ", program=" + describeGlObject(param.thisObject)
+                            + ", index=" + param.args[0]
+                            + ", name=" + name
+                            + stackSnippet());
+                    }
+                }
+            }
+        });
+
+        final Class<?> panelRenderer = XposedHelpers.findClass(
+            "com.oplus.camera.common.gl.s", classLoader);
+        /*
+         * r451: gl.s is the XPAN PREVIEW renderer (proven by r449 glDrawArrays stacks:
+         * every preview frame runs s.o0 -> s.r0 -> {s.t -> s.g | s.q0 -> s.b}, 3 draws per
+         * frame; the other probe chains were filter-menu canvas UI). c0/d0 are its
+         * glTexImage2D texture-upload entries taking a gl.c data descriptor; o() builds the
+         * draw target. Snapshot the manager BasicTone table beside each so a grey preview
+         * can be tied to a stale upload.
+         */
+        Method[] panelTargets;
+        try {
+            panelTargets = new Method[]{
+                XposedHelpers.findMethodExact(panelRenderer, "o0",
+                    shaderClass, int.class, int.class,
+                    float.class, float.class, float.class, float.class),
+                XposedHelpers.findMethodExact(panelRenderer, "c0",
+                    XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader),
+                    int.class, int.class),
+                XposedHelpers.findMethodExact(panelRenderer, "d0",
+                    XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader),
+                    int.class, int.class, int.class),
+                XposedHelpers.findMethodExact(panelRenderer, "o",
+                    XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader)),
+            };
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN gl.s probe resolve failed", error);
+            panelTargets = new Method[0];
+        }
+        /*
+         * r456: watch the canvas's own LUT data uploads. The r456 session measured ZERO
+         * e0(slot==1) calls in a grey GR->XPAN session -- but dexdump shows THREE data
+         * setters converging on static l0(t0,size,data): e0(data,slot,size) -> HashMap u,
+         * Z(data,size,enabled) -> field n, r(data,size,enabled) -> field o. The native
+         * side feeds the preview LUT through Z/r, which the r454/r455 trackers never
+         * watched. r457 logs ALL of them (any slot) with content hash + caller stack.
+         */
+        try {
+            XposedBridge.hookAllMethods(panelRenderer, "e0", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args.length >= 3
+                        && param.args[0] instanceof float[]) {
+                        float[] data = (float[]) param.args[0];
+                        long hash = tableContentHash(data);
+                        int slot = param.args[1] instanceof Number
+                            ? ((Number) param.args[1]).intValue() : -1;
+                        int size = param.args[2] instanceof Number
+                            ? ((Number) param.args[2]).intValue() : -1;
+                        logNativeLutUpload("e0", slot, size, hash, data.length);
+                        if (slot == 1) {
+                            previewLutUploadByCanvas.put(
+                                System.identityHashCode(param.thisObject),
+                                new long[]{
+                                    GrPreviewStreamRestore.paletteWashes.get(),
+                                    hash, size});
+                            synchronized (previewNativeUploadLock) {
+                                previewNativeUploadData =
+                                    java.util.Arrays.copyOf(data, data.length);
+                                previewNativeUploadHash = hash;
+                                previewNativeUploadWash =
+                                    GrPreviewStreamRestore.paletteWashes.get();
+                            }
+                        }
+                    }
+                }
+            });
+            XC_MethodHook namedSetterHook = new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args.length >= 3
+                        && param.args[0] instanceof float[]) {
+                        float[] data = (float[]) param.args[0];
+                        long hash = tableContentHash(data);
+                        int size = param.args[1] instanceof Number
+                            ? ((Number) param.args[1]).intValue() : -1;
+                        boolean enabled = Boolean.TRUE.equals(param.args[2]);
+                        logNativeLutUpload(param.method.getName(), enabled ? 1 : 0,
+                            size, hash, data.length);
+                    }
+                }
+            };
+            XposedBridge.hookMethod(XposedHelpers.findMethodExact(
+                panelRenderer, "Z", float[].class, int.class, boolean.class),
+                namedSetterHook);
+            XposedBridge.hookMethod(XposedHelpers.findMethodExact(
+                panelRenderer, "r", float[].class, int.class, boolean.class),
+                namedSetterHook);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN preview LUT upload tracker unavailable", error);
+        }
+        for (final Method target : panelTargets) {
+            final String shortName = target.getName();
+            XposedBridge.hookMethod(target, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    if ("o0".equals(shortName)) {
+                        reuploadPreviewBasicToneIfWashed(param.thisObject);
+                        long calls = interestingUniformCalls.incrementAndGet();
+                        if (calls > 8 && calls % 300 != 0) return;
+                        Object shaderArg = param.args.length > 0 ? param.args[0] : null;
+                        StringBuilder shaders = new StringBuilder();
+                        for (String f : new String[]{"N", "O", "P", "Q", "R", "S", "T"}) {
+                            try {
+                                Object s = XposedHelpers.getObjectField(
+                                    param.thisObject, f);
+                                shaders.append(f).append('=')
+                                    .append(describeGlObject(s)).append(' ');
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        Log.i(TAG, "XPAN preview draw, calls=" + calls
+                            + ", entry=gl.s." + shortName
+                            + ", self=" + describeGlObject(param.thisObject)
+                            + ", argShader=" + describeGlObject(shaderArg)
+                            + ", shaders=[" + shaders.toString().trim() + "]"
+                            + ", manager[" + managerBasicSnapshot() + "]"
+                            + ", wash=" + GrPreviewStreamRestore.paletteWashes.get());
+                    } else {
+                        Object data = param.args.length > 0 ? param.args[0] : null;
+                        String dims = "?";
+                        try {
+                            if (data != null) {
+                                dims = "f()=" + XposedHelpers.callMethod(data, "f")
+                                    + ", c=" + XposedHelpers.getIntField(data, "c")
+                                    + ", e=" + XposedHelpers.getIntField(data, "e")
+                                    + ", f=" + XposedHelpers.getIntField(data, "f");
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        Log.i(TAG, "XPAN preview upload, entry=gl.s." + shortName
+                            + ", self=" + describeGlObject(param.thisObject)
+                            + ", data=" + describeGlObject(data) + " (" + dims + ")"
+                            + ", manager[" + managerBasicSnapshot() + "]"
+                            + ", wash=" + GrPreviewStreamRestore.paletteWashes.get());
+                    }
+                }
+            });
+        }
+
+        final Class<?> baseRenderer = XposedHelpers.findClass(GL_RENDERER, classLoader);
+        final Class<?> warpRenderer = XposedHelpers.findClass(LIVE_WARP_RENDERER, classLoader);
+        Method[][] targets = {baseRenderer.getDeclaredMethods(),
+            warpRenderer.getDeclaredMethods()};
+        for (Method[] methods : targets) {
+            for (Method method : methods) {
+                int modifiers = method.getModifiers();
+                if (java.lang.reflect.Modifier.isStatic(modifiers)
+                    || method.isSynthetic() || method.isBridge()) {
+                    continue;
+                }
+                try {
+                    XposedBridge.hookMethod(method, new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!XPAN_MODE.equals(currentCameraMode)) return;
+                            String key = param.method.getDeclaringClass().getName()
+                                + "." + param.method.getName() + "#" + param.args.length;
+                            long[] slot = drawCensus.computeIfAbsent(key, k -> new long[1]);
+                            long calls = ++slot[0];
+                            if (calls <= 2 || calls % 600 == 0) {
+                                Object renderer = param.thisObject;
+                                Object basicTone = renderer == null
+                                    ? null : XposedHelpers.getObjectField(renderer, "s");
+                                Log.i(TAG, "XPAN draw census, entry=" + key
+                                    + ", calls=" + calls
+                                    + ", self=" + describeGlObject(renderer)
+                                    + ", sTex=" + describeGlObject(basicTone));
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        Log.i(TAG, "XPAN draw census installed (r452 diagnostics)");
+    }
+
+    private static String describeGlObject(Object object) {
+        if (object == null) return "null";
+        return object.getClass().getSimpleName()
+            + "@" + Integer.toHexString(System.identityHashCode(object));
+    }
+
+    /** r451: manager BasicTone table snapshot for preview probes (cheap, log-only). */
+    private static String managerBasicSnapshot() {
+        try {
+            Object manager = XposedHelpers.getStaticObjectField(
+                installedManagerHolder, "a");
+            float[] data = (float[]) XposedHelpers.getObjectField(manager, "c");
+            int size = XposedHelpers.getIntField(manager, "t");
+            return "size=" + size
+                + ", hash=" + (data == null ? 0 : Arrays.hashCode(data));
+        } catch (Throwable error) {
+            return "unavailable(" + error.getClass().getSimpleName() + ")";
+        }
+    }
+
+    /**
+     * r453: order counter of {@code FilterPresenter.select} calls observed in XPAN.
+     */
+    private static volatile int filterSelectCalls;
+    /** r453: dedup key of the last 17^3 preview LUT logged by the filter probe. */
+    private static volatile int filterProbeLutHash;
+
+    /**
+     * r455: last canvas BasicTone upload per gl.s instance: {wash generation, content hash,
+     * size}. Keyed by identity hash; entries are tiny. See the e0 tracker note in
+     * {@code hookXpanDrawCensus}.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<Integer, long[]>
+        previewLutUploadByCanvas = new java.util.concurrent.ConcurrentHashMap<>();
+    private static volatile int previewLutReuploadLogged;
+
+    /*
+     * r456: capture of the last NATIVE gl.s slot-1 upload. The r455 session proved this
+     * content differs from manager.c (the wash push reported contentChanged=true right
+     * after a native upload), so manager.c is NOT the preview's correct table. These
+     * fields keep the native reference around for a source-selectable repair and the
+     * upload log identifies the native caller for the next investigation round.
+     */
+    private static final Object previewNativeUploadLock = new Object();
+    private static volatile float[] previewNativeUploadData;
+    private static volatile long previewNativeUploadHash;
+    private static volatile long previewNativeUploadWash = -1;
+    private static volatile int previewNativeUploadLogged;
+
+    /** r455: cheap content fingerprint of a BasicTone table (length + strided samples). */
+    private static long tableContentHash(float[] table) {
+        if (table == null) return 0;
+        long hash = table.length;
+        int stride = Math.max(1, table.length / 256);
+        for (int i = 0; i < table.length; i += stride) {
+            hash = hash * 1000003 ^ Float.floatToIntBits(table[i]);
+        }
+        return hash;
+    }
+
+    private static final java.util.Set<String> nativeLutUploadSeen =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static int nativeLutRepeatSample;
+
+    /**
+     * r457: log one native LUT data push into the preview canvas (gl.s.e0/Z/r), deduped
+     * by (entry, slot, size, content hash) so steady-state repeats stay silent while
+     * every content change is visible. Stack captured for the first sightings only.
+     */
+    private static void logNativeLutUpload(String entry, int slot, int size,
+        long hash, int dataLength) {
+        String key = entry + "/" + slot + "/" + size + "/" + hash;
+        boolean fresh = nativeLutUploadSeen.add(key);
+        if (!fresh && nativeLutRepeatSample++ % 200 != 0) return;
+        Log.i(TAG, "XPAN native LUT push"
+            + ", entry=gl.s." + entry
+            + ", slot=" + slot
+            + ", size=" + size
+            + ", hash=" + hash
+            + ", dataLength=" + dataLength
+            + ", wash=" + GrPreviewStreamRestore.paletteWashes.get()
+            + ", mode=" + currentCameraMode
+            + (fresh ? stackSnippet() : " (repeat)"));
+    }
+
+    private static volatile long previewRepairWash = -1;
+    private static volatile long previewRepairHash;
+
+    /*
+     * r457 wash-time repair, OFF by default ({@code persist.omnicam.xpan.presetsync}).
+     * r456 telemetry established the grey mechanism: every capture mode pushes its own
+     * 64^3 LUT into gl.s field o via s.r(data,size,true) on entry (common at startup,
+     * gr, professional -- all observed), but XPAN never pushes one, so the XPAN preview
+     * keeps sampling the previous mode's table (measured: professional's table resident
+     * during the grey master->xpan entry; GR's table re-pushed verbatim during a grey
+     * gr->xpan entry). The wash fixes manager.c but nothing feeds field o. "r" mode
+     * repairs through the SAME door the native mode pushes use: s.r(xpanTable,size,true)
+     * once per wash generation. The e0-based r454/r455 pushes went through a different
+     * slot (HashMap u[1]) and are kept only as legacy diagnostics: "manager" pushes
+     * manager.c via e0, "native" pushes the last natively captured e0(slot1) content.
+     */
+    private static void reuploadPreviewBasicToneIfWashed(Object canvas) {
+        // r457: "r" is the default repair door (same s.r entry the native mode pushes
+        // use). Set persist.omnicam.xpan.presetsync=off to disable, =manager/=native for
+        // the legacy e0-based diagnostics.
+        String mode = propertyStr("persist.omnicam.xpan.presetsync", "r");
+        if ("off".equalsIgnoreCase(mode) || canvas == null) return;
+        long wash = GrPreviewStreamRestore.paletteWashes.get();
+        if (wash <= 0 || wash == previewRepairWash) return;
+        try {
+            if (isXpanLiveFrameFlowing()) {
+                // Skip mid-capture: a stalled stream is worse than a grey preview; after the
+                // capture the next frame still sees the stale generation and re-uploads.
+                return;
+            }
+            float[] table;
+            int size;
+            boolean viaR = "r".equals(mode);
+            if ("native".equals(mode)) {
+                synchronized (previewNativeUploadLock) {
+                    table = previewNativeUploadData;
+                }
+                size = table == null ? -1 : 64;
+            } else {
+                Object manager = XposedHelpers.getStaticObjectField(
+                    installedManagerHolder, "a");
+                size = XposedHelpers.getIntField(manager, "t");
+                table = viaR
+                    ? chooseXpanBasicToneTable(manager, size)
+                    : (float[]) XposedHelpers.getObjectField(manager, "c");
+            }
+            if (size <= 0 || table == null || table.length == 0) return;
+            long hash = tableContentHash(table);
+            if (hash == previewRepairHash) {
+                // Same content already pushed this visit; only consume the generation.
+                previewRepairWash = wash;
+                return;
+            }
+            if (viaR) {
+                XposedHelpers.callMethod(canvas, "r", table, size, true);
+            } else {
+                XposedHelpers.callMethod(canvas, "e0", table, 1, size);
+            }
+            previewRepairWash = wash;
+            previewRepairHash = hash;
+            if (previewLutReuploadLogged < 8) {
+                previewLutReuploadLogged++;
+                Log.i(TAG, "XPAN preview BasicTone re-uploaded after wash"
+                    + ", door=gl.s." + (viaR ? "r" : "e0")
+                    + ", src=" + mode
+                    + ", wash=" + wash
+                    + ", canvas=" + System.identityHashCode(canvas)
+                    + ", size=" + size
+                    + ", dataLength=" + table.length
+                    + ", hash=" + hash);
+            }
+        } catch (Throwable error) {
+            // Consume the generation even on failure so one broken push cannot turn into
+            // a per-frame retry storm; the next wash retries.
+            previewRepairWash = wash;
+            Log.e(TAG, "XPAN preview BasicTone re-upload failed", error);
+        }
+    }
+
+    /*
+     * r453: XPAN filter diagnostics. The live video BasicTone bridge always uploads the clean
+     * XPAN table, so a selected filter never reaches the video (cover graded, video raw).
+     * Before composing the filter into the video table the probe answers three questions:
+     *  1) what does FilterPresenter.select deliver and does manager.c change afterwards --
+     *     the native path may already compose filter x xpan into the BasicTone slot (r445
+     *     log evidence: basicHash cb792680 -> a64c96c4 across a selection event, neither
+     *     the clean XPAN -881252736 nor the palette table);
+     *  2) does the 17^3 preview LUT callback (nn.l$a.b, size=17 floats=14739) carry a
+     *     filter-specific table (dedup by data hash);
+     *  3) does the cover path run FilterPresenter.captureRequest with a filter selected.
+     */
+    private static void hookXpanFilterProbe(ClassLoader classLoader) {
+        local.jiege.hook.common.Symbols symbols = local.jiege.hook.common.Symbols.get();
+        try {
+            Method select = symbols.method("FilterPresenter.select");
+            XposedBridge.hookMethod(select, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    filterSelectCalls++;
+                    Log.i(TAG, "XPAN filter select #" + filterSelectCalls
+                        + ", arg=" + (param.args.length > 0 ? param.args[0] : "?")
+                        + ", currentIndexBefore=" + currentIndex(param.thisObject)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                }
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    Log.i(TAG, "XPAN filter selected #" + filterSelectCalls
+                        + ", currentIndexAfter=" + currentIndex(param.thisObject)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                    scheduleFilterManagerSnapshots(param.thisObject);
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: select hook unavailable", error);
+        }
+        try {
+            Class<?> callback = XposedHelpers.findClass("nn.l$a", classLoader);
+            XposedBridge.hookAllMethods(callback, "b", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    if (param.args.length < 3 || !(param.args[0] instanceof float[])) return;
+                    float[] data = (float[]) param.args[0];
+                    int hash = Arrays.hashCode(data);
+                    if (hash == filterProbeLutHash) return;
+                    filterProbeLutHash = hash;
+                    Log.i(TAG, "XPAN preview 17^3 LUT changed"
+                        + ", index=" + param.args[1]
+                        + ", size=" + param.args[2]
+                        + ", floats=" + data.length
+                        + ", hash=" + hash
+                        + ", head=" + floatHead(data, 8)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: preview LUT callback hook unavailable", error);
+        }
+        try {
+            Method captureRequest = symbols.method("FilterPresenter.captureRequest");
+            XposedBridge.hookMethod(captureRequest, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    Log.i(TAG, "XPAN filter captureRequest"
+                        + ", currentIndex=" + currentIndex(param.thisObject)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: captureRequest hook unavailable", error);
+        }
+        Log.i(TAG, "XPAN filter probe installed (r453 diagnostics)");
+    }
+
+    private static int currentIndex(Object presenter) {
+        try {
+            Object value = local.jiege.hook.common.Symbols.get()
+                .call("FilterPresenter.currentIndex", presenter);
+            return value instanceof Integer ? (Integer) value : -1;
+        } catch (Throwable error) {
+            return -1;
+        }
+    }
+
+    /** r453: does the native path recompose manager.c for the selected filter? */
+    private static void scheduleFilterManagerSnapshots(Object presenter) {
+        for (long delay : new long[]{600, 1500, 3000}) {
+            new Thread(() -> {
+                try {
+                    Thread.sleep(delay);
+                    Log.i(TAG, "XPAN filter manager snapshot +" + delay + "ms"
+                        + ", currentIndex=" + currentIndex(presenter)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                } catch (Throwable ignored) {
+                }
+            }, "xpan-filter-snap").start();
+        }
+    }
+
+    private static String floatHead(float[] data, int count) {
+        StringBuilder text = new StringBuilder("[");
+        for (int i = 0; i < count && i < data.length; i++) {
+            if (i > 0) text.append(',');
+            text.append(String.format(java.util.Locale.US, "%.4f", data[i]));
+        }
+        return text.append("...]").toString();
+    }
+
+    private static String stackSnippet() {
+        StringBuilder text = new StringBuilder(", caller=");
+        StackTraceElement[] frames = new Throwable().getStackTrace();
+        int added = 0;
+        for (StackTraceElement frame : frames) {
+            String className = frame.getClassName();
+            if (className.startsWith("local.jiege")
+                || className.startsWith("de.robv")
+                || className.startsWith("android.opengl")
+                || className.startsWith("java.lang.reflect")
+                || className.contains("XposedBridge")
+                || className.contains("LSPosed")) {
+                continue;
+            }
+            // r450: full class names -- short names are ambiguous across obfuscated packages.
+            text.append(className).append('.').append(frame.getMethodName()).append(':')
+                .append(frame.getLineNumber()).append(' ');
+            if (++added >= 8) break;
+        }
+        return text.toString();
+    }
+
     private static void hookXpanLiveBasicTone(ClassLoader classLoader) {
         final Class<?> glRenderer =
             XposedHelpers.findClass(GL_RENDERER, classLoader);
@@ -1444,6 +2630,8 @@ public final class XpanLiveFeature {
             XposedHelpers.findClass(GL_SHADER, classLoader);
         final Class<?> managerHolder =
             XposedHelpers.findClass(LUT_MANAGER_HOLDER, classLoader);
+        installedGlRenderer = glRenderer;
+        installedManagerHolder = managerHolder;
         final Class<?> presenter =
             XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
         final Class<?> liveWarpRenderer =
@@ -1644,7 +2832,22 @@ public final class XpanLiveFeature {
                 }
                 try {
                     if (!XposedHelpers.getBooleanField(renderer, "p")) return;
-                    if (XposedHelpers.getBooleanField(lutParameters, "g")) return;
+                    if (XposedHelpers.getBooleanField(lutParameters, "g")) {
+                        /*
+                         * r445: a true gate used to early-return here, which froze the
+                         * BasicTone texture forever. After a master/GR visit the first
+                         * draws race the two-step palette wash: the texture gets built
+                         * from the pre-wash (poisoned) manager.c, the wash then publishes
+                         * the clean XPAN table and bumps its generation, but the g=true
+                         * early-return blocked the r421 rebuild check -- the preview kept
+                         * sampling the stale developer and looked Log-grey (r423 measured
+                         * exactly that signature). Rebuild the texture when stale or
+                         * foreign even with the gate on.
+                         */
+                        rebuildStaleBasicToneTextureWithGateOn(
+                            renderer, glRenderer, managerHolder);
+                        return;
+                    }
                     if (!ensureXpanLiveBasicToneTexture(
                         renderer,
                         glRenderer,
@@ -1751,18 +2954,50 @@ public final class XpanLiveFeature {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 Object program =
                     param.getObjectExtra("xpanCommonBasicToneProgram");
-                if (program == null) return;
-                try {
-                    XposedHelpers.callMethod(program, "s");
-                    XposedHelpers.callMethod(program, "m", 0, "uNeedBasicTone");
-                    Object original =
-                        param.getObjectExtra("xpanCommonOriginalProgram");
-                    if (original != null) {
-                        XposedHelpers.setObjectField(
-                            param.thisObject, "g", original);
+                if (program != null) {
+                    try {
+                        XposedHelpers.callMethod(program, "s");
+                        XposedHelpers.callMethod(program, "m", 0, "uNeedBasicTone");
+                        Object original =
+                            param.getObjectExtra("xpanCommonOriginalProgram");
+                        if (original != null) {
+                            XposedHelpers.setObjectField(
+                                param.thisObject, "g", original);
+                        }
+                    } catch (Throwable error) {
+                        logBasicToneBindingError(error);
                     }
-                } catch (Throwable error) {
-                    logBasicToneBindingError(error);
+                }
+                /*
+                 * r446: preview-side heartbeat (the r445 one sat on ch.g.p, which never fires
+                 * for XPAN preview draws -- a0.i common draw is the real entry). Reports the
+                 * renderer's BasicTone texture ownership and wash generation so a grey preview
+                 * can be attributed to a stale/foreign texture from the logs alone.
+                 */
+                if (!XPAN_MODE.equals(currentCameraMode)) return;
+                int calls = ++warpDrawProbeCalls;
+                if (calls <= 3 || calls % 120 == 0) {
+                    try {
+                        Object renderer = param.thisObject;
+                        Object existing = renderer == null
+                            ? null : XposedHelpers.getObjectField(renderer, "s");
+                        Integer rendererId = renderer == null
+                            ? null : System.identityHashCode(renderer);
+                        Object[] uploaded = rendererId == null
+                            ? null : uploadsByRenderer.get(rendererId);
+                        Log.i(TAG, "XPAN preview draw heartbeat"
+                            + ", calls=" + calls
+                            + ", renderer=" + rendererId
+                            + ", tex=" + (existing == null ? "null"
+                                : (hasBasicToneData(existing)
+                                    ? (uploaded != null && existing == uploaded[1]
+                                        ? "ours" : "foreign")
+                                    : "invalid"))
+                            + ", uploadedWash=" + (uploaded == null
+                                ? "none" : uploaded[0])
+                            + ", wash=" + GrPreviewStreamRestore.paletteWashes.get());
+                    } catch (Throwable ignored) {
+                    }
                 }
             }
         });
@@ -2054,6 +3289,8 @@ public final class XpanLiveFeature {
                 XpanMainFrame frame = XPAN_MAIN_FRAME.get();
                 if (frame == null) return;
                 frame.commonDraws++;
+                frame.drawTargetId = param.args[0] == null
+                    ? 0 : System.identityHashCode(param.args[0]);
                 pushRenderStage(param, "common");
                 if (!commonDrawSignatureLogged) {
                     commonDrawSignatureLogged = true;
@@ -2083,11 +3320,15 @@ public final class XpanLiveFeature {
                 Object result = param.getResult();
                 if (!transformCaptureCallLogged) {
                     transformCaptureCallLogged = true;
+                    Object converter = safeObjectField(param.thisObject, "n1");
                     Log.i(TAG, "XPAN transform capture method observed"
                         + ", args=" + param.args.length
                         + ", throwable=" + param.hasThrowable()
                         + ", result=" + (result == null
                             ? "null" : result.getClass().getName())
+                        + ", converter=" + (converter == null
+                            ? "null" : Integer.toHexString(
+                                System.identityHashCode(converter)))
                         + ", mode=" + currentCameraMode);
                 }
                 if (liveTransformCaptureProbeLogged
@@ -2277,6 +3518,11 @@ public final class XpanLiveFeature {
      * during gallery playback.
      */
     private static void hookXpanLiveSdrOutput(ClassLoader classLoader) {
+        if (property(XPAN_LIVE_SDR_OUTPUT_PROPERTY, 0) != 1) {
+            Log.i(TAG, "XPAN live SDR output correction off (stock HLG end to end)"
+                + ", enable with persist.omnicam.xpan.sdrout=1");
+            return;
+        }
         final Class<?> encoder = XposedHelpers.findClass(LIVE_VIDEO_ENCODER, classLoader);
         XposedBridge.hookAllMethods(encoder, "q8", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -2395,6 +3641,38 @@ public final class XpanLiveFeature {
         }
     }
 
+    /**
+     * r445: on the g=true fast path, rebuild the renderer's BasicTone texture when it is stale
+     * (a palette wash happened after the last upload) or foreign (stock filled renderer.s behind
+     * our back). Only renderer.s is touched -- the gate flag and sampler binding stay exactly as
+     * stock left them. A failed attempt (e.g. no table data yet) latches on
+     * (wash generation, texture identity) so a persistent failure cannot turn into a per-frame
+     * GL upload storm.
+     */
+    private static void rebuildStaleBasicToneTextureWithGateOn(
+        Object renderer,
+        Class<?> glRenderer,
+        Class<?> managerHolder
+    ) {
+        if (glRenderer == null || managerHolder == null || renderer == null) return;
+        Object existing = XposedHelpers.getObjectField(renderer, "s");
+        boolean existingValid = existing != null && hasBasicToneData(existing);
+        if (!existingValid) return;
+        Integer rendererId = System.identityHashCode(renderer);
+        Object[] uploaded = uploadsByRenderer.get(rendererId);
+        long wash = GrPreviewStreamRestore.paletteWashes.get();
+        boolean staleByWash = uploaded == null || (Long) uploaded[0] != wash;
+        boolean staleByForeign = uploaded == null || existing != uploaded[1];
+        if (!staleByWash && !staleByForeign) return;
+        long key = (rendererId.hashCode() * 31 + Long.hashCode(wash)) * 31
+            ^ System.identityHashCode(existing);
+        if (key == staleRebuildFailedKey) return;
+        if (!ensureXpanLiveBasicToneTexture(
+            renderer, glRenderer, managerHolder, "gate-on stale rebuild")) {
+            staleRebuildFailedKey = key;
+        }
+    }
+
     private static boolean ensureXpanLiveBasicToneTexture(
         Object renderer,
         Class<?> glRenderer,
@@ -2403,8 +3681,27 @@ public final class XpanLiveFeature {
         Object existing = XposedHelpers.getObjectField(renderer, "s");
         Object manager = XposedHelpers.getStaticObjectField(managerHolder, "a");
         int lutSize = XposedHelpers.getIntField(manager, "t");
-        float[] lutData = (float[]) XposedHelpers.getObjectField(manager, "c");
-        if (existing != null && hasBasicToneData(existing)) return true;
+        float[] lutData = chooseXpanBasicToneTable(manager, lutSize);
+        long wash = GrPreviewStreamRestore.paletteWashes.get();
+        boolean existingValid = existing != null && hasBasicToneData(existing);
+        Integer rendererId = System.identityHashCode(renderer);
+        Object[] uploaded = uploadsByRenderer.get(rendererId);
+        // r421 + r446: a wash of the palette table invalidates any texture snapshot built
+        // before it -- tracked PER RENDERER (see uploadsByRenderer note).
+        boolean staleByWash = uploaded == null || (Long) uploaded[0] != wash;
+        /*
+         * r424 + r446: stock's async LUT task fills renderer.s with whatever table the
+         * gh.p3$a callback delivered -- after a GR/master exit that is the generic
+         * color-space table (169adb06), and every XPAN live frame bound to BasicTone then
+         * samples the wrong developer, turning the whole attachment green (r423) or grey.
+         * The r423 logs also proved stock never replaces an already-built renderer.s, so a
+         * texture whose reference this module did not upload to THIS renderer is foreign
+         * content: re-upload the verified table instead of trusting it.
+         */
+        boolean staleByForeign = uploaded == null
+            ? existingValid
+            : existing != uploaded[1];
+        if (existingValid && !staleByWash && !staleByForeign) return true;
         if (lutSize <= 0 || lutData == null || lutData.length == 0) {
             if (!basicToneTextureUnavailableLogged) {
                 basicToneTextureUnavailableLogged = true;
@@ -2414,9 +3711,23 @@ public final class XpanLiveFeature {
                     + ", size=" + lutSize
                     + ", dataLength=" + (lutData == null ? -1 : lutData.length));
             }
-            return false;
+            return existingValid;
         }
-        if (existing != null && !basicToneTextureUnavailableLogged) {
+        if (existing != null && !basicToneTextureUnavailableLogged && staleByWash) {
+            Log.i(TAG, "XPAN live BasicTone texture rebuilt after palette wash"
+                + ", source=" + source
+                + ", wash=" + wash
+                + ", renderer=" + rendererId
+                + (uploaded == null ? ", no prior upload"
+                    : ", builtAtWash=" + uploaded[0]));
+        } else if (existing != null && !basicToneTextureUnavailableLogged && staleByForeign) {
+            Log.i(TAG, "XPAN live BasicTone texture re-uploaded over foreign texture"
+                + ", source=" + source
+                + ", wash=" + wash
+                + ", renderer=" + rendererId
+                + (uploaded == null ? ", no prior upload"
+                    : ", builtAtWash=" + uploaded[0]));
+        } else if (existing != null && !basicToneTextureUnavailableLogged) {
             basicToneTextureUnavailableLogged = true;
             Log.i(TAG, "XPAN live BasicTone texture data lost, rebuilding"
                 + ", source=" + source
@@ -2437,15 +3748,63 @@ public final class XpanLiveFeature {
             return false;
         }
         XposedHelpers.setObjectField(renderer, "s", texture);
-        if (!basicToneTextureLogged) {
-            basicToneTextureLogged = true;
-            Log.i(TAG, "XPAN live BasicTone texture created"
+        uploadsByRenderer.put(
+            rendererId, new Object[]{wash, texture});
+        if (basicToneTextureUploadLogs < 8) {
+            basicToneTextureUploadLogs++;
+            Log.i(TAG, "XPAN live BasicTone texture uploaded"
                 + ", lutType=1"
                 + ", size=" + lutSize
                 + ", dataLength=" + lutData.length
-                + ", source=" + source);
+                + ", source=" + source
+                + ", renderer=" + rendererId
+                + ", wash=" + wash);
         }
         return true;
+    }
+
+    /**
+     * r424: the re-armed manager.c is natively recomputed in place and flips between the
+     * verified clean-env XPAN table and the GR/master-poisoned one, so prefer the defensive
+     * copy published by the re-arm thread; only fall back to a live manager.c read when the
+     * copy has not been published yet (no completed re-arm in this process).
+     */
+    private static float[] chooseXpanBasicToneTable(Object manager, int lutSize) {
+        float[] clean = GrPreviewStreamRestore.cleanXpanTable;
+        if (clean != null
+            && clean.length == lutSize * lutSize * lutSize * 3
+            && GrPreviewStreamRestore.cleanXpanTableSize == lutSize) {
+            return clean;
+        }
+        return (float[]) XposedHelpers.getObjectField(manager, "c");
+    }
+
+    /**
+     * r424: stock's async LUT task (gh.p3$a delivery) fills a null renderer.s with the table
+     * the callback carried -- after a GR/master exit that is the generic color-space table,
+     * and every XPAN live frame bound to BasicTone samples it, turning the attachment
+     * all-green. r423 logs proved stock leaves an already-built renderer.s untouched, so
+     * pre-seeding the verified clean-env XPAN table right before the task runs keeps the
+     * stock filler out entirely. Runs on the GL thread from the lut task hook.
+     */
+    public static void preSeedXpanBasicToneTexture(Object pipeline) {
+        if (!XPAN_MODE.equals(currentCameraMode)) return;
+        if (pipeline == null) return;
+        try {
+            Object renderer = XposedHelpers.getObjectField(pipeline, "w");
+            if (renderer == null) return;
+            if (XposedHelpers.getObjectField(renderer, "s") != null) return;
+            Class<?> glRenderer = installedGlRenderer;
+            Class<?> managerHolder = installedManagerHolder;
+            if (glRenderer == null || managerHolder == null) return;
+            if (ensureXpanLiveBasicToneTexture(
+                renderer, glRenderer, managerHolder, "pre-seed before stock task")) {
+                Log.i(TAG, "XPAN live BasicTone texture pre-seeded before stock task"
+                    + ", mode=" + currentCameraMode);
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live BasicTone pre-seed failed", error);
+        }
     }
 
     private static void logBasicToneBindingError(Throwable error) {

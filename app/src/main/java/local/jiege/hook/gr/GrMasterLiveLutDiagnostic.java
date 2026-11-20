@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.xpan.XpanLiveFeature;
 
 /**
  * Read-only probes for the master live-photo LUT task after a GR visit.
@@ -89,6 +90,14 @@ final class GrMasterLiveLutDiagnostic {
         });
 
         XposedBridge.hookAllMethods(lutCallback, "b", new XC_MethodHook() {
+            /*
+             * r426: the r425 delivered-array replacement was reverted. It proved the task
+             * data source is manager.c (taskData kept cb792680 after the swap), so the swap
+             * never reached the grading table; it only perturbed stock's fallback path and
+             * regressed the direct-XPAN capture (washed-out look). The real fight is upstream:
+             * stock keeps recomputing e(1,0,"professional") into manager.c after a GR/master
+             * exit -- that is redirected in the manager.e hook below.
+             */
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 Object instance = outerPipeline(param.thisObject, pipeline);
                 if (instance == null) return;
@@ -120,6 +129,26 @@ final class GrMasterLiveLutDiagnostic {
                     boolean target = isTargetMode();
                     boolean masterLive = instance != null
                         && isMasterLivePipeline(instance, liveRenderer, pipeline);
+                    /*
+                     * r424: after a GR/master exit into XPAN the delivered table is the generic
+                     * color-space one, and stock fills a null renderer.s with it -- every XPAN
+                     * live frame then samples the wrong developer and the attachment turns
+                     * all-green. r423 logs proved stock never replaces an already-built
+                     * renderer.s, so pre-seed the verified clean-env XPAN table right before
+                     * the task body runs (same GL thread, valid GL context).
+                     */
+                    if (instance != null && !masterLive) {
+                        XpanLiveFeature.preSeedXpanBasicToneTexture(instance);
+                    }
+                    /*
+                     * r428: the r427 task.d replacement is reverted. The r427 A/B proved the
+                     * table content is irrelevant to the green covers: all three captures
+                     * carried identical manager.c/r/s states, yet one rendered fine and two
+                     * stayed green. Worse, forcing r to the XPAN table washed the direct-XPAN
+                     * capture out (stock's generic table in r IS the normal direct-XPAN
+                     * state). The real green cause is the missing EIS route (see
+                     * XpanLiveFeature) -- no EIS route, no frames reach the encoder.
+                     */
                     long currentSession = armedPipeline == instance ? armedSession : 0L;
                     param.setObjectExtra("diagnosticTask",
                         new TaskRecord(instance, currentSession, target, masterLive));
@@ -207,6 +236,25 @@ final class GrMasterLiveLutDiagnostic {
         XposedHelpers.findAndHookMethod(manager, "e", int.class, int.class, String.class,
             new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    /*
+                     * r426: after a GR/master exit the LogLut/MasterPalette session scope stays
+                     * "professional" and stock keeps recomputing e(1,0,"professional") -- this
+                     * fights the XPAN re-arm wash and manager.c flips back to the stale
+                     * professional table (cb792680) within milliseconds, so the live frames
+                     * grade through the wrong developer and the attachment turns all-green.
+                     * While XPAN is active, rename any BasicTone recomputation to "xpan" so
+                     * every stock rebuild produces the correct XPAN developer table. The call
+                     * itself is not blocked; stock flow, dirty flags and async delivery keep
+                     * working exactly as before -- only the table identity changes.
+                     */
+                    if (param.args.length == 3
+                        && Integer.valueOf(1).equals(param.args[0])
+                        && Integer.valueOf(0).equals(param.args[1])
+                        && "professional".equals(param.args[2])
+                        && GrPreviewStreamRestore.inXpanMode()) {
+                        param.args[2] = "xpan";
+                        Log.i(TAG, "xpan LUT recompute redirected professional -> xpan");
+                    }
                     if (!traceManager()) return;
                     param.setObjectExtra("managerBefore", describeManager(param.thisObject));
                 }

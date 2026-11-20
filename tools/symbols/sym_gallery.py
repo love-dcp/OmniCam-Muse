@@ -31,8 +31,12 @@ g(
  Section__root=F(**{"in": WCS}, name="q", type="androidx.constraintlayout.widget.ConstraintLayout"),
  Editing__context=F(**{"in": BES}, name="g", type="android.content.Context"),
  Personalized__setup=M(**{"in": WPS}, strings=["feature_is_support_hassel_device", "feature_is_support_video_watermark_extra_large_text_size"]),
- Personalized__style=F(**{"in": WPS}, name="g1", type=S),
- Personalized__labels=F(**{"in": WPS}, name="Y0", type="java.util.List"),
+ # 17.24.79 renamed g1/Y0; match by relation to setup instead of short names so updates stop
+ # breaking: setup (m0) reads the style id (passed to WatermarkMasterStyle.Companion
+ # .isHasselVideoStyle) and the label id list, and never writes the list it reads
+ # (the other List it touches comes in a parameter and is stored first).
+ Personalized__style=F(**{"in": WPS}, type=S, readBy=["@Personalized.setup"]),
+ Personalized__labels=F(**{"in": WPS}, type="java.util.List", readBy=["@Personalized.setup"], notWrittenBy=["@Personalized.setup"]),
  Extend__parse=M(params=["java.util.Map", None, "int", "android.util.Size"], ret="kotlin.Pair", strings=["gr.effect.info"]),
  Brand__isRealme=M(params=[None, "android.content.Context"], ret="boolean", static=True, fields=["Lcom/oplus/gallery/foundation/util/R$string;->common_realme_brand_exp:I"]),
  # Watermark data of a photo and the photo-editor check that offers the hasselblad / LUMO / GR tabs.

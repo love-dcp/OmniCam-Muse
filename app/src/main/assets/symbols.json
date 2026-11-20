@@ -2304,14 +2304,21 @@
   "Personalized.style": {
    "kind": "field",
    "in": "com.oplus.gallery.photoeditor.editingvvm.watermarkpersonalized.WatermarkPersonalizedEditSection",
-   "name": "g1",
-   "type": "java.lang.String"
+   "type": "java.lang.String",
+   "readBy": [
+    "@Personalized.setup"
+   ]
   },
   "Personalized.labels": {
    "kind": "field",
    "in": "com.oplus.gallery.photoeditor.editingvvm.watermarkpersonalized.WatermarkPersonalizedEditSection",
-   "name": "Y0",
-   "type": "java.util.List"
+   "type": "java.util.List",
+   "readBy": [
+    "@Personalized.setup"
+   ],
+   "notWrittenBy": [
+    "@Personalized.setup"
+   ]
   },
   "Extend.parse": {
    "kind": "method",

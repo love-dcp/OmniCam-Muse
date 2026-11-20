@@ -75,8 +75,11 @@ add(
  # less twice sideMargin. updateBounds recomputes the reset capsule and the item backdrop from the row's position
  EffectContainer__sideMargin=F(**{"in": "@EffectContainer"}, name="q", type="int"),
  EffectContainer__updateBounds=M(**{"in": "@EffectContainer"}, params=[], ret="void", strings=["updateBlurBgBounds, calLeftAndRight is null, return"]),
- # MasterEffectContainer/expand strings are absent on PKJ110 v7.006.123 (X9U only).
- EffectItemView=K(strings=["MasterEffectContainer", "expand"], optional=True),
+ # Name-free shape (super + the four widget/effect member types); the MasterEffectContainer/
+ # expand strings version does not match PKJ110 v7.006.123 (X9U only).
+ EffectItemView=K(super="java.lang.Object",
+    fieldTypes=["android.widget.ImageView", "android.widget.TextView", "@EffectItem", "@EffectContainer"],
+    optional=True),
  EffectItemView__onClick=M(**{"in": "@EffectItemView"}, name="onClick", optional=True),
  EffectItemView__item=F(**{"in": "@EffectItemView"}, type="@EffectItem", optional=True),
  EffectItemView__bind=M(**{"in": "@EffectItemView"}, params=["boolean", "boolean"], ret="void", optional=True),
