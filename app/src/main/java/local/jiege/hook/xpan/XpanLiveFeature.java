@@ -2,6 +2,7 @@ package local.jiege.hook.xpan;
 
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
+import android.opengl.GLES20;
 import android.graphics.Rect;
 import android.media.MediaFormat;
 import android.util.Size;
@@ -206,6 +207,11 @@ public final class XpanLiveFeature {
     private static volatile boolean xpanLiveCaptureActive;
     private static volatile boolean previewStageLogged;
     private static volatile boolean captureRequestLivePhotoLogged;
+    /** r491: true only while FilterPresenter.captureRequest builds the cover request. */
+    private static volatile boolean sCoverCaptureActive;
+    /** r492: dedup set for the EV-set call-stack probe (thread|value). */
+    private static final java.util.Set<String> evScopeProbeSeen =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static volatile boolean captureStartedLivePhotoLogged;
     private static volatile boolean supportProbeLogged;
     private static volatile boolean eligibilityProbeLogged;
@@ -467,6 +473,11 @@ public final class XpanLiveFeature {
         } catch (Throwable error) {
             Log.e(TAG, "XPAN live LUT diagnostics unavailable", error);
         }
+        try {
+            hookXpanFilterState(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter state tracker unavailable", error);
+        }
         if (propertyStr("persist.omnicam.xpan.filterprobe", "").equals("1")) {
             try {
                 hookXpanFilterProbe(classLoader);
@@ -504,7 +515,285 @@ public final class XpanLiveFeature {
         } catch (Throwable error) {
             Log.e(TAG, "XPAN native conversion hook unavailable", error);
         }
+        try {
+            hookXpan4kPreview(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN 4K preview hook unavailable", error);
+        }
+        try {
+            hookLiveVideoSharpen(classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live video sharpen hook unavailable", error);
+        }
         Log.i(TAG, "installed");
+    }
+
+    private static volatile boolean sPreview4kLogged;
+
+    /**
+     * r486: 4K live experiment (user request "参照哈苏超清的4K实况"). Stock XPAN caps the
+     * preview stream -- which IS the live video's frame source (ImageReader 1920x864,
+     * SurfacePool key rear_main&surface_key_preview&54&1920x864) -- at 1080p-class,
+     * while Hasselblad ultra live captures through a dedicated 3840x2880 stream
+     * (14:15:12 log, mbNeedChangePreviewSize=false). The sharpness ceiling is the
+     * STREAM, not the encoder, so two points must be bumped together when
+     * persist.omnicam.xpan.preview4k=1:
+     *   1. SurfacePool.createImageReader: the wrapper's mHalSurfaceSize is what the
+     *      HAL receives (buildStreamSurface surfaceSizeList); override preview
+     *      wrappers to 3840x1728 (2x stock, same 2.22 aspect).
+     *   2. gh.v2.m (live video size chooser feeding gh/i2.x = encoder
+     *      mCropPreviewSize): scale the chosen size x2 so the encoder consumes the
+     *      full 4K frame instead of downscaling it.
+     * If the HAL rejects the size the session configure fails (black preview / no
+     * capture); recovery is setprop persist.omnicam.xpan.preview4k 0 + force-stop.
+     */
+    private static void hookXpan4kPreview(ClassLoader classLoader) {
+        Class<?> pool = XposedHelpers.findClassIfExists(
+            "com.oplus.ocs.camera.common.surface.SurfacePool", classLoader);
+        if (pool == null) {
+            Log.i(TAG, "XPAN 4K preview: SurfacePool not found in app classloader");
+            return;
+        }
+        XposedBridge.hookAllMethods(pool, "createImageReader", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    if (!"1".equals(propertyStr("persist.omnicam.xpan.preview4k", ""))) return;
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    Object wrapper = param.args.length > 0 ? param.args[0] : null;
+                    if (wrapper == null) return;
+                    Object usage = XposedHelpers.callMethod(wrapper, "getSurfaceUsage");
+                    if (!"surface_key_preview".equals(usage)) return;
+                    Size want = new Size(3840, 1728);
+                    XposedHelpers.setObjectField(wrapper, "mHalSurfaceSize", want);
+                    XposedHelpers.setObjectField(wrapper, "mAppSurfaceSize", want);
+                    if (!sPreview4kLogged) {
+                        sPreview4kLogged = true;
+                        Log.i(TAG, "XPAN 4K preview reader overridden, hal/app size -> 3840x1728");
+                    }
+                } catch (Throwable error) {
+                    Log.e(TAG, "XPAN 4K preview reader override failed", error);
+                }
+            }
+        });
+        try {
+            Class<?> v2 = XposedHelpers.findClass("gh.v2", classLoader);
+            XposedBridge.hookAllMethods(v2, "m", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        if (!"1".equals(propertyStr("persist.omnicam.xpan.preview4k", ""))) return;
+                        if (!XPAN_MODE.equals(currentCameraMode)) return;
+                        Object result = param.getResult();
+                        if (!(result instanceof Size)) return;
+                        Size stock = (Size) result;
+                        if (stock.getWidth() >= 3840) return;
+                        Size scaled = new Size(stock.getWidth() * 2, stock.getHeight() * 2);
+                        param.setResult(scaled);
+                        Log.i(TAG, "XPAN 4K video size " + stock + " -> " + scaled);
+                    } catch (Throwable error) {
+                        Log.e(TAG, "XPAN 4K video size override failed", error);
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            Log.i(TAG, "XPAN 4K video size hook unavailable: " + error);
+        }
+        Log.i(TAG, "XPAN 4K preview hooks armed (persist.omnicam.xpan.preview4k)");
+    }
+
+    private static volatile boolean sVideoSharpenLogged;
+    private static volatile boolean sVideoSharpenSkippedLogged;
+    private static final Set<String> sShaderProbeSeen = new java.util.HashSet<>();
+
+    /**
+     * r487/r489: software sharpening for the XPAN live video. The frame source is
+     * the 1920x864 preview stream (the 4K experiment failed: XPAN HAL opmode
+     * 0x80AC accepts but never emits frames above that size), which measures ~3x
+     * softer than the cover downscaled to the same resolution (offline laplacian
+     * 96 vs 283, gradient p50 3.6 vs 12.4; bitrate is fine at 27 Mbps, FOV
+     * identical). All shaders compile through GLES20.glShaderSource in ia/i3 --
+     * hook that call and inject a 5-tap USM into the shaders that actually render
+     * XPAN live video pixels (probe evidence r488: at capture time in XPAN only
+     * four shaders compile, two of them are the EIS-warp render family):
+     *   1. eis_warp_renderer_frag_3dlut (res/84s.glsl, 6160B): input read ->
+     *      BasicTone LUT -> vig -> SDR->HLG + GTM -> gamut LUT. Inject between the
+     *      input read and the BasicTone pass (SDR domain, before every LUT).
+     *   2. the lighter variant (res/Y08.glsl, 3300B): input read -> HLG/GTM ->
+     *      gamut LUT. Inject right after the input if/else.
+     * The RGBA->P010 pack converter (res/iLK.glsl, "layout (yuv)" + uColorMode)
+     * never compiles in the XPAN capture (probe evidence), kept for the master
+     * live path.
+     * Controls (setprop + force-stop com.oplus.camera):
+     *   persist.omnicam.xpan.sharp          USM amount, default 0 = off, clamp 0..3
+     *   persist.omnicam.xpan.sharp.size     warp output size, default 1920x864
+     * Mode gate: injected only while currentCameraMode == XPAN at compile time.
+     */
+    private static void hookLiveVideoSharpen(ClassLoader classLoader) {
+        Method source = XposedHelpers.findMethodExact(
+            GLES20.class, "glShaderSource", int.class, String.class);
+        XposedBridge.hookMethod(source, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    Object arg = param.args.length > 1 ? param.args[1] : null;
+                    if (!(arg instanceof String)) return;
+                    String shader = (String) arg;
+                    if (shader != null && shader.length() > 20 && sShaderProbeSeen.add(shader)) {
+                        String head = shader.substring(0, Math.min(shader.length(), 70));
+                        Log.i(TAG, "XPAN shader compile probe, mode=" + currentCameraMode
+                            + ", len=" + shader.length()
+                            + ", head=" + head.replace("\n", " "));
+                    }
+                    float amount = videoSharpenAmount();
+                    if (amount <= 0f) return;
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    if (shader.contains("omnicam-sharp-v1")) return;
+                    float[] texel = videoSharpenTexel();
+                    // r489: EIS warp renderer with BasicTone+vignette (res/84s.glsl)
+                    String anchor84 = "    vec4 tempColor = apply3DLut(uBasicToneLut3dTexture,"
+                        + " uBasicToneLutSize, textureColor, uNeedBasicTone);";
+                    if (shader.contains(anchor84)) {
+                        String block = "\n    // omnicam-sharp-v1 (module injected 5-tap USM)\n"
+                            + warpSharpenBlock(amount, texel, "textureColor", true);
+                        param.args[1] = shader.replace(anchor84, block + anchor84);
+                        Log.i(TAG, "XPAN video sharpen injected into warp(basicTone), amount="
+                            + amount);
+                        return;
+                    }
+                    // r489: lighter warp renderer (res/Y08.glsl)
+                    String anchorY08 = "        vFragColor = texture(uTexture2D, vTexCoords);\n    }";
+                    if (shader.contains(anchorY08)) {
+                        String block = anchorY08 + "\n"
+                            + warpSharpenBlock(amount, texel, "vFragColor", false);
+                        param.args[1] = shader.replace(anchorY08, block);
+                        Log.i(TAG, "XPAN video sharpen injected into warp(lut), amount="
+                            + amount);
+                        return;
+                    }
+                    // r487: RGBA->P010 pack converter (res/iLK.glsl, master-live path)
+                    if (!shader.contains("layout (yuv)") || !shader.contains("uColorMode")) return;
+                    if (!sVideoSharpenSkippedLogged) {
+                        sVideoSharpenSkippedLogged = true;
+                        Log.i(TAG, "XPAN video sharpen skipped, compile-time mode="
+                            + currentCameraMode);
+                    }
+                    String anchor = "    vec3 rgb = texture(uTexture, vSharedTexCoord).rgb;";
+                    if (!shader.contains(anchor)) return;
+                    String inject = "\n    // omnicam-sharp-v1 (module injected 5-tap USM)\n"
+                        + "    {\n"
+                        + "        vec2 oTexel = vec2(" + texel[0] + ", " + texel[1] + ");\n"
+                        + "        vec3 oBlur = texture(uTexture, vSharedTexCoord + vec2(oTexel.x, 0.0)).rgb * 0.25\n"
+                        + "                  + texture(uTexture, vSharedTexCoord - vec2(oTexel.x, 0.0)).rgb * 0.25\n"
+                        + "                  + texture(uTexture, vSharedTexCoord + vec2(0.0, oTexel.y)).rgb * 0.25\n"
+                        + "                  + texture(uTexture, vSharedTexCoord - vec2(0.0, oTexel.y)).rgb * 0.25;\n"
+                        + "        rgb = clamp(rgb + " + amount + " * (rgb - oBlur), vec3(0.0), vec3(1.0));\n"
+                        + "    }\n";
+                    param.args[1] = shader.replace(anchor, anchor + inject);
+                    Log.i(TAG, "XPAN video sharpen injected into p010 converter, amount="
+                        + amount);
+                } catch (Throwable error) {
+                    Log.e(TAG, "XPAN video sharpen injection failed", error);
+                }
+            }
+        });
+        Log.i(TAG, "XPAN live video sharpen armed (persist.omnicam.xpan.sharp)");
+    }
+
+    /**
+     * r489: GLSL block that sharpens {@code target}.rgb with a 5-tap USM around
+     * vTexCoords. For OES input the neighbours are converted from BT.601 YUV
+     * first ({@code withYcc} path, 84s.glsl has the bt601Ycc2Rgb matrix in
+     * scope); the 2D path samples rgb directly. XPAN uploads the preview frames
+     * as GL_TEXTURE_2D (probe f()=3553), so the 2D branch is the live one; the
+     * OES branch keeps the block correct for other pipelines.
+     */
+    private static String warpSharpenBlock(float amount, float[] texel, String target,
+            boolean withYcc) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("    {\n");
+        sb.append("        vec2 oTexel = vec2(").append(texel[0]).append(", ")
+            .append(texel[1]).append(");\n");
+        sb.append("        vec2 cTexel = oTexel * 2.5;\n");
+        sb.append("        vec3 oBlur = vec3(0.0);\n");
+        sb.append("        vec3 cBlur = vec3(0.0);\n");
+        sb.append("        if (uIsOesTexture) {\n");
+        if (withYcc) {
+            sb.append("            vec3 o1 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords + vec2(oTexel.x, 0.0)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            vec3 o2 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords - vec2(oTexel.x, 0.0)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            vec3 o3 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords + vec2(0.0, oTexel.y)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            vec3 o4 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords - vec2(0.0, oTexel.y)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            oBlur = (o1 + o2 + o3 + o4) * 0.25;\n");
+            sb.append("            vec3 c1 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords + vec2(cTexel.x, 0.0)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            vec3 c2 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords - vec2(cTexel.x, 0.0)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            vec3 c3 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords + vec2(0.0, cTexel.y)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            vec3 c4 = bt601Ycc2Rgb * (texture(uTextureOES, vTexCoords - vec2(0.0, cTexel.y)).xyz - vec3(0.0, 0.5, 0.5));\n");
+            sb.append("            cBlur = (c1 + c2 + c3 + c4) * 0.25;\n");
+        } else {
+            sb.append("            yuvCscStandardEXT oConv = itu_601_full_range;\n");
+            sb.append("            vec4 o1t = texture(uTextureOES, vTexCoords + vec2(oTexel.x, 0.0));\n");
+            sb.append("            vec4 o2t = texture(uTextureOES, vTexCoords - vec2(oTexel.x, 0.0));\n");
+            sb.append("            vec4 o3t = texture(uTextureOES, vTexCoords + vec2(0.0, oTexel.y));\n");
+            sb.append("            vec4 o4t = texture(uTextureOES, vTexCoords - vec2(0.0, oTexel.y));\n");
+            sb.append("            oBlur = (yuv_2_rgb(mix(o1t.xyz, o1t.xzy, float(uReverseUV)), oConv)\n");
+            sb.append("                  + yuv_2_rgb(mix(o2t.xyz, o2t.xzy, float(uReverseUV)), oConv)\n");
+            sb.append("                  + yuv_2_rgb(mix(o3t.xyz, o3t.xzy, float(uReverseUV)), oConv)\n");
+            sb.append("                  + yuv_2_rgb(mix(o4t.xyz, o4t.xzy, float(uReverseUV)), oConv)) * 0.25;\n");
+            sb.append("            vec4 c1t = texture(uTextureOES, vTexCoords + vec2(cTexel.x, 0.0));\n");
+            sb.append("            vec4 c2t = texture(uTextureOES, vTexCoords - vec2(cTexel.x, 0.0));\n");
+            sb.append("            vec4 c3t = texture(uTextureOES, vTexCoords + vec2(0.0, cTexel.y));\n");
+            sb.append("            vec4 c4t = texture(uTextureOES, vTexCoords - vec2(0.0, cTexel.y));\n");
+            sb.append("            cBlur = (yuv_2_rgb(mix(c1t.xyz, c1t.xzy, float(uReverseUV)), oConv)\n");
+            sb.append("                  + yuv_2_rgb(mix(c2t.xyz, c2t.xzy, float(uReverseUV)), oConv)\n");
+            sb.append("                  + yuv_2_rgb(mix(c3t.xyz, c3t.xzy, float(uReverseUV)), oConv)\n");
+            sb.append("                  + yuv_2_rgb(mix(c4t.xyz, c4t.xzy, float(uReverseUV)), oConv)) * 0.25;\n");
+        }
+        sb.append("        } else {\n");
+        sb.append("            oBlur = texture(uTexture2D, vTexCoords + vec2(oTexel.x, 0.0)).rgb * 0.25\n");
+        sb.append("                  + texture(uTexture2D, vTexCoords - vec2(oTexel.x, 0.0)).rgb * 0.25\n");
+        sb.append("                  + texture(uTexture2D, vTexCoords + vec2(0.0, oTexel.y)).rgb * 0.25\n");
+        sb.append("                  + texture(uTexture2D, vTexCoords - vec2(0.0, oTexel.y)).rgb * 0.25;\n");
+        sb.append("            cBlur = texture(uTexture2D, vTexCoords + vec2(cTexel.x, 0.0)).rgb * 0.25\n");
+        sb.append("                  + texture(uTexture2D, vTexCoords - vec2(cTexel.x, 0.0)).rgb * 0.25\n");
+        sb.append("                  + texture(uTexture2D, vTexCoords + vec2(0.0, cTexel.y)).rgb * 0.25\n");
+        sb.append("                  + texture(uTexture2D, vTexCoords - vec2(0.0, cTexel.y)).rgb * 0.25;\n");
+        sb.append("        }\n");
+        // fine-scale USM, then coarse-scale USM (matches offline usm(usm(x,1.5,0.8),1.0,2.5))
+        sb.append("        ").append(target).append(".rgb = clamp(").append(target)
+            .append(".rgb + ").append(amount).append(" * (").append(target)
+            .append(".rgb - oBlur), vec3(0.0), vec3(1.0));\n");
+        sb.append("        ").append(target).append(".rgb = clamp(").append(target)
+            .append(".rgb + ").append(amount * 0.5f).append(" * (").append(target)
+            .append(".rgb - cBlur), vec3(0.0), vec3(1.0));\n");
+        sb.append("    }\n");
+        return sb.toString();
+    }
+
+    /** r487: USM amount for the injected P010-converter sharpening; 0 disables. */
+    static float videoSharpenAmount() {
+        try {
+            float amount = Float.parseFloat(
+                propertyStr("persist.omnicam.xpan.sharp", "0"));
+            if (amount < 0f) return 0f;
+            if (amount > 3f) return 3f;
+            return amount;
+        } catch (NumberFormatException badValue) {
+            return 0f;
+        }
+    }
+
+    /** r487: texel step for the USM, derived from the conversion surface size. */
+    static float[] videoSharpenTexel() {
+        float w = 1920f, h = 864f;
+        try {
+            String size = propertyStr("persist.omnicam.xpan.sharp.size", "1920x864");
+            int x = size.indexOf('x');
+            if (x > 0) {
+                w = Float.parseFloat(size.substring(0, x));
+                h = Float.parseFloat(size.substring(x + 1));
+            }
+        } catch (NumberFormatException badValue) {
+            w = 1920f; h = 864f;
+        }
+        if (w < 16f || h < 16f || w > 16384f || h > 16384f) { w = 1920f; h = 864f; }
+        return new float[] { 1f / w, 1f / h };
     }
 
     private static void hookFeatureList(ClassLoader classLoader) {
@@ -872,6 +1161,27 @@ public final class XpanLiveFeature {
             }
         });
 
+        // r491: scope the correction to the COVER request only. The stock XPAN AE runs
+        // ~2 stops under on every stream; lifting the whole request stream fixed the
+        // dark cover but over-exposed the video stream (the long-standing "veil"). The
+        // FilterPresenter.captureRequest call builds the cover request, so arm the
+        // flag around it and let the video stream run the stock AE (the video table
+        // compensates with its own midtone curve, persist.omnicam.xpan.videolook.mid).
+        try {
+            Method coverCapture = local.jiege.hook.common.Symbols.get()
+                .method("FilterPresenter.captureRequest");
+            XposedBridge.hookMethod(coverCapture, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    sCoverCaptureActive = XPAN_MODE.equals(currentCameraMode);
+                }
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    sCoverCaptureActive = false;
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN cover capture EV scope unavailable", error);
+        }
+
         try {
             XposedBridge.hookMethod(
                 Symbols.get().method("ModeSwitch.switch"), new XC_MethodHook() {
@@ -890,16 +1200,29 @@ public final class XpanLiveFeature {
             CAMERA_IMPLEMENTATION, classLoader);
         XposedBridge.hookAllMethods(camera, "v", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (fix == 0
-                    || param.args.length < 2
+                if (param.args.length < 2
                     || param.args[0] != CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION
                     || !(param.args[1] instanceof Number)
-                    || !XPAN_MODE.equals(currentCameraMode)
+                    || !XPAN_MODE.equals(currentCameraMode)) {
+                    return;
+                }
+                int original = ((Number) param.args[1]).intValue();
+                // r492 diagnostic: the cover-only window (sCoverCaptureActive) never
+                // matched -- the cover request's EV is set OUTSIDE
+                // FilterPresenter.captureRequest. Capture the call stacks of every EV
+                // set in XPAN mode (deduped by thread+value) to find the cover path.
+                String probeKey = Thread.currentThread().getName() + "|" + original;
+                if (evScopeProbeSeen.add(probeKey)) {
+                    Log.i(TAG, "XPAN EV set probe, thread=" + Thread.currentThread().getName()
+                        + ", original=" + original
+                        + ", inCoverWindow=" + sCoverCaptureActive
+                        + evScopeStack());
+                }
+                if (fix == 0
                     || !isLivePhotoStoredOn(presenter)) {
                     return;
                 }
 
-                int original = ((Number) param.args[1]).intValue();
                 int effective = clamp(
                     original + fix, -MAX_AE_EV_UNITS, MAX_AE_EV_UNITS);
                 param.args[1] = Integer.valueOf(effective);
@@ -907,7 +1230,7 @@ public final class XpanLiveFeature {
                 String signature = fix + "|" + original + "|" + effective;
                 if (signature.equals(exposureFixLogSignature)) return;
                 exposureFixLogSignature = signature;
-                Log.i(TAG, "XPAN live exposure correction mode="
+                Log.i(TAG, "XPAN live exposure correction (global, video counteracted by table) mode="
                     + currentCameraMode
                     + " original=" + original
                     + " fix=" + fix
@@ -936,16 +1259,112 @@ public final class XpanLiveFeature {
         currentCameraMode = mode;
         Log.i(TAG, "XPAN exposure scope mode " + previous
             + " -> " + mode + ", source=" + source);
+        // r481: the XPAN filter selection LEAKS into the next mode. FilterPresenter.apply
+        // bakes the filter into the process-wide manager.c in place (measured 2026-11-21
+        // 09:17 and 10:39: standard -1504930108 -> fuji-nc -881252736), and leaving XPAN
+        // with a filter active keeps that table resident: the Hasselblad-super mode's
+        // "standard" filter then renders with the XPAN filter's tint (user report
+        // 2026-11-22). Reset the presenter to the standard filter (index 0) right after
+        // the switch so the native re-bakes manager.c into the clean table.
+        if (XPAN_MODE.equals(previous) && !XPAN_MODE.equals(mode)
+            && xpanFilterType != null) {
+            scheduleXpanFilterReset();
+        }
         if (XPAN_MODE.equals(mode) && !XPAN_MODE.equals(previous)) {
             // r457: each XPAN visit may inherit a foreign 64^3 table in gl.s field o
             // (every mode pushes its own via s.r on entry, XPAN does not), so re-arm the
             // wash-time repair regardless of what the last push contained.
             previewRepairHash = 0;
+            // r461: also re-arm the wash generation. Measured grey 2026-11-20 20:48:59
+            // (live-photo playback -> mode switches -> xpan re-entry): the first preview
+            // frames sampled the leftover table because the pending wash had not fired
+            // yet (wash still == the consumed generation from the previous visit), and
+            // the r458 repair only triggers on a generation CHANGE. Re-arming makes the
+            // repair push the clean XPAN table on the first draw of the visit, closing
+            // the pre-wash grey window. Content is the module clean table == what native
+            // itself pushes in xpan mode, so a redundant push is a no-op visually.
+            previewRepairWash = -1;
+            // r462: at a fresh session's first XPAN entry no wash has run yet
+            // (paletteWashes==0, cleanXpanTable==null), so the r461 re-arm cannot push a
+            // clean table and the entry frames sample the leftover one (measured grey
+            // 2026-11-20 20:59:52). Run the wash on demand instead of waiting for native
+            // to happen to call e(1,0,...): it recomputes manager.c into the clean XPAN
+            // table, publishes cleanXpanTable and bumps paletteWashes, which un-blocks
+            // the repair on the first draws.
+            if (GrPreviewStreamRestore.cleanXpanTable == null
+                && installedManagerHolder != null) {
+                Object managerCandidate = null;
+                try {
+                    managerCandidate = XposedHelpers.getStaticObjectField(
+                        installedManagerHolder, "a");
+                } catch (Throwable ignored) {
+                }
+                if (managerCandidate != null) {
+                    final Object manager = managerCandidate;
+                    new Thread(() -> {
+                        try {
+                            Thread.sleep(120);
+                        } catch (InterruptedException ignored) {
+                        }
+                        GrPreviewStreamRestore.forceXpanEnvWash(manager, "xpan-entry");
+                    }, "xpan-entry-wash").start();
+                }
+            }
             // r447: per-session diagnostics reset so probes never blind-fold a second visit.
             uniformProbeCalls.set(0);
             interestingUniformCalls.set(0);
             drawCensus.clear();
         }
+    }
+
+    /**
+     * r481: leaving XPAN with a filter active bakes that filter into the shared
+     * manager.c and the next mode's "standard" filter renders tinted. Mirror the
+     * user tapping the standard filter: invoke the SAME FilterPresenter.apply with
+     * index 0 so the native re-bakes the clean table. Delayed a moment so the mode
+     * switch settles first; runs on a worker thread -- apply touches GL-adjacent
+     * state we must not block a binder thread on.
+     */
+    private static void scheduleXpanFilterReset() {
+        final Object presenter = xpanFilterPresenter;
+        xpanFilterType = null;
+        Log.i(TAG, "XPAN filter reset scheduled on mode exit, presenter="
+            + (presenter == null
+                ? "null" : Integer.toHexString(System.identityHashCode(presenter))));
+        if (presenter == null) return;
+        Thread worker = new Thread(() -> {
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException ignored) {
+            }
+            try {
+                // r482: resolve via Symbols -- the same accessor the hooks use, so it is
+                // GUARANTEED to find the method (getClass().getMethods() missed it: the
+                // r481 field run logged "apply(int,int,int,int) not found", likely
+                // package-private or a non-int signature).
+                java.lang.reflect.Method apply =
+                    local.jiege.hook.common.Symbols.get().method("FilterPresenter.apply");
+                apply.setAccessible(true);
+                Object[] args = new Object[apply.getParameterTypes().length];
+                for (int i = 0; i < args.length; i++) {
+                    Class<?> t = apply.getParameterTypes()[i];
+                    if (t == int.class) args[i] = (i == 0) ? Integer.valueOf(0)
+                        : (i == 2) ? Integer.valueOf(100) : Integer.valueOf(0);
+                    else if (t == boolean.class) args[i] = Boolean.FALSE;
+                    else if (t == float.class) args[i] = Float.valueOf(0f);
+                    else if (t == long.class) args[i] = Long.valueOf(0L);
+                    else if (t == double.class) args[i] = Double.valueOf(0d);
+                    else args[i] = null;
+                }
+                apply.invoke(presenter, args);
+                Log.i(TAG, "XPAN filter reset applied (index 0, "
+                    + apply.getParameterTypes().length + " args)");
+            } catch (Throwable error) {
+                Log.e(TAG, "XPAN filter reset failed", error);
+            }
+        }, "JiegeXpanFilterReset");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     private static int property(String name, int fallback) {
@@ -1495,6 +1914,23 @@ public final class XpanLiveFeature {
                 if (calls <= 3 || calls % 120 == 0) {
                     Log.i(TAG, "XPAN Y1 frame events alive, count=" + calls
                         + ", args=" + param.args.length
+                        + ", budget=" + livePhotoFrameBudget(param.thisObject));
+                }
+                /*
+                 * r462 watchdog: measured grey 2026-11-20 21:00 -- after a live capture
+                 * the preview gl.s.o0 draws STOPPED (last draw 21:00:07, PreviewGLThread
+                 * idle in Object.wait) while presenter frames kept flowing (Y1 alive,
+                 * h1 counting ~25fps): the preview freezes on its last composited
+                 * frame. Flag the split as soon as it happens so the next session can
+                 * capture the presenter state at the exact stall moment.
+                 */
+                long now = android.os.SystemClock.uptimeMillis();
+                long lastDraw = lastPreviewDrawUptime;
+                if (!xpanLiveCaptureActive && lastDraw > 0 && now - lastDraw > 2500
+                    && now - previewStallLogged > 5000) {
+                    previewStallLogged = now;
+                    Log.i(TAG, "XPAN preview GL stall suspected, y1Frames=" + calls
+                        + ", noDrawForMs=" + (now - lastDraw)
                         + ", budget=" + livePhotoFrameBudget(param.thisObject));
                 }
             }
@@ -2203,7 +2639,33 @@ public final class XpanLiveFeature {
                         int size = param.args[2] instanceof Number
                             ? ((Number) param.args[2]).intValue() : -1;
                         logNativeLutUpload("e0", slot, size, hash, data.length);
+                        // r463: capture XPAN's own 17^3 preview tables per slot so the
+                        // wash-time repair can re-push them after a canvas rebuild that
+                        // the native does not follow with a fresh delivery.
+                        if (slot > 0 && size == 17
+                            && XPAN_MODE.equals(currentCameraMode)
+                            && xpan17Captures.size() < 8) {
+                            xpan17Captures.put(slot,
+                                java.util.Arrays.copyOf(data, data.length));
+                        }
                         if (slot == 1) {
+                            // r466: in XPAN a 64^3 e0(slot=1) push is the filter-composited
+                            // preview table (measured 385ms after the 800t apply); capture a
+                            // defensive copy for the live video bridge. r479: data.length
+                            // must be the full 64^3 table -- r479 field test showed an
+                            // undersized/degenerate push can clobber a good capture.
+                            if (size == 64 && data.length == 64 * 64 * 64 * 3
+                                && XPAN_MODE.equals(currentCameraMode)
+                                && hash != xpanFilterCompositeHash) {
+                                xpanFilterCompositeTable =
+                                    java.util.Arrays.copyOf(data, data.length);
+                                xpanFilterCompositeHash = hash;
+                                xpanFilterCompositeFilterType = xpanTypeForCurrentIndex();
+                                Log.i(TAG, "XPAN filter composite table captured"
+                                    + ", hash=" + hash
+                                    + ", floats=" + data.length
+                                    + ", tag=" + xpanFilterCompositeFilterType);
+                            }
                             previewLutUploadByCanvas.put(
                                 System.identityHashCode(param.thisObject),
                                 new long[]{
@@ -2231,6 +2693,33 @@ public final class XpanLiveFeature {
                         boolean enabled = Boolean.TRUE.equals(param.args[2]);
                         logNativeLutUpload(param.method.getName(), enabled ? 1 : 0,
                             size, hash, data.length);
+                        // r475: the native's own preview composite arrives on r(data, 64,
+                        // true) ~6s after a filter is selected (17:24:16.841 push, hash
+                        // 2323..., mode=xpan) -- this IS the table the preview renders, so
+                        // capture it and feed it to task.d verbatim instead of composing
+                        // cube-over-stock ourselves (r474's compose proved close but not
+                        // identical to the cover). Generic no-filter pushes are captured
+                        // with filter=null and never used by the video bridge.
+                        if ("r".equals(param.method.getName()) && enabled
+                            && data.length == 64 * 64 * 64 * 3
+                            && XPAN_MODE.equals(currentCameraMode)
+                            && hash != xpanFilterCompositeHash) {
+                            xpanFilterCompositeTable =
+                                java.util.Arrays.copyOf(data, data.length);
+                            xpanFilterCompositeHash = hash;
+                            xpanFilterCompositeFilterType = xpanTypeForCurrentIndex();
+                            Log.i(TAG, "XPAN native preview composite captured"
+                                + ", hash=" + hash
+                                + ", floats=" + data.length
+                                + ", tag=" + xpanFilterCompositeFilterType
+                                + ", cl=" + Integer.toHexString(
+                                    System.identityHashCode(
+                                        XpanLiveFeature.class.getClassLoader())));
+                            // r481: the composite often arrives AFTER the first compose
+                            // already dumped the stock table -- retry the composite dump
+                            // here so the offline cross-domain experiment gets both.
+                            dumpCompositeOnce();
+                        }
                     }
                 }
             };
@@ -2250,7 +2739,39 @@ public final class XpanLiveFeature {
                     if (!XPAN_MODE.equals(currentCameraMode)) return;
                     if ("o0".equals(shortName)) {
                         reuploadPreviewBasicToneIfWashed(param.thisObject);
+                        // r463: whenever the wash generation changes, log what the canvas
+                        // actually holds (field n / field o / e0 slots) -- this is the
+                        // ground truth for "clean manager but grey preview" sessions.
+                        long washNow = GrPreviewStreamRestore.paletteWashes.get();
+                        if (washNow != canvasLutStateWash && canvasLutStateLogged < 24) {
+                            canvasLutStateWash = washNow;
+                            canvasLutStateLogged++;
+                            Log.i(TAG, "XPAN canvas LUT state, wash=" + washNow
+                                + ", " + describeCanvasLutState(param.thisObject)
+                                + ", manager[" + managerBasicSnapshot() + "]");
+                        }
+                        // r462 watchdog: timestamp every draw (cheap volatile write) so the
+                        // Y1 probe can flag "frames flow but the preview GL stopped".
+                        lastPreviewDrawUptime = android.os.SystemClock.uptimeMillis();
                         long calls = interestingUniformCalls.incrementAndGet();
+                        // r464: periodic self-heal. Native-driven env flaps
+                        // (e(1,2,"common") seen mid-XPAN at 08:06:08.866) can re-contaminate
+                        // field o without bumping paletteWashes, so the wash-gated repair
+                        // never fires. Every 40 draws compare the canvas's actual content
+                        // and re-push only real mismatches (hash cost ~786K floats, fine).
+                        if (calls % 40 == 0 && !isXpanLiveFrameFlowing()) {
+                            String syncMode = propertyStr(
+                                "persist.omnicam.xpan.presetsync", "r");
+                            if (!"off".equalsIgnoreCase(syncMode)) {
+                                try {
+                                    ensureXpanPreviewTables(param.thisObject, syncMode,
+                                        washNow, false);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        }
+                        // r468: after the self-heal so the probe table wins on this frame.
+                        applyVideoChannelProbe(param.thisObject);
                         if (calls > 8 && calls % 300 != 0) return;
                         Object shaderArg = param.args.length > 0 ? param.args[0] : null;
                         StringBuilder shaders = new StringBuilder();
@@ -2355,6 +2876,106 @@ public final class XpanLiveFeature {
     private static volatile int filterSelectCalls;
     /** r453: dedup key of the last 17^3 preview LUT logged by the filter probe. */
     private static volatile int filterProbeLutHash;
+    /*
+     * r466: the measured filter delivery channel (2026-11-20 20:46:05, 800t selected):
+     * ~385ms after FilterPresenter.apply the native pushes the FILTER-COMPOSITED 64^3
+     * table through gl.s.e0(slot=1) (hash -8384517229819880239, 786432 floats), while
+     * field o keeps the clean XPAN table via s.r. Resetting to "default" pushes only
+     * the clean s.r table -- no e0(slot=1). The live video bridge must sample the
+     * composited table while a filter is active, or the video loses the filter that
+     * the cover keeps.
+     */
+    private static volatile float[] xpanFilterCompositeTable;
+    private static volatile long xpanFilterCompositeHash;
+    private static volatile String xpanFilterCompositeFilterType;
+    private static volatile String xpanFilterType;
+
+    /**
+     * r477: the filter presenter instance seen most recently by any filter hook, kept
+     * so the composite capture (GL thread, no presenter argument) can read the strip
+     * index at push time and tag the composite with a learned filter type.
+     */
+    private static volatile Object xpanFilterPresenter;
+
+    /**
+     * r477: learned XPAN strip-index -> filter-type pairs. xpanFilterType only updates
+     * when a capture request fires, which is always AFTER the composite push, so
+     * tagging at push time needs this map. Pairs come from the previewRequest hook
+     * (currentIndex + mCurrFilterType seen together) and persist across sessions in
+     * the camera's own files dir. Seeded with the two pairs observed in logs.
+     */
+    private static final java.util.HashMap<Integer, String> xpanIndexTypes =
+        new java.util.HashMap<>();
+    private static volatile boolean xpanIndexTypesLoaded;
+    private static final java.io.File XPAN_INDEX_MAP_FILE = new java.io.File(
+        "/data/user/0/com.oplus.camera/files/jiege/xpan_filter_map.txt");
+
+    private static void loadXpanIndexTypes() {
+        if (xpanIndexTypesLoaded) return;
+        synchronized (xpanIndexTypes) {
+            if (xpanIndexTypesLoaded) return;
+            xpanIndexTypesLoaded = true;
+            xpanIndexTypes.put(1, "blackandwhite_HC_master.bin");
+            xpanIndexTypes.put(5, "fuji-nc.bin");
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                new java.io.FileReader(XPAN_INDEX_MAP_FILE))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    int eq = line.indexOf('=');
+                    if (eq <= 0) continue;
+                    try {
+                        xpanIndexTypes.put(Integer.valueOf(line.substring(0, eq).trim()),
+                            line.substring(eq + 1).trim());
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            Log.i(TAG, "XPAN index->type map: " + xpanIndexTypes);
+        }
+    }
+
+    private static void learnXpanIndexType(int index, String type) {
+        if (index < 0 || type == null || type.isEmpty()
+            || "default".equals(type)) return;
+        synchronized (xpanIndexTypes) {
+            if (type.equals(xpanIndexTypes.get(index))) return;
+            xpanIndexTypes.put(index, type);
+            try (java.io.Writer w = new java.io.FileWriter(XPAN_INDEX_MAP_FILE)) {
+                for (java.util.Map.Entry<Integer, String> e : xpanIndexTypes.entrySet()) {
+                    w.write(e.getKey() + "=" + e.getValue() + "\n");
+                }
+            } catch (Throwable ignored) {
+            }
+            Log.i(TAG, "XPAN index->type learned: " + index + "=" + type);
+        }
+    }
+
+    /** r477: filter type for the strip index active at composite-push time. */
+    private static String xpanTypeForCurrentIndex() {
+        Object presenter = xpanFilterPresenter;
+        if (presenter == null) return null;
+        int index = currentIndex(presenter);
+        loadXpanIndexTypes();
+        synchronized (xpanIndexTypes) {
+            return xpanIndexTypes.get(index);
+        }
+    }
+    /* r467: set while a background CombineLutHelper.process call is in flight. */
+    private static final java.util.concurrent.atomic.AtomicBoolean
+        xpanFilterComposePending = new java.util.concurrent.atomic.AtomicBoolean();
+    /* r467: the filter type the cached composite was composed for (dedup key). */
+    private static volatile String xpanFilterComposedForType;
+    private static volatile long filterPreviewRequestLogged;
+    private static volatile String lastLutPath;
+
+    private static String safeField(Object owner, String name) {
+        try {
+            return String.valueOf(XposedHelpers.getObjectField(owner, name));
+        } catch (Throwable error) {
+            return "?";
+        }
+    }
 
     /**
      * r455: last canvas BasicTone upload per gl.s instance: {wash generation, content hash,
@@ -2416,6 +3037,20 @@ public final class XpanLiveFeature {
 
     private static volatile long previewRepairWash = -1;
     private static volatile long previewRepairHash;
+    // r463: XPAN's own 17^3 preview LUT tables captured from the native delivery points
+    // (gl.s.e0 pushes and the nn.l$a callback), keyed by slot/index. Measured 2026-11-21
+    // 07:29:35: on a GR->XPAN re-entry the native NEVER re-delivers the 17^3 table (its
+    // dirty-check dedup considers it unchanged) while the canvas rebuild drops the old
+    // texture -- the preview stays grey even after the 64^3 repair, and the LogLut
+    // callback fired only in the fresh-entry sessions (07:27:57.641, 07:28:03.227),
+    // never in the grey one.
+    private static final java.util.concurrent.ConcurrentHashMap<Integer, float[]>
+        xpan17Captures = new java.util.concurrent.ConcurrentHashMap<>();
+    private static volatile long canvasLutStateWash = -1;
+    private static volatile int canvasLutStateLogged;
+    /** r462 watchdog: last gl.s.o0 draw (uptime ms) and last stall diagnostic. */
+    private static volatile long lastPreviewDrawUptime;
+    private static volatile long previewStallLogged;
 
     /*
      * r457 wash-time repair, OFF by default ({@code persist.omnicam.xpan.presetsync}).
@@ -2430,6 +3065,690 @@ public final class XpanLiveFeature {
      * slot (HashMap u[1]) and are kept only as legacy diagnostics: "manager" pushes
      * manager.c via e0, "native" pushes the last natively captured e0(slot1) content.
      */
+    /*
+     * r468 video-channel probe. Nothing else changed the recorded video, so determine
+     * empirically which LUT channel the XPAN live-video encoder samples: push an
+     * unmistakable red-biased 64^3 table into one channel per property value and let
+     * the user record a short clip. persist.omnicam.xpan.videochannel =
+     * o (canvas field o via s.r) | n (canvas field n via Z) | u1 (e0 slot 1) |
+     * s (renderer.s via the video bridge override) | all.
+     */
+    private static volatile float[] redProbeTable;
+    private static volatile long redProbeLoggedUptime;
+
+    /**
+     * r470: true when persist.omnicam.xpan.videochannel=t -- the red probe then targets the
+     * gh.p3$a task.d table (ch.g direct attachment) from GrMasterLiveLutDiagnostic, the one
+     * channel r427 already proved the XPAN live video encoder samples.
+     */
+    public static boolean videoChannelProbeTargetsTask() {
+        return "t".equals(propertyStr("persist.omnicam.xpan.videochannel", ""));
+    }
+
+    /**
+     * r480: source table for the XPAN live-video filter fix. The stock task.d array
+     * (captured by the diagnostic hook before any swap) is composed through the
+     * filter's 17^3 cube from /odm/etc/camera/meishe_lut and the result swapped into
+     * task.d. r479's field test killed the alternative: the "native preview
+     * composite" captured on gl.s.r is content-identical to manager.c (hex hash
+     * cb792680 == decimal -881252736), because FilterPresenter.apply bakes the
+     * filter into manager.c in place (r466: -1504930108 -> -881252736) -- feeding
+     * manager.c to the video domain is the r427 brightness regression verbatim
+     * (user re-confirmed "brighter, same as the original bug"). The stock-table
+     * guard (baseHash == 379247366) also blocks composing over a non-stock task.d
+     * (r479 shot 1 saw manager.c arrive as the task base).
+     * Filter-off sessions keep stock's generic task.d untouched.
+     *
+     * @param stockTable the original task.d array captured by the diagnostic hook
+     *                   before any swap (null-safe: returns null without it)
+     */
+    public static float[] xpanLiveVideoLookTable(float[] stockTable) {
+        if (!XPAN_MODE.equals(currentCameraMode)) return null;
+        String type = xpanFilterType;
+        // r497: after a process restart the stock presenter restores the remembered
+        // filter UI but leaves request.mCurrFilterType empty until the user retaps a
+        // filter (field-proven: 17:51 shoot logged "filter type=null" while the strip
+        // showed the filter selected -- the compose silently skipped and the video ran
+        // the stock table, which is exactly the old r479 "first shot has no effect").
+        // Fall back to the last type this process family actually composed with; the
+        // stock restore IS that same filter in the normal single-filter workflow.
+        if (type == null) {
+            String restored = restoreLastVideoLookFilter();
+            if (restored != null) {
+                type = restored;
+                Log.i(TAG, "XPAN video look filter type restored from last session: "
+                    + restored + " (live mCurrFilterType empty)");
+            }
+        }
+        if (type == null || "default".equals(type)) {
+            // r497: the STANDARD filter is a legitimate user choice, not "no filter
+            // state" -- the user tests brightness on it (17:51 field note), and the
+            // brightness corrections (mid/lift/gain) must apply there too. Fall
+            // through to the no-cube correction path; only a truly-unknown state
+            // (null without a persisted fallback) skips the compose.
+            if (!"default".equals(type)) {
+                logVideoLookSkipOnce("filter type=" + xpanFilterType);
+                return null;
+            }
+        }
+        if ("off".equalsIgnoreCase(propertyStr("persist.omnicam.xpan.videolook", ""))) {
+            logVideoLookSkipOnce("videolook property off");
+            return null;
+        }
+        try {
+            if (stockTable == null || stockTable.length != 64 * 64 * 64 * 3) {
+                logVideoLookSkipOnce("stock table null/short, len="
+                    + (stockTable == null ? -1 : stockTable.length));
+                return null;
+            }
+            // r480: the r475 "native preview composite" path is RETIRED. r479 field test
+            // + hash arithmetic proved the captured composite (gl.s.r push, 64-bit hash
+            // 2323079684790431971) is CONTENT-IDENTICAL to manager.c: describeTable's
+            // hex hash of the swapped task.d came out cb792680 == decimal -881252736 ==
+            // manager.c. That is expected -- FilterPresenter.apply bakes the filter into
+            // manager.c in place (r466 measured -1504930108 -> -881252736), so the
+            // "preview composite" IS manager.c. Swapping it into task.d is a verbatim
+            // replay of the r427 brightness regression (user: "brighter, same as the
+            // original bright bug"; the preview-domain table is wrong for the video
+            // domain). The compose below -- STOCK task.d through the odm filter cube --
+            // stays the only source (r474 field result: filter visible, no regression).
+            long baseHash = Arrays.hashCode(stockTable);
+            // r480: only compose on the stock video table. r479 shot 1 showed task.d
+            // can arrive as manager.c content (-881252736); composing a cube over THAT
+            // was r473's "brighter, no filter" mistake. When task.d is not the stock
+            // table, skip rather than guess.
+            if (baseHash != 379247366L /* 0x169adb06 stock video table */) {
+                Log.i(TAG, "XPAN video look skipped: task.d is not the stock table"
+                    + ", baseHash=" + baseHash + ", filter=" + type);
+                return null;
+            }
+            CacheKey key = new CacheKey(type, baseHash);
+            if (key.equals(videoLookCacheKey)) return videoLookCacheTable;
+            float[] out;
+            int cubePoints = 0;
+            if ("default".equals(type)) {
+                // r497: standard filter -- corrections only (domain/gain/lift/mid),
+                // no filter cube. Same correction pipeline as the cube compose.
+                out = composeTableCorrectionsOnly(stockTable);
+            } else {
+                float[] cube = loadFilterCube(type);
+                if (cube == null) {
+                    logVideoLookSkipOnce("cube load failed for " + type);
+                    return null;
+                }
+                cubePoints = cube.length / 3;
+                out = composeTableThroughCube(stockTable, cube);
+            }
+            if (out == null) {
+                logVideoLookSkipOnce("compose returned null for " + type);
+                return null;
+            }
+            videoLookCacheKey = key;
+            videoLookCacheTable = out;
+            float min = Float.MAX_VALUE, max = -Float.MAX_VALUE;
+            for (float v : stockTable) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            Log.i(TAG, "XPAN video look composed, filter=" + type
+                + (cubePoints > 0 ? ", cube=" + cubePoints + " lattice points" : ", no cube")
+                + ", domain=" + propertyStr("persist.omnicam.xpan.videolook.domain", "linear")
+                + ", gain=" + String.format("%.2f", videoLookGain())
+                + ", lift=" + String.format("%.3f", videoLookLift())
+                + ", mid=" + String.format("%.2f", videoLookMid())
+                + ", cubegain=" + String.format("%.2f", videoLookCubeGain())
+                + ", baseHash=" + baseHash
+                + ", base[min=" + String.format("%.4f", min) + ",max=" + String.format("%.4f", max)
+                + "], outHash=" + Arrays.hashCode(out));
+            dumpVideoTablesOnce(stockTable);
+            return out;
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN video look compose failed", error);
+            return null;
+        }
+    }
+
+    /**
+     * r474: one-shot offline-analysis dump of the stock video table (little-endian
+     * float32, 64^3 x 3) into the camera's own files dir so it can be pulled with su
+     * and inspected without another build cycle.
+     */
+    private static void dumpVideoTablesOnce(float[] stockTable) {
+        if (!videoTablesDumped) {
+            videoTablesDumped = true;
+            lastStockTableForDump = java.util.Arrays.copyOf(
+                stockTable, stockTable.length);
+            try {
+                java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(
+                    stockTable.length * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                for (float v : stockTable) buf.putFloat(v);
+                java.io.File out = new java.io.File(
+                    "/data/user/0/com.oplus.camera/files/jiege/taskd_stock.bin");
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
+                    fos.write(buf.array());
+                }
+                Log.i(TAG, "XPAN video look dump written: " + out.getAbsolutePath()
+                    + " (" + out.length() + " bytes)");
+            } catch (Throwable error) {
+                Log.e(TAG, "XPAN video look dump failed", error);
+            }
+        }
+        dumpCompositeOnce();
+    }
+
+    /**
+     * r481: persist the captured preview composite (== manager.c, the filter baked
+     * BasicTone table). The offline cross-domain experiment needs BOTH tables:
+     * transfer T = composite ∘ stock⁻¹ maps video input through the stock inverse
+     * into the preview input domain and applies the filter-baked BasicTone -- the
+     * result is the preview look expressed on stock's own input domain, with no
+     * cube or color-space assumptions at all. Runs until the composite arrives,
+     * even if the stock dump happened on an earlier capture (the native pushes the
+     * composite ~6s AFTER the filter is selected; the first compose usually fires
+     * before that and would otherwise leave us composite-less).
+     */
+    private static void dumpCompositeOnce() {
+        if (compositeDumped) return;
+        float[] stock = lastStockTableForDump;
+        float[] composite = xpanFilterCompositeTable;
+        if (stock == null || composite == null || composite.length != stock.length) {
+            return;
+        }
+        try {
+            java.nio.ByteBuffer cbuf = java.nio.ByteBuffer.allocate(
+                composite.length * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            for (float v : composite) cbuf.putFloat(v);
+            java.io.File cout = new java.io.File(
+                "/data/user/0/com.oplus.camera/files/jiege/preview_composite.bin");
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(cout)) {
+                fos.write(cbuf.array());
+            }
+            compositeDumped = true;
+            Log.i(TAG, "XPAN composite dump written: " + cout.getAbsolutePath()
+                + " (" + cout.length() + " bytes)");
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN composite dump failed", error);
+        }
+    }
+
+    private static volatile boolean videoTablesDumped;
+    private static volatile boolean compositeDumped;
+    private static volatile float[] lastStockTableForDump;
+
+    private static final class CacheKey {
+        final String type;
+        final long baseHash;
+
+        CacheKey(String type, long baseHash) {
+            this.type = type;
+            this.baseHash = baseHash;
+        }
+
+        @Override public boolean equals(Object other) {
+            return other instanceof CacheKey
+                && ((CacheKey) other).type.equals(type)
+                && ((CacheKey) other).baseHash == baseHash;
+        }
+
+        @Override public int hashCode() {
+            return type.hashCode() * 31 + (int) baseHash;
+        }
+    }
+
+    private static volatile CacheKey videoLookCacheKey;
+    private static volatile float[] videoLookCacheTable;
+
+    /** r496: deduped diagnostics for the silent-return paths that hid the r495 no-compose. */
+    private static final java.util.Set<String> videoLookSkipSeen =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    private static void logVideoLookSkipOnce(String reason) {
+        if (videoLookSkipSeen.add(reason)) {
+            Log.i(TAG, "XPAN video look skipped, " + reason + ", mode=" + currentCameraMode);
+        }
+    }
+
+    /**
+     * r497: persist the last filter type the live-video look was composed with so a
+     * process restart can restore it (the stock presenter remembers the filter UI
+     * but leaves request.mCurrFilterType empty until the user retaps). Written only
+     * on change; read back in xpanLiveVideoLookTable when the live field is null.
+     */
+    private static final java.io.File LAST_FILTER_FILE = new java.io.File(
+        "/data/user/0/com.oplus.camera/files/jiege/last_filter_type.txt");
+    private static volatile String lastPersistedFilterType;
+
+    private static void persistLastVideoLookFilter(String type) {
+        if (type == null || type.equals(lastPersistedFilterType)) return;
+        try {
+            LAST_FILTER_FILE.getParentFile().mkdirs();
+            try (java.io.FileOutputStream fos =
+                     new java.io.FileOutputStream(LAST_FILTER_FILE)) {
+                fos.write(type.getBytes("UTF-8"));
+            }
+            lastPersistedFilterType = type;
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN last filter persist failed", error);
+        }
+    }
+
+    private static String restoreLastVideoLookFilter() {
+        try {
+            if (!LAST_FILTER_FILE.exists()) return null;
+            byte[] data = java.nio.file.Files.readAllBytes(LAST_FILTER_FILE.toPath());
+            String type = new String(data, "UTF-8").trim();
+            return type.isEmpty() ? null : type;
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /**
+     * Loads and parses a stock filter cube (.MS-LUT container). Layout decoded from
+     * fuji-nc.bin (2026-11-21): 48-byte fixed header (0x0C = lattice N, 0x20 = domain
+     * table offset), then N float domain samples (0..1 linear), then N^3 RGB u8. The
+     * lattice index is (r*N + g)*N + b -- B varies fastest -- verified by all three
+     * axis ramps staying hue-preserving (blue->blue, red->red, green->green) while the
+     * other two orderings map axes onto each other. Triplets are stored (r, g, b).
+     */
+    private static float[] loadFilterCube(String type) {
+        byte[] bin = readDeviceLut("/odm/etc/camera/meishe_lut/" + type);
+        if (bin == null) {
+            int dot = type.lastIndexOf('.');
+            String stem = dot > 0 ? type.substring(0, dot) : type;
+            for (String suffix : new String[]{"_sdr", "_normal", "_hdr"}) {
+                bin = readDeviceLut("/odm/etc/camera/meishe_lut/" + stem + suffix + ".bin");
+                if (bin != null) {
+                    Log.i(TAG, "XPAN video look cube fallback" + suffix + " for " + type);
+                    break;
+                }
+            }
+        }
+        if (bin == null || bin.length < 64) return null;
+        int n = (bin[12] & 0xFF) | ((bin[13] & 0xFF) << 8)
+            | ((bin[14] & 0xFF) << 16) | ((bin[15] & 0xFF) << 24);
+        if (n < 2 || n > 64) return null;
+        int domOff = (bin[32] & 0xFF) | ((bin[33] & 0xFF) << 8)
+            | ((bin[34] & 0xFF) << 16) | ((bin[35] & 0xFF) << 24);
+        int payload = domOff > 0 && domOff + n * 4 <= bin.length ? domOff + n * 4 : -1;
+        if (payload < 0 || payload + n * n * n * 3 > bin.length) return null;
+        int points = n * n * n;
+        float[] cube = new float[points * 3];
+        int index = 0;
+        for (int i = 0; i < points; i++) {
+            int p = payload + i * 3;
+            cube[index++] = (bin[p] & 0xFF) / 255f;
+            cube[index++] = (bin[p + 1] & 0xFF) / 255f;
+            cube[index++] = (bin[p + 2] & 0xFF) / 255f;
+        }
+        return cube;
+    }
+
+    private static byte[] readDeviceLut(String path) {
+        try (java.io.FileInputStream in = new java.io.FileInputStream(path)) {
+            byte[] data = new byte[(int) new java.io.File(path).length()];
+            int read = 0;
+            while (read < data.length) {
+                int got = in.read(data, read, data.length - read);
+                if (got < 0) break;
+                read += got;
+            }
+            return read == data.length ? data : null;
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /**
+     * Pushes every 64^3 BasicTone entry through the filter cube (trilinear, u8 lattice
+     * index (r*N + g)*N + b, N derived from the cube length). The result is the preview
+     * appearance -- BasicTone first, then the filter -- baked into one 64^3 table.
+     */
+    /**
+     * r497: correction-only compose for the STANDARD filter (type "default").
+     * Identical pipeline to composeTableThroughCube minus the cube sampling:
+     * stock table -> EOTF(domain) -> gain (linear domain) -> OETF(domain)
+     * -> lift (display) -> mid (display). Keeps the brightness/de-veil
+     * corrections active when the user shoots with no filter color.
+     */
+    private static float[] composeTableCorrectionsOnly(float[] base) {
+        String domain = propertyStr("persist.omnicam.xpan.videolook.domain", "linear");
+        float gain = videoLookGain();
+        float lift = videoLookLift();
+        float mid = videoLookMid();
+        float[] out = new float[base.length];
+        float[] rgb = new float[3];
+        for (int i = 0; i < base.length; i += 3) {
+            for (int c = 0; c < 3; c++) {
+                rgb[c] = Math.min(1f, Math.max(0f, base[i + c]));
+            }
+            transfer(rgb, domain, true);
+            if (gain != 1f) {
+                for (int c = 0; c < 3; c++) {
+                    rgb[c] = Math.min(1f, Math.max(0f, rgb[c] * gain));
+                }
+            }
+            transfer(rgb, domain, false);
+            if (lift != 0f) {
+                for (int c = 0; c < 3; c++) {
+                    rgb[c] = Math.max(0f, rgb[c] - lift);
+                }
+            }
+            if (mid != 0f) {
+                for (int c = 0; c < 3; c++) {
+                    float v = rgb[c];
+                    rgb[c] = Math.min(1f, Math.max(0f, v + mid * v * (1f - v)));
+                }
+            }
+            System.arraycopy(rgb, 0, out, i, 3);
+        }
+        return out;
+    }
+
+    private static float[] composeTableThroughCube(float[] base, float[] cube) {
+        int points = cube.length / 3;
+        int n = (int) Math.round(Math.cbrt(points));
+        if (n < 2 || n * n * n != points) return null;
+        // r483: DOMAIN FIX. The r480 field test reported "brighter + pink/red shift"
+        // vs the cover. Offline numeric check matches EXACTLY what feeding DISPLAY-domain
+        // values straight into the cube does: gray 0.5 -> V 50->61 (+11) hue 304 (magenta)
+        // -- the cube was clearly designed for a NEAR-LINEAR domain (the preview feeds it
+        // with manager.c outputs whose own gray line sits at V 0.8 where the cube barely
+        // changes V, measured 81->84). Select the transfer with
+        // persist.omnicam.xpan.videolook.domain: "linear" (sRGB 2.4, default),
+        // "pq" (ST 2084), "gamma" (r480 behavior, kept for A/B).
+        String domain = propertyStr("persist.omnicam.xpan.videolook.domain", "linear");
+        // r484: residual exposure trim. r483 (sRGB roundtrip) fixed the magenta/bright
+        // shift but the 11-22 field test still reports slight over-brightness vs the
+        // cover. Offline simulation on taskd_stock x fuji-nc shows the linear-domain
+        // compose is neutral at V~0.5 and +11~12 at V0.6-0.8, so a plain linear-domain
+        // multiplier before the OETF is the right trim axis. Tunable without rebuild:
+        //   adb shell setprop persist.omnicam.xpan.videolook.gain 0.85
+        //   adb shell am force-stop com.oplus.camera
+        // (display-domain effect is gain^(1/2.4): 0.85 -> -6.5%, 0.9 -> -4.3%.)
+        float gain = videoLookGain();
+        // r485: DE-VEIL. The 11-22 field tests ("still bright at gain 0.70", "the video
+        // looks like it is covered by a layer of white light", user: this haze has
+        // ALWAYS been there, even in stock) show the residual is not exposure but a
+        // LIFTED BLACK POINT / compressed contrast inherited from the stock video path
+        // (frame stats: video p5-p95 range is half the cover's, std 0.111 vs 0.160).
+        // A linear gain cannot fix that -- it only crushes blacks further under the
+        // veil. Counter it in the table OUTPUT (display) domain: subtract a constant
+        // offset so shadows fall back to the cover's black floor while highlights
+        // barely move. Tunable without rebuild:
+        //   adb shell su -c 'setprop persist.omnicam.xpan.videolook.lift 0.05'
+        //   adb shell am force-stop com.oplus.camera
+        float lift = videoLookLift();
+        // r491: MIDTONE lift, display domain, after gain/lift. out = in + e*in*(1-in):
+        // 0 and 1 stay pinned, brightness rises around the middle. Rationale: with the
+        // +2EV capture-side correction scoped to the cover request only (r491 split),
+        // the video stream runs the stock XPAN AE, which measures about two stops
+        // under (16:45 field shot: ISO 160, cover p50 8/255 vs 97/255 with the old
+        // global correction). A plain linear gain would lift the recovered black
+        // point back up (the old veil), so lift the middle instead. Tunable:
+        //   adb shell su -c 'setprop persist.omnicam.xpan.videolook.mid 0.7'
+        //   adb shell am force-stop com.oplus.camera
+        float mid = videoLookMid();
+        float step = 1f / (n - 1);
+        float[] out = new float[base.length];
+        float[] rgb = new float[3];
+        float[] t = new float[3];
+        for (int i = 0; i < base.length; i += 3) {
+            for (int c = 0; c < 3; c++) {
+                rgb[c] = Math.min(1f, Math.max(0f, base[i + c]));
+            }
+            transfer(rgb, domain, true);
+            float r = rgb[0], g = rgb[1], b = rgb[2];
+            float fx = r / step, fy = g / step, fz = b / step;
+            int x0 = Math.min(n - 1, (int) fx), y0 = Math.min(n - 1, (int) fy);
+            int z0 = Math.min(n - 1, (int) fz);
+            int x1 = Math.min(n - 1, x0 + 1), y1 = Math.min(n - 1, y0 + 1);
+            int z1 = Math.min(n - 1, z0 + 1);
+            float dx = fx - x0, dy = fy - y0, dz = fz - z0;
+            // r498: CUBE STRENGTH overdrive. Field test 11-22 evening: color filters
+            // are barely distinguishable in the video while monochrome ones (which
+            // crush saturation to near zero) are obvious -- the cover shows the same
+            // filters clearly. The LUT deviations of the color cubes are small in
+            // absolute terms (offline: 800t mean |diff| ~0.04-0.12) and the HDR video
+            // path compresses them further. Blend the sampled cube output AWAY FROM
+            // the input by an overdrive factor: out = in + k*(cube(in)-in), k>1
+            // extrapolates the look (monochrome stays monochrome, saturation clamps).
+            // Tunable without rebuild:
+            //   adb shell su -c 'setprop persist.omnicam.xpan.videolook.cubegain 1.8'
+            //   adb shell am force-stop com.oplus.camera
+            float cubeGain = videoLookCubeGain();
+            int i000 = (x0 * n + y0) * n + z0;
+            int i100 = (x1 * n + y0) * n + z0;
+            int i010 = (x0 * n + y1) * n + z0;
+            int i110 = (x1 * n + y1) * n + z0;
+            int i001 = (x0 * n + y0) * n + z1;
+            int i101 = (x1 * n + y0) * n + z1;
+            int i011 = (x0 * n + y1) * n + z1;
+            int i111 = (x1 * n + y1) * n + z1;
+            for (int c = 0; c < 3; c++) {
+                float c00 = cube[i000 * 3 + c] * (1 - dx) + cube[i100 * 3 + c] * dx;
+                float c10 = cube[i010 * 3 + c] * (1 - dx) + cube[i110 * 3 + c] * dx;
+                float c01 = cube[i001 * 3 + c] * (1 - dx) + cube[i101 * 3 + c] * dx;
+                float c11 = cube[i011 * 3 + c] * (1 - dx) + cube[i111 * 3 + c] * dx;
+                float c0 = c00 * (1 - dy) + c10 * dy;
+                float c1 = c01 * (1 - dy) + c11 * dy;
+                t[c] = c0 * (1 - dz) + c1 * dz;
+            }
+            if (cubeGain != 1f) {
+                // r498 guard (offline simulation): linear extrapolation flips a
+                // monochrome cube's saturation THROUGH ZERO back into color
+                // (k=2 restores the full input saturation). Keep k=1 on any point
+                // where the cube desaturates noticeably -- those filters are already
+                // obvious to the eye; only weak color shifts need the boost.
+                float satIn = Math.max(rgb[0], Math.max(rgb[1], rgb[2]))
+                    - Math.min(rgb[0], Math.min(rgb[1], rgb[2]));
+                float satCube = Math.max(t[0], Math.max(t[1], t[2]))
+                    - Math.min(t[0], Math.min(t[1], t[2]));
+                float k = satCube < satIn - 0.10f ? 1f : cubeGain;
+                if (k != 1f) {
+                    for (int c = 0; c < 3; c++) {
+                        t[c] = Math.min(1f, Math.max(0f,
+                            rgb[c] + (t[c] - rgb[c]) * k));
+                    }
+                }
+            }
+            System.arraycopy(t, 0, rgb, 0, 3);
+            if (gain != 1f) {
+                for (int c = 0; c < 3; c++) {
+                    rgb[c] = Math.min(1f, Math.max(0f, rgb[c] * gain));
+                }
+            }
+            transfer(rgb, domain, false);
+            if (lift != 0f) {
+                for (int c = 0; c < 3; c++) {
+                    rgb[c] = Math.max(0f, rgb[c] - lift);
+                }
+            }
+            if (mid != 0f) {
+                for (int c = 0; c < 3; c++) {
+                    float v = rgb[c];
+                    rgb[c] = Math.min(1f, Math.max(0f, v + mid * v * (1f - v)));
+                }
+            }
+            System.arraycopy(rgb, 0, out, i, 3);
+        }
+        return out;
+    }
+
+    /** r484: linear-domain exposure trim, default 0.85 (-6.5% display brightness). */
+    static float videoLookGain() {
+        try {
+            float gain = Float.parseFloat(
+                propertyStr("persist.omnicam.xpan.videolook.gain", "0.85"));
+            if (gain < 0.1f) return 0.1f;
+            if (gain > 2f) return 2f;
+            return gain;
+        } catch (NumberFormatException badValue) {
+            return 0.85f;
+        }
+    }
+
+    /**
+     * r498: cube strength overdrive for the video-domain filter compose.
+     * out = in + k*(cube(in)-in); 1.0 = exact filter, >1 exaggerates the color
+     * look so the weak color cubes stay visible through the HDR video path.
+     */
+    static float videoLookCubeGain() {
+        try {
+            float k = Float.parseFloat(
+                propertyStr("persist.omnicam.xpan.videolook.cubegain", "1.0"));
+            if (k < 1f) return 1f;
+            if (k > 3f) return 3f;
+            return k;
+        } catch (NumberFormatException badValue) {
+            return 1f;
+        }
+    }
+
+    /**
+     * r491: midtone lift amount for the composed video table (display domain).
+     * out = in + e*in*(1-in); 0 disables. Positive e brightens the middle (for the
+     * EV-uncompensated video stream); r493 probe showed the AE compensation is a
+     * SESSION-level EV (one value shared by preview and cover requests, set once at
+     * session start, long before FilterPresenter.captureRequest), so request-level
+     * splitting is impossible -- instead the global +2EV correction stays and this
+     * curve runs NEGATIVE (r494) to pull the over-exposed video middle back down
+     * while lift handles the black point. The two axes are independent, unlike the
+     * old global-lift-only tuning.
+     */
+    static float videoLookMid() {
+        try {
+            float e = Float.parseFloat(
+                propertyStr("persist.omnicam.xpan.videolook.mid", "0"));
+            if (e < -2f) return -2f;
+            if (e > 2f) return 2f;
+            return e;
+        } catch (NumberFormatException badValue) {
+            return 0f;
+        }
+    }
+
+    /**
+     * r485: de-veil offset subtracted in the table OUTPUT (display) domain.
+     * Positive values lower the video's black point toward the cover's; the stock
+     * video path has always lifted shadows relative to the still path.
+     */
+    static float videoLookLift() {
+        try {
+            float lift = Float.parseFloat(
+                propertyStr("persist.omnicam.xpan.videolook.lift", "0.05"));
+            if (lift < -0.1f) return -0.1f;
+            if (lift > 0.25f) return 0.25f;
+            return lift;
+        } catch (NumberFormatException badValue) {
+            return 0.05f;
+        }
+    }
+
+    /** r483: color-domain transfer for the cube compose ("linear"/"pq"/"gamma"). */
+    private static void transfer(float[] rgb, String domain, boolean toLinear) {
+        if ("gamma".equals(domain)) return;
+        for (int c = 0; c < 3; c++) {
+            float v = Math.min(1f, Math.max(0f, rgb[c]));
+            if ("pq".equals(domain)) {
+                rgb[c] = toLinear ? pqEotf(v) : pqOetf(v);
+            } else {
+                // sRGB piecewise (2.4 exponent), the closest match to a shader's
+                // gamma-decode/encode around an sRGB-space LUT.
+                rgb[c] = toLinear ? srgbEotf(v) : srgbOetf(v);
+            }
+        }
+    }
+
+    private static float srgbEotf(float v) {
+        return v <= 0.04045f ? v / 12.92f
+            : (float) Math.pow((v + 0.055f) / 1.055f, 2.4);
+    }
+
+    private static float srgbOetf(float v) {
+        return v <= 0.0031308f ? v * 12.92f
+            : (float) (1.055 * Math.pow(Math.max(0f, v), 1 / 2.4) - 0.055);
+    }
+
+    private static float pqEotf(float p) {
+        final float m1 = 2610f / 16384f, m2 = 2523f / 4096f * 128f;
+        final float c1 = 3424f / 4096f, c2 = 2413f / 4096f * 32f,
+            c3 = 2392f / 4096f * 32f;
+        p = Math.min(1f, Math.max(1e-6f, p));
+        float p12 = (float) Math.pow(p, 1f / m2);
+        float x = Math.max(0f, p12 - c1) / (c2 - c3 * p12);
+        return (float) Math.pow(x, 1f / m1);
+    }
+
+    private static float pqOetf(float y) {
+        final float m1 = 2610f / 16384f, m2 = 2523f / 4096f * 128f;
+        final float c1 = 3424f / 4096f, c2 = 2413f / 4096f * 32f,
+            c3 = 2392f / 4096f * 32f;
+        y = Math.min(1f, Math.max(1e-9f, y));
+        float ym = (float) Math.pow(y, m1);
+        return (float) Math.pow((c1 + c2 * ym) / (1 + c3 * ym), m2);
+    }
+
+    /** r472: short state line for the video-look swap log. */
+    public static String xpanVideoLookState() {
+        return "filter=" + xpanFilterType
+            + ", manager[" + managerBasicSnapshot() + "]";
+    }
+
+    /** r468 probe table: unmistakable red-biased 64^3, shared with the master probe. */
+    public static float[] redProbeTable() {        float[] table = redProbeTable;
+        if (table != null) return table;
+        final int size = 64, depth = 3;
+        float[] data = new float[size * size * size * depth];
+        int index = 0;
+        for (int b = 0; b < size; b++) {
+            for (int g = 0; g < size; g++) {
+                for (int r = 0; r < size; r++) {
+                    data[index++] = Math.min(1f, 0.55f + r / (float) (size - 1) * 0.45f);
+                    data[index++] = g / (float) (size - 1) * 0.15f;
+                    data[index++] = b / (float) (size - 1) * 0.15f;
+                }
+            }
+        }
+        redProbeTable = data;
+        return data;
+    }
+
+    private static void applyVideoChannelProbe(Object canvas) {
+        String mode = propertyStr("persist.omnicam.xpan.videochannel", "");
+        if (mode.isEmpty() || canvas == null) return;
+        try {
+            float[] table = redProbeTable();
+            boolean pushed = false;
+            if (mode.contains("o") || "all".equals(mode)) {
+                XposedHelpers.callMethod(canvas, "r", table, 64, true);
+                pushed = true;
+            }
+            if (mode.contains("n") && !mode.contains("none") || "all".equals(mode)) {
+                XposedHelpers.callMethod(canvas, "Z", table, 64, true);
+                pushed = true;
+            }
+            if (mode.contains("u1") || "all".equals(mode)) {
+                XposedHelpers.callMethod(canvas, "e0", table, 1, 64);
+                pushed = true;
+            }
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - redProbeLoggedUptime > 5000) {
+                redProbeLoggedUptime = now;
+                Log.i(TAG, "XPAN video channel probe active, mode=" + mode
+                    + ", pushedCanvas=" + pushed
+                    + ", hash=" + Arrays.hashCode(table));
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN video channel probe failed, mode=" + mode, error);
+        }
+    }
+
+    /** True when the s-channel override (renderer.s) is requested by the probe. */
+    private static boolean redProbeWantsRenderer() {
+        return propertyStr("persist.omnicam.xpan.videochannel", "").contains("s");
+    }
+
     private static void reuploadPreviewBasicToneIfWashed(Object canvas) {
         // r457: "r" is the default repair door (same s.r entry the native mode pushes
         // use). Set persist.omnicam.xpan.presetsync=off to disable, =manager/=native for
@@ -2444,52 +3763,201 @@ public final class XpanLiveFeature {
                 // capture the next frame still sees the stale generation and re-uploads.
                 return;
             }
-            float[] table;
-            int size;
-            boolean viaR = "r".equals(mode);
-            if ("native".equals(mode)) {
-                synchronized (previewNativeUploadLock) {
-                    table = previewNativeUploadData;
-                }
-                size = table == null ? -1 : 64;
-            } else {
-                Object manager = XposedHelpers.getStaticObjectField(
-                    installedManagerHolder, "a");
-                size = XposedHelpers.getIntField(manager, "t");
-                table = viaR
-                    ? chooseXpanBasicToneTable(manager, size)
-                    : (float[]) XposedHelpers.getObjectField(manager, "c");
-            }
-            if (size <= 0 || table == null || table.length == 0) return;
-            long hash = tableContentHash(table);
-            if (hash == previewRepairHash) {
-                // Same content already pushed this visit; only consume the generation.
-                previewRepairWash = wash;
-                return;
-            }
-            if (viaR) {
-                XposedHelpers.callMethod(canvas, "r", table, size, true);
-            } else {
-                XposedHelpers.callMethod(canvas, "e0", table, 1, size);
-            }
+            ensureXpanPreviewTables(canvas, mode, wash, true);
             previewRepairWash = wash;
-            previewRepairHash = hash;
-            if (previewLutReuploadLogged < 8) {
-                previewLutReuploadLogged++;
-                Log.i(TAG, "XPAN preview BasicTone re-uploaded after wash"
-                    + ", door=gl.s." + (viaR ? "r" : "e0")
-                    + ", src=" + mode
-                    + ", wash=" + wash
-                    + ", canvas=" + System.identityHashCode(canvas)
-                    + ", size=" + size
-                    + ", dataLength=" + table.length
-                    + ", hash=" + hash);
-            }
         } catch (Throwable error) {
             // Consume the generation even on failure so one broken push cannot turn into
             // a per-frame retry storm; the next wash retries.
             previewRepairWash = wash;
             Log.e(TAG, "XPAN preview BasicTone re-upload failed", error);
+        }
+    }
+
+    /*
+     * r464: read-back based repair. The r463 content dedup (what WE pushed last) was
+     * defeated on 2026-11-21 08:06:03/08:06:18: the wash's own e(1,2,"common") step
+     * makes the native re-push the COMMON table into gl.s field o, the follow-up
+     * e(1,0,"xpan") is skipped by the native's dirty-check dedup, and our repair then
+     * saw "desired == last pushed" and did nothing -- field o stayed on the common
+     * table and the preview stayed grey until the next mode switch. The fix compares
+     * the canvas's ACTUAL field o / u-slot content (t0.A float hash) with the desired
+     * tables and only pushes real mismatches, so re-contamination of any origin
+     * (native flap, wash side effect, canvas rebuild) self-heals.
+     */
+    private static void ensureXpanPreviewTables(
+        Object canvas, String mode, long wash, boolean washDriven) {
+        boolean viaR = "r".equals(mode);
+        Object manager = XposedHelpers.getStaticObjectField(
+            installedManagerHolder, "a");
+        int size = XposedHelpers.getIntField(manager, "t");
+        float[] table = viaR
+            ? chooseXpanBasicToneTable(manager, size)
+            : (float[]) XposedHelpers.getObjectField(manager, "c");
+        if (size <= 0 || table == null || table.length == 0) return;
+        long want = tableContentHash(table);
+        long have = viaR
+            ? t0ContentHash(XposedHelpers.getObjectField(canvas, "o"))
+            : previewRepairHash;
+        boolean basicPushed = false;
+        if (have != want) {
+            if (viaR) {
+                XposedHelpers.callMethod(canvas, "r", table, size, true);
+            } else {
+                XposedHelpers.callMethod(canvas, "e0", table, 1, size);
+            }
+            previewRepairHash = want;
+            basicPushed = true;
+        }
+        int slots17 = viaR ? ensureXpan17Captures(canvas) : 0;
+        if ((basicPushed || slots17 > 0) && previewLutReuploadLogged < 16) {
+            previewLutReuploadLogged++;
+            Log.i(TAG, "XPAN preview tables re-pushed"
+                + ", door=gl.s." + (viaR ? "r" : "e0")
+                + ", " + (washDriven ? "wash=" + wash : "periodic")
+                + ", basicPushed=" + basicPushed
+                + ", slots17=" + slots17
+                + ", fieldOWas=" + have
+                + ", want=" + want
+                + ", canvas=" + System.identityHashCode(canvas));
+        }
+    }
+
+    private static long t0ContentHash(Object texture) {
+        if (texture == null) return -1;
+        try {
+            Object raw = XposedHelpers.getObjectField(texture, "A");
+            if (raw instanceof float[]) return tableContentHash((float[]) raw);
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    /*
+     * r463/r464: re-push the captured XPAN 17^3 preview tables (e0 slot / nn.l callback
+     * index). The native delivers these only on a fresh XPAN activation; on a re-entry
+     * (GR -> XPAN measured 2026-11-21 07:29:35) its dirty-check dedup skips them while
+     * the canvas rebuild dropped the textures, leaving the preview grey no matter how
+     * clean the 64^3 table is. r464: dedup by the canvas's ACTUAL u-slot content, not
+     * by what we pushed last -- a wash's common step or a rebuild can re-break the
+     * slots at any time.
+     */
+    private static int ensureXpan17Captures(Object canvas) {
+        int pushed = 0;
+        Object u = null;
+        try {
+            u = XposedHelpers.getObjectField(canvas, "u");
+        } catch (Throwable ignored) {
+        }
+        for (java.util.Map.Entry<Integer, float[]> entry : xpan17Captures.entrySet()) {
+            int slot = entry.getKey();
+            float[] data = entry.getValue();
+            if (slot <= 0 || data == null || data.length == 0) continue;
+            long want = tableContentHash(data);
+            long have = -1;
+            if (u instanceof java.util.Map) {
+                Object holder = ((java.util.Map<?, ?>) u).get(Integer.valueOf(slot));
+                have = t0ContentHash(holder);
+            }
+            if (have == want) continue;
+            try {
+                XposedHelpers.callMethod(canvas, "e0", data, slot, 17);
+                pushed++;
+            } catch (Throwable error) {
+                Log.e(TAG, "XPAN 17^3 slot re-push failed, slot=" + slot, error);
+            }
+        }
+        return pushed;
+    }
+
+    /*
+     * r463: read back what the canvas actually holds at draw time -- field n (Z entry
+     * target), field o (r entry target, the 64^3 BasicTone) and the e0 HashMap u. t0
+     * holders expose b=size, z=depth and A=raw float[] data. This closes the loop on
+     * "we pushed it" vs "the canvas still samples something else".
+     */
+    private static String describeCanvasLutState(Object canvas) {
+        try {
+            StringBuilder sb = new StringBuilder("fieldN=");
+            sb.append(describeT0(XposedHelpers.getObjectField(canvas, "n")));
+            sb.append(" fieldO=").append(
+                describeT0(XposedHelpers.getObjectField(canvas, "o")));
+            sb.append(" u={");
+            Object u = XposedHelpers.getObjectField(canvas, "u");
+            if (u instanceof java.util.Map) {
+                int shown = 0;
+                for (java.util.Map.Entry<?, ?> e
+                    : ((java.util.Map<?, ?>) u).entrySet()) {
+                    if (shown++ >= 10) break;
+                    sb.append(e.getKey()).append(':')
+                        .append(describeT0(e.getValue())).append(',');
+                }
+            }
+            sb.append('}');
+            return sb.toString();
+        } catch (Throwable error) {
+            return "state=unreadable:" + error.getClass().getSimpleName();
+        }
+    }
+
+    private static String describeT0(Object texture) {
+        if (texture == null) return "null";
+        try {
+            Object raw = XposedHelpers.getObjectField(texture, "A");
+            long hash = raw instanceof float[]
+                ? tableContentHash((float[]) raw) : -1;
+            return "t0{b=" + XposedHelpers.getIntField(texture, "b")
+                + ",z=" + XposedHelpers.getIntField(texture, "z")
+                + ",len=" + (raw instanceof float[] ? ((float[]) raw).length : -1)
+                + ",hash=" + hash + "}";
+        } catch (Throwable error) {
+            return "t0{unreadable:" + error.getClass().getSimpleName() + "}";
+        }
+    }
+
+    /*
+     * r466: always-on filter STATE tracker. The live video bridge picks the
+     * filter-composited BasicTone table whenever a filter is active, so this must run
+     * in production -- only the verbose r453 probe logging stays behind
+     * persist.omnicam.xpan.filterprobe. One reflection read per previewRequest, no
+     * logging.
+     */
+    private static void hookXpanFilterState(ClassLoader classLoader) {
+        try {
+            Method previewRequest = local.jiege.hook.common.Symbols.get()
+                .method("FilterPresenter.previewRequest");
+            XposedBridge.hookMethod(previewRequest, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    Object request = param.getResult();
+                    if (request == null) return;
+                    String currType = safeField(request, "mCurrFilterType");
+                    String tracked = (currType == null
+                        || "null".equals(currType) || "?".equals(currType)
+                        || currType.isEmpty() || "default".equals(currType))
+                        ? null : currType;
+                    xpanFilterType = tracked;
+                    // r497: remember the last real filter for the restart fallback.
+                    // An explicit "default" OVERWRITES the file, so switching back to
+                    // the standard filter does not resurrect the previous color filter.
+                    if (tracked != null) {
+                        persistLastVideoLookFilter(tracked);
+                    } else if ("default".equals(currType)) {
+                        persistLastVideoLookFilter("default");
+                    }
+                    // r479: the r467 native compose path is RETIRED. Reflection into
+                    // CombineLutHelper.process corrupted the native context (r467 already
+                    // measured names=[null x64], output degenerate), and on release the
+                    // helper then free()d a clobbered pointer -- native crash SIGABRT
+                    // "Pointer tag ... truncated" in libCombineLut.so lutFree, reached
+                    // through our Method.invoke (dropbox system_app_native_crash 07:41).
+                    // The r-entrance capture (gl.s.r push of the 64^3 preview composite)
+                    // is the only composite source now: it delivers the exact table the
+                    // preview renders, with zero reconstruction.
+                }
+            });
+            Log.i(TAG, "XPAN filter state tracker installed (r466)");
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter state tracker: previewRequest unavailable", error);
         }
     }
 
@@ -2520,6 +3988,13 @@ public final class XpanLiveFeature {
                 }
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    // r477: NO invalidation here. r476 field test: the user swiped the
+                    // strip through every index back to fuji-nc within 4s and shot -- the
+                    // wipe threw away a still-correct composite and the native never
+                    // re-pushed (content unchanged -> dedup). Staleness is handled by the
+                    // learned index->type tag at capture time and the tag match at use
+                    // time instead.
+                    xpanFilterPresenter = param.thisObject;
                     Log.i(TAG, "XPAN filter selected #" + filterSelectCalls
                         + ", currentIndexAfter=" + currentIndex(param.thisObject)
                         + ", manager[" + managerBasicSnapshot() + "]");
@@ -2537,6 +4012,18 @@ public final class XpanLiveFeature {
                     if (param.args.length < 3 || !(param.args[0] instanceof float[])) return;
                     float[] data = (float[]) param.args[0];
                     int hash = Arrays.hashCode(data);
+                    // r463: capture the 17^3 preview LUT the native hands to the canvas,
+                    // keyed by the callback index (measured to match the e0 slot). Capture
+                    // BEFORE the change-dedup return so an unchanged re-delivery still
+                    // refreshes the capture store.
+                    int cbIndex = param.args[1] instanceof Number
+                        ? ((Number) param.args[1]).intValue() : -1;
+                    int cbSize = param.args[2] instanceof Number
+                        ? ((Number) param.args[2]).intValue() : -1;
+                    if (cbIndex > 0 && cbSize == 17 && xpan17Captures.size() < 8) {
+                        xpan17Captures.put(cbIndex,
+                            java.util.Arrays.copyOf(data, data.length));
+                    }
                     if (hash == filterProbeLutHash) return;
                     filterProbeLutHash = hash;
                     Log.i(TAG, "XPAN preview 17^3 LUT changed"
@@ -2556,6 +4043,7 @@ public final class XpanLiveFeature {
             XposedBridge.hookMethod(captureRequest, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    xpanFilterPresenter = param.thisObject;
                     Log.i(TAG, "XPAN filter captureRequest"
                         + ", currentIndex=" + currentIndex(param.thisObject)
                         + ", manager[" + managerBasicSnapshot() + "]");
@@ -2563,6 +4051,106 @@ public final class XpanLiveFeature {
             });
         } catch (Throwable error) {
             Log.e(TAG, "XPAN filter probe: captureRequest hook unavailable", error);
+        }
+        try {
+            Method apply = symbols.method("FilterPresenter.apply");
+            XposedBridge.hookMethod(apply, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    Log.i(TAG, "XPAN filter apply BEFORE"
+                        + ", args=" + Arrays.toString(param.args)
+                        + ", currentIndex=" + currentIndex(param.thisObject)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                }
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    // r477: keep the presenter reference for index->type tagging; no
+                    // invalidation (see the select hook comment).
+                    xpanFilterPresenter = param.thisObject;
+                    Log.i(TAG, "XPAN filter apply AFTER"
+                        + ", currentIndex=" + currentIndex(param.thisObject)
+                        + ", manager[" + managerBasicSnapshot() + "]");
+                    scheduleFilterManagerSnapshots(param.thisObject);
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: apply hook unavailable", error);
+        }
+        try {
+            Method previewRequest = symbols.method("FilterPresenter.previewRequest");
+            XposedBridge.hookMethod(previewRequest, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    Object request = param.getResult();
+                    if (request == null) return;
+                    // r477: keep the presenter and learn the strip-index -> type pair --
+                    // the composite capture happens on the GL thread and can only tag
+                    // itself through this map.
+                    xpanFilterPresenter = param.thisObject;
+                    // r466: track the active filter type BEFORE the log dedup -- the video
+                    // bridge needs this even when the log line is suppressed.
+                    String currType = safeField(request, "mCurrFilterType");
+                    boolean typeValid = currType != null && !"null".equals(currType)
+                        && !"?".equals(currType) && !currType.isEmpty()
+                        && !"default".equals(currType);
+                    xpanFilterType = typeValid ? currType : null;
+                    learnXpanIndexType(currentIndex(param.thisObject),
+                        typeValid ? currType : null);
+                    long now = android.os.SystemClock.uptimeMillis();
+                    if (now - filterPreviewRequestLogged < 1500) return;
+                    filterPreviewRequestLogged = now;
+                    Log.i(TAG, "XPAN filter previewRequest -> "
+                        + request.getClass().getSimpleName()
+                        + ", currentIndex=" + currentIndex(param.thisObject)
+                        + ", currType=" + currType
+                        + ", currIntensity=" + safeField(request, "mCurrFilterIntensity")
+                        + ", pendingType=" + safeField(request, "mPendingFilterType")
+                        + ", capMode=" + safeField(request, "mCapModeName"));
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: previewRequest hook unavailable", error);
+        }
+        try {
+            Class<?> filterConstant = XposedHelpers.findClass(
+                "com.oplus.camera.filter.FilterConstant", classLoader);
+            XposedBridge.hookAllMethods(filterConstant, "buildLutPath",
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (!XPAN_MODE.equals(currentCameraMode)) return;
+                        String path = String.valueOf(param.getResult());
+                        if (path.equals(lastLutPath) || "null".equals(path)) return;
+                        lastLutPath = path;
+                        Log.i(TAG, "XPAN filter buildLutPath"
+                            + (param.args.length > 0 ? "(" + param.args[0] + ")" : "()")
+                            + " -> " + path
+                            + ", caller=" + (new Throwable().getStackTrace().length > 2
+                                ? new Throwable().getStackTrace()[2].getClassName()
+                                    + "." + new Throwable().getStackTrace()[2].getMethodName()
+                                : "?"));
+                    }
+                });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: buildLutPath hook unavailable", error);
+        }
+        try {
+            Class<?> helper = XposedHelpers.findClass(
+                "com.oplus.camera.filter.FilterHelper", classLoader);
+            XposedBridge.hookAllMethods(helper, "getFilterTypeByIndex",
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (!XPAN_MODE.equals(currentCameraMode)) return;
+                        Log.i(TAG, "XPAN filter getFilterTypeByIndex"
+                            + "(" + (param.args.length > 0 ? param.args[0] : "?")
+                            + ") -> " + param.getResult()
+                            + ", caller=" + (new Throwable().getStackTrace().length > 2
+                                ? new Throwable().getStackTrace()[2].getClassName()
+                                    + "." + new Throwable().getStackTrace()[2].getMethodName()
+                                : "?"));
+                    }
+                });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN filter probe: FilterHelper hook unavailable", error);
         }
         Log.i(TAG, "XPAN filter probe installed (r453 diagnostics)");
     }
@@ -2599,6 +4187,29 @@ public final class XpanLiveFeature {
             text.append(String.format(java.util.Locale.US, "%.4f", data[i]));
         }
         return text.append("...]").toString();
+    }
+
+    /** r492: deep, noise-filtered stack for the EV-scope probe (20 app frames). */
+    private static String evScopeStack() {
+        StringBuilder text = new StringBuilder(", stack=");
+        StackTraceElement[] frames = new Throwable().getStackTrace();
+        int added = 0;
+        for (StackTraceElement frame : frames) {
+            String cls = frame.getClassName();
+            if (cls.startsWith("local.jiege")
+                || cls.startsWith("de.robv")
+                || cls.startsWith("java.lang.reflect")
+                || cls.contains("XposedBridge")
+                || cls.contains("LSPosed")
+                || cls.contains(".k.") && frame.getMethodName().startsWith("proceed")
+                || frame.getMethodName().equals("intercept")) {
+                continue;
+            }
+            text.append(cls).append('.').append(frame.getMethodName()).append(':')
+                .append(frame.getLineNumber()).append('\n');
+            if (++added >= 20) break;
+        }
+        return text.toString();
     }
 
     private static String stackSnippet() {
@@ -3681,7 +5292,7 @@ public final class XpanLiveFeature {
         Object existing = XposedHelpers.getObjectField(renderer, "s");
         Object manager = XposedHelpers.getStaticObjectField(managerHolder, "a");
         int lutSize = XposedHelpers.getIntField(manager, "t");
-        float[] lutData = chooseXpanBasicToneTable(manager, lutSize);
+        float[] lutData = chooseXpanVideoBasicToneTable(manager, lutSize);
         long wash = GrPreviewStreamRestore.paletteWashes.get();
         boolean existingValid = existing != null && hasBasicToneData(existing);
         Integer rendererId = System.identityHashCode(renderer);
@@ -3701,7 +5312,24 @@ public final class XpanLiveFeature {
         boolean staleByForeign = uploaded == null
             ? existingValid
             : existing != uploaded[1];
-        if (existingValid && !staleByWash && !staleByForeign) return true;
+        // r466: the chosen table is tracked by reference (composite copies and the clean
+        // snapshot are stable defensive arrays; manager.c is mutated in place so its
+        // reference stays and content changes ride on the wash generation). A filter
+        // toggle swaps the reference, forcing a re-upload of renderer.s.
+        boolean staleByTable = uploaded == null || uploaded.length < 3
+            || uploaded[2] != lutData;
+        if (existingValid && !staleByWash && !staleByForeign && !staleByTable) return true;
+        if (existingValid && staleByTable && !staleByWash && !staleByForeign
+            && basicToneTextureUploadLogs < 8) {
+            basicToneTextureUploadLogs++;
+            Log.i(TAG, "XPAN live BasicTone table switched"
+                + (xpanFilterType != null
+                    ? ", filter=" + xpanFilterType : ", filter cleared")
+                + ", source=" + source
+                + ", renderer=" + rendererId
+                + ", size=" + lutSize
+                + ", dataLength=" + lutData.length);
+        }
         if (lutSize <= 0 || lutData == null || lutData.length == 0) {
             if (!basicToneTextureUnavailableLogged) {
                 basicToneTextureUnavailableLogged = true;
@@ -3749,7 +5377,7 @@ public final class XpanLiveFeature {
         }
         XposedHelpers.setObjectField(renderer, "s", texture);
         uploadsByRenderer.put(
-            rendererId, new Object[]{wash, texture});
+            rendererId, new Object[]{wash, texture, lutData});
         if (basicToneTextureUploadLogs < 8) {
             basicToneTextureUploadLogs++;
             Log.i(TAG, "XPAN live BasicTone texture uploaded"
@@ -3777,6 +5405,107 @@ public final class XpanLiveFeature {
             return clean;
         }
         return (float[]) XposedHelpers.getObjectField(manager, "c");
+    }
+
+    /**
+     * r466: table selector for the live VIDEO bridge. While an XPAN filter is active the
+     * native preview pipeline receives the filter-composited 64^3 table through
+     * gl.s.e0(slot=1) (measured 2026-11-20: 385ms after the 800t apply, hash
+     * -8384517229819880239) and the cover picks the filter up through the capture
+     * request -- only the video renderer kept sampling the clean table, which is why
+     * the cover showed the filter and the video did not. Prefer the captured composite;
+     * fall back to the clean XPAN table when no filter is active or no composite has
+     * been delivered yet.
+     */
+    private static float[] chooseXpanVideoBasicToneTable(Object manager, int lutSize) {
+        // r468 probe: red table into renderer.s when the s channel is selected.
+        if (redProbeWantsRenderer() && lutSize == 64) {
+            return redProbeTable();
+        }
+        if (xpanFilterType != null) {
+            float[] composite = xpanFilterCompositeTable;
+            if (composite != null
+                && composite.length == lutSize * lutSize * lutSize * 3) {
+                return composite;
+            }
+        }
+        return chooseXpanBasicToneTable(manager, lutSize);
+    }
+
+    /*
+     * r467: compose the active XPAN filter into a 64^3 BasicTone table using the native
+     * pipeline itself. Lut3dDataManager.p() (updateBasicToneData) composes through
+     * CombineLutHelper.process(x, y, v, w, z, A, B, m, l) with every argument taken from
+     * the manager's own fields -- we mirror that exact call on the manager's OWN helper
+     * instance (field L, already initialized by stock) under the manager's own monitor
+     * (field a). When the manager state carries the selected filter (field m), the
+     * output is the same composite the stock preview pipeline uses; if the state does
+     * not carry it, the output degenerates to the plain table and the video bridge
+     * simply uploads that (no worse than the clean table). Failures log and leave the
+     * captured-composite / clean-table fallbacks in place.
+     */
+    private static void composeXpanFilterTableNative() {
+        String type = xpanFilterType;
+        if (type == null || !XPAN_MODE.equals(currentCameraMode)) return;
+        Class<?> holder = installedManagerHolder;
+        if (holder == null) {
+            Log.i(TAG, "XPAN native filter composition skipped, no manager holder");
+            return;
+        }
+        try {
+            Object manager = XposedHelpers.getStaticObjectField(holder, "a");
+            if (manager == null) {
+                Log.i(TAG, "XPAN native filter composition skipped, manager null");
+                return;
+            }
+            Object helper = XposedHelpers.getObjectField(manager, "L");
+            if (helper == null) {
+                Log.i(TAG, "XPAN native filter composition skipped, CombineLutHelper null");
+                return;
+            }
+            String[] names = (String[]) XposedHelpers.getObjectField(manager, "m");
+            int[] sizes = (int[]) XposedHelpers.getObjectField(manager, "l");
+            Object monitor = XposedHelpers.getObjectField(manager, "a");
+            float[] out = (float[]) XposedHelpers.callMethod(helper, "process",
+                XposedHelpers.getIntField(manager, "x"),
+                XposedHelpers.getIntField(manager, "y"),
+                XposedHelpers.getIntField(manager, "v"),
+                XposedHelpers.getIntField(manager, "w"),
+                XposedHelpers.getFloatField(manager, "z"),
+                XposedHelpers.getFloatField(manager, "A"),
+                XposedHelpers.getFloatField(manager, "B"),
+                names, sizes);
+            // r479: guard must pin the EXPECTED size -- the old form
+            // (out.length != outSize^3*3) passed an empty table when outSize was 0
+            // (0 == 0), which then clobbered the good captured composite.
+            int outSize = sizes != null && sizes.length > 0 ? sizes[0] : 64;
+            if (out == null || outSize != 64 || out.length != 64 * 64 * 64 * 3) {
+                Log.i(TAG, "XPAN native filter composition returned invalid table"
+                    + ", filter=" + type
+                    + ", names=" + (names == null ? "null" : java.util.Arrays.toString(names))
+                    + ", sizes=" + (sizes == null ? "null" : java.util.Arrays.toString(sizes))
+                    + ", outSize=" + outSize
+                    + ", floats=" + (out == null ? -1 : out.length));
+                return;
+            }
+            long hash = tableContentHash(out);
+            boolean replaced = hash != xpanFilterCompositeHash;
+            if (replaced) {
+                xpanFilterCompositeTable = out;
+                xpanFilterCompositeHash = hash;
+            }
+            xpanFilterComposedForType = type;
+            Log.i(TAG, "XPAN filter table composed via native CombineLutHelper"
+                + ", filter=" + type
+                + ", names=" + (names == null ? "null" : java.util.Arrays.toString(names))
+                + ", sizes=" + (sizes == null ? "null" : java.util.Arrays.toString(sizes))
+                + ", outSize=" + outSize
+                + ", floats=" + out.length
+                + ", hash=" + hash
+                + ", replacedPrior=" + replaced);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN native filter composition failed", error);
+        }
     }
 
     /**

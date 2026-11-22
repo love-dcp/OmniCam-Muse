@@ -46,6 +46,7 @@ final class GrMasterLiveLutDiagnostic {
     private static volatile long lastRenderLogAt;
     private static volatile String lastManagerState;
     private static volatile long lastManagerLogAt;
+    private static volatile long lastComposeDumpAt;
 
     private GrMasterLiveLutDiagnostic() {}
 
@@ -60,6 +61,44 @@ final class GrMasterLiveLutDiagnostic {
             "com.oplus.camera.common.utils.Lut3dDataManager", classLoader);
         Method onInit = XposedHelpers.findMethodExact(pipeline, "onInit");
         Method renderFrame = XposedHelpers.findMethodExact(pipeline, "r", imageData);
+
+        /*
+         * r471: dump the CombineLutHelper parameter state (the m String[] argument pack and
+         * the scalar fields) whenever MASTER mode composes a table. Master filters reach the
+         * live video through this composition, and the XPAN manager state has all-null names
+         * (r467 names=[null x64]) -- the layout captured here is what the XPAN repair needs
+         * to inject the active filter into its own composition.
+         */
+        XposedBridge.hookAllMethods(manager, "p", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                Object state = param.thisObject;
+                if (state == null) return;
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastComposeDumpAt < 30000L) return;
+                if (!GrPreviewStreamRestore.inMasterMode()) return;
+                lastComposeDumpAt = now;
+                StringBuilder names = new StringBuilder();
+                Object pack = XposedHelpers.getObjectField(state, "m");
+                if (pack instanceof String[]) {
+                    String[] entries = (String[]) pack;
+                    for (int i = 0; i < entries.length; i++) {
+                        if (entries[i] != null) {
+                            names.append(i).append('=').append(entries[i]).append(' ');
+                        }
+                    }
+                } else {
+                    names.append("not-a-array");
+                }
+                Log.i(TAG, "master compose params: names=[" + names.toString().trim() + "]"
+                    + ", x=" + XposedHelpers.getIntField(state, "x")
+                    + ", y=" + XposedHelpers.getIntField(state, "y")
+                    + ", v=" + XposedHelpers.getIntField(state, "v")
+                    + ", w=" + XposedHelpers.getIntField(state, "w")
+                    + ", z=" + XposedHelpers.getFloatField(state, "z")
+                    + ", A=" + XposedHelpers.getFloatField(state, "A")
+                    + ", B=" + XposedHelpers.getFloatField(state, "B"));
+            }
+        });
 
         XposedBridge.hookMethod(onInit, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -139,6 +178,47 @@ final class GrMasterLiveLutDiagnostic {
                      */
                     if (instance != null && !masterLive) {
                         XpanLiveFeature.preSeedXpanBasicToneTexture(instance);
+                    }
+                    /*
+                     * r474: the XPAN filter fix. The preview shows the filter as
+                     * BasicTone followed by the filter's own 17^3 cube, but the live
+                     * video only receives the plain 64^3 table (task.d, generic
+                     * 169adb06), so the filter never reaches the video. Compose the
+                     * STOCK task.d table (captured here, before any swap) through the
+                     * stock cube (/odm/etc/camera/meishe_lut) and put the result back.
+                     * r473 proved the base must be task.d itself, NOT manager.c:
+                     * composing over manager.c (-881252736) reproduced r427's brightness
+                     * regression because -881252736 is not the stock video table. The
+                     * masterLive flag is NOT a gate: r472 measured it flipping across
+                     * sessions for the same XPAN pipeline; the XPAN check lives in
+                     * xpanLiveVideoLookTable (currentCameraMode). The r470 red probe
+                     * ("t" mode) keeps precedence for channel diagnosis.
+                     */
+                    boolean probeTargetsTask = instance != null
+                        && XpanLiveFeature.videoChannelProbeTargetsTask();
+                    if (instance != null && !probeTargetsTask
+                            && objectField(param.thisObject, "d") instanceof float[]) {
+                        float[] stockTable = (float[]) objectField(param.thisObject, "d");
+                        float[] look = XpanLiveFeature.xpanLiveVideoLookTable(stockTable);
+                        if (look != null) {
+                            XposedHelpers.setObjectField(param.thisObject, "d", look);
+                            Log.i(TAG, "XPAN live video look: task.d swapped to composed"
+                                + " filter table, " + XpanLiveFeature.xpanVideoLookState());
+                        }
+                    }
+                    /*
+                     * r470: the r468 red-probe matrix (o/n/u1/s) never touched task.d -- the
+                     * gh.p3$a table that lands in the ch.g direct attachment. r427's A/B already
+                     * proved swapping task.d changes the direct-XPAN video picture (brightness
+                     * regression), so "t" targets exactly this channel: red table in, and a red
+                     * video proves it is the one the live encoder samples.
+                     */
+                    if (probeTargetsTask
+                            && objectField(param.thisObject, "d") instanceof float[]) {
+                        XposedHelpers.setObjectField(
+                            param.thisObject, "d", XpanLiveFeature.redProbeTable());
+                        Log.i(TAG, "XPAN video channel probe: task.d swapped to red table"
+                            + ", mode=" + GrPreviewStreamRestore.modeName());
                     }
                     /*
                      * r428: the r427 task.d replacement is reverted. The r427 A/B proved the

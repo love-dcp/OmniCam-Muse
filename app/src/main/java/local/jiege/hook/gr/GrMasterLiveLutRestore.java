@@ -341,6 +341,21 @@ final class GrMasterLiveLutRestore {
                 if (param.args.length > 8) {
                     clearStaleBasicToneGate(param.args[8], "draw p()");
                 }
+                // r468 master comparison probe (before the VIDEO_LUT gate so it works by
+                // default): red table into renderer.s for master live video frames.
+                if (prop("persist.omnicam.master.videochannel").contains("s")
+                    && GrPreviewStreamRestore.inMasterMode()
+                    && param.thisObject != null) {
+                    try {
+                        syncTexture(param.thisObject,
+                            local.jiege.hook.xpan.XpanLiveFeature.redProbeTable(), 64);
+                        XposedHelpers.setBooleanField(param.thisObject, "p", true);
+                        reportOnce("master video probe: red table synced into renderer.s");
+                    } catch (Throwable error) {
+                        Log.e(TAG, "master video probe failed", error);
+                    }
+                    return;
+                }
                 if (!VIDEO_LUT) return;
                 if (!isTargetMode()) return;
                 Object renderer = param.thisObject;
@@ -358,8 +373,8 @@ final class GrMasterLiveLutRestore {
                         + " lutParams.g=" + flag(lutParams, "g")
                         + " renderer.s=" + describeTexture(field(renderer, "s")));
                 }
-                if (param.args.length != 10 || renderer == null || lutParams == null) return;
-                try {
+                    if (param.args.length != 10 || renderer == null || lutParams == null) return;
+                    try {
                     if (!XposedHelpers.getBooleanField(renderer, "p")) return;
                     Object existing = field(renderer, "s");
                     if (existing == null) return;

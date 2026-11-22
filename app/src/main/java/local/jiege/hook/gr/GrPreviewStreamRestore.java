@@ -283,4 +283,54 @@ public final class GrPreviewStreamRestore {
             Log.e(TAG, "env refresh hook failed", error);
         }
     }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean forcedWashRunning =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * r462: run the XPAN env wash on demand. The armed wash only fires when native
+     * happens to call e(1,0,...) in XPAN mode -- at a fresh session's first XPAN entry
+     * that can lag the entry by seconds (measured grey 2026-11-20 20:59:52: the entry
+     * frames sampled the leftover table because paletteWashes was still 0 and
+     * {@link #cleanXpanTable} null, so the repair gate {@code wash <= 0} blocked and
+     * field o kept the previous mode's table). Same body as the armed wash:
+     * e(1,2,"common") restores the fresh-process LMT state, e(1,0,"xpan") recomputes
+     * the clean-env XPAN table into manager.c, snapshot published to cleanXpanTable,
+     * then paletteWashes increments so the draw-hook repair can push field o.
+     */
+    public static void forceXpanEnvWash(Object manager, String reason) {
+        if (manager == null) return;
+        if (!forcedWashRunning.compareAndSet(false, true)) return;
+        try {
+            if (GrState.isGrMode() || !inXpanMode()) return;
+            if (XpanLiveFeature.isXpanLiveFrameFlowing()) {
+                Log.i(TAG, "forced xpan wash skipped, live frames flowing (" + reason + ")");
+                return;
+            }
+            rearming.set(Boolean.TRUE);
+            Object washed = XposedHelpers.callMethod(manager, "e", 1, 2, "common");
+            Object recomputed = XposedHelpers.callMethod(manager, "e", 1, 0, "xpan");
+            String basicHash = "unknown";
+            try {
+                Object basic = XposedHelpers.getObjectField(manager, "c");
+                if (basic instanceof float[] && ((float[]) basic).length > 0) {
+                    float[] table = (float[]) basic;
+                    cleanXpanTable = java.util.Arrays.copyOf(table, table.length);
+                    cleanXpanTableSize = XposedHelpers.getIntField(manager, "t");
+                    basicHash = String.valueOf(java.util.Arrays.hashCode(table));
+                }
+            } catch (Throwable ignored) {
+            }
+            paletteWashes.incrementAndGet();
+            Log.i(TAG, "forced xpan env wash (" + reason + ")"
+                + " -> e(1,2,\"common\") = " + washed
+                + ", e(1,0,\"xpan\") = " + recomputed
+                + ", basicHash=" + basicHash);
+        } catch (Throwable error) {
+            Log.e(TAG, "forced xpan env wash failed", error);
+        } finally {
+            rearming.remove();
+            forcedWashRunning.set(false);
+        }
+    }
 }

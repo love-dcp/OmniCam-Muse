@@ -80,7 +80,32 @@ final class GrMasterLiveOutputDiagnostic {
 
     private GrMasterLiveOutputDiagnostic() {}
 
+    private static String property(String name, String fallback) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            String value = (String) type.getMethod("get", String.class).invoke(null, name);
+            return value == null || value.isEmpty() ? fallback : value.trim();
+        } catch (Throwable error) {
+            return fallback;
+        }
+    }
+
+    /*
+     * r465: this is a per-frame diagnostic suite (2x GL error drains + reflection +
+     * logcat per converted frame, plus a glBindTexture hook) that used to install
+     * unconditionally and ran on EVERY live session of ANY mode -- measured jank on the
+     * 4K (3840x2880) live preview of the highPixel mode, worst right after returning
+     * from the gallery while the stream rebuilds. The XPAN live investigations (r427+)
+     * it was built for are closed, so it now only installs when explicitly requested:
+     * setprop persist.omnicam.liveyuv.diag 1 (or on/true), restart the camera.
+     */
     static void install(ClassLoader classLoader) throws Throwable {
+        String enabled = property("persist.omnicam.liveyuv.diag", "0").toLowerCase();
+        if (!("1".equals(enabled) || "on".equals(enabled) || "true".equals(enabled))) {
+            Log.i(TAG, "master live YUV output diagnostic skipped"
+                + " (persist.omnicam.liveyuv.diag not enabled)");
+            return;
+        }
         Class<?> conversionBase = XposedHelpers.findClass(CONVERSION_BASE, classLoader);
         XposedBridge.hookMethod(
             XposedHelpers.findMethodExact(
