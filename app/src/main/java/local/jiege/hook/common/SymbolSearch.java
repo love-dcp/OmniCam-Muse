@@ -223,6 +223,7 @@ public final class SymbolSearch {
             int modifiers = method.getModifiers();
             if (s.has("static") && Modifier.isStatic(modifiers) != s.getBoolean("static")) continue;
             if (s.has("abstract") && Modifier.isAbstract(modifiers) != s.getBoolean("abstract")) continue;
+            if (s.has("final") && Modifier.isFinal(modifiers) != s.getBoolean("final")) continue;
             if (!notInvokes.isEmpty()) {
                 boolean excluded = false;
                 for (MethodData invoked : method.getInvokes()) if (notInvokes.contains(invoked.getDescriptor())) excluded = true;

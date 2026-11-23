@@ -4,6 +4,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 import local.jiege.hook.common.Settings;
 import local.jiege.settings.ModuleSettings;
 
@@ -44,11 +45,11 @@ public final class LogLut {
     private static final String TAG = "LogLut";
 
     /** MasterVideoDecision -- same class OpenGate hooks, different answers. */
-    private static final String DECISION = "o9.h";
+    private static final String DECISION = "MasterVideoDecision";
     /** LogVideoModel: e() returns pref_log_video_key, default "off". */
-    private static final String LOG_VIDEO_MODEL = "hh.a";
+    private static final String LOG_VIDEO_MODEL = "LogVideoModel";
     /** LogVideoPresenter. */
-    private static final String PRESENTER = "ih.g";
+    private static final String PRESENTER = "LogVideoPresenter";
     /** The LUT panel itself. */
     private static final String MENU_VIEW = "com.oplus.camera.feature.logvideo.view.LogLutMenuView";
     /** 3D LUT loader -- the thing that actually needs log_video_{sdr,hdr}_3dlut.cube. */
@@ -76,9 +77,13 @@ public final class LogLut {
     }
 
     private static void install(ClassLoader classLoader) throws Throwable {
-        Class<?> decision = XposedHelpers.findClass(DECISION, classLoader);
-        Class<?> model = XposedHelpers.findClass(LOG_VIDEO_MODEL, classLoader);
-        Class<?> presenter = XposedHelpers.findClass(PRESENTER, classLoader);
+        Class<?> decision = Symbols.get().cls(DECISION);
+        Class<?> presenter = Symbols.get().cls(PRESENTER);
+        // The pref_log_video_key holder class exists on older builds only; newer builds read
+        // the pref inside the presenter, so gate 3 below is skipped there.
+        Class<?> model = Symbols.get().has("LogVideoModel")
+            ? Symbols.get().cls(LOG_VIDEO_MODEL) : null;
+        if (model == null) Log.i(TAG, "log video model class absent on this build, gate 3 skipped");
 
         // Gate 1: "Log preview" master switch, index 4 of the master-video feature list.
         XposedBridge.hookAllMethods(decision, "m", new XC_MethodHook() {
@@ -108,7 +113,8 @@ public final class LogLut {
 
         // Gate 3: pref_log_video_key, which nothing in this build ever writes. Report it as "on"
         // so the presenter's checkLogPreviewVisible() gets past its second condition.
-        XposedBridge.hookAllMethods(model, "e", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(model == null ? Object.class : model, "e",
+            new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!enabled()) return;
                 Object stock = param.getResult();
@@ -121,7 +127,8 @@ public final class LogLut {
         });
 
         // Observation: which branch checkLogPreviewVisible() takes.
-        XposedBridge.hookAllMethods(presenter, "C2", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter,
+            Symbols.get().name("@LogVideoPresenter.visibilityProbe"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!enabled() || reportedVisible) return;
                 reportedVisible = true;

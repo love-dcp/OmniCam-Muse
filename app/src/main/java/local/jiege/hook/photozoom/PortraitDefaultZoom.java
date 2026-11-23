@@ -4,6 +4,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * Starts each portrait page at 1x.
@@ -17,9 +18,9 @@ import local.jiege.hook.common.Log;
 public final class PortraitDefaultZoom {
     private static final String TAG = "PortraitDefaultZoom";
     private static final String CAMERA_CONFIG = "com.oplus.camera.configure.CameraConfig";
-    private static final String PORTRAIT_MODE = "fm.o1";
-    private static final String ZOOM_PRESENTER = "il.h0";
-    private static final String DEFAULT_ZOOM_KEY = "com.oplus.portrait.zoom.value.default";
+    private static final String PORTRAIT_MODE = "PortraitCapMode";
+    private static final String ZOOM_PRESENTER = "ZoomPresenter";
+        private static final String DEFAULT_ZOOM_KEY = "com.oplus.portrait.zoom.value.default";
     private static final float DEFAULT_ZOOM = 1.0f;
     private static final long ARM_WINDOW_NANOS = 5_000_000_000L;
 
@@ -76,8 +77,8 @@ public final class PortraitDefaultZoom {
     }
 
     private static void installOneShotInitialZoom(ClassLoader classLoader) {
-        Class<?> portraitMode = XposedHelpers.findClass(PORTRAIT_MODE, classLoader);
-        Class<?> zoomPresenter = XposedHelpers.findClass(ZOOM_PRESENTER, classLoader);
+        Class<?> portraitMode = Symbols.get().cls(PORTRAIT_MODE);
+        Class<?> zoomPresenter = Symbols.get().cls(ZOOM_PRESENTER);
 
         XposedBridge.hookMethod(
                 XposedHelpers.findMethodExact(portraitMode, "onStart"),
@@ -89,8 +90,7 @@ public final class PortraitDefaultZoom {
                 });
 
         XposedBridge.hookMethod(
-                XposedHelpers.findMethodExact(
-                        zoomPresenter, "y4", float.class, boolean.class),
+                Symbols.get().method("@ZoomPresenter.commit"),
                 new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
                         if (param.args == null || param.args.length != 2
@@ -117,7 +117,8 @@ public final class PortraitDefaultZoom {
 
     private static boolean isPortrait(Object zoomPresenter) {
         try {
-            return "portrait".equals(XposedHelpers.getObjectField(zoomPresenter, "q"));
+            return "portrait".equals(XposedHelpers.getObjectField(
+                    zoomPresenter, Symbols.get().name("@PresenterBase.modeName")));
         } catch (Throwable throwable) {
             if (MODE_PROBE_FAILED.compareAndSet(false, true)) {
                 Log.i(TAG, "portrait mode probe failed " + throwable);

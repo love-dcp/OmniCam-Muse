@@ -7,6 +7,7 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.WeakHashMap;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * Restores the master live-photo video to the state a fresh master session has.
@@ -33,10 +34,10 @@ import local.jiege.hook.common.Log;
  */
 final class GrMasterLiveLutRestore {
     private static final String TAG = "RicohGrPort";
-    private static final String PIPELINE = "gh.p3";
+    private static final String PIPELINE = "@VideoEffectPipeline";
     private static final String IMAGE_DATA =
         "com.oplus.camera.feature.livephoto.data.ImageData";
-    private static final String LIVE_RENDERER = "ch.g";
+    private static final String LIVE_RENDERER = "@WarpRenderer";
     private static final String LUT_MANAGER_HOLDER =
         "com.oplus.camera.common.utils.Lut3dDataManager$b";
     private static final int MASTER_LIVE_LUT_TYPE = 7;
@@ -264,9 +265,9 @@ final class GrMasterLiveLutRestore {
     }
 
     static void install(ClassLoader classLoader) throws Throwable {
-        final Class<?> pipeline = XposedHelpers.findClass(PIPELINE, classLoader);
+        final Class<?> pipeline = Symbols.get().cls("VideoEffectPipeline");
         final Class<?> imageData = XposedHelpers.findClass(IMAGE_DATA, classLoader);
-        final Class<?> liveRenderer = XposedHelpers.findClass(LIVE_RENDERER, classLoader);
+        final Class<?> liveRenderer = Symbols.get().cls("WarpRenderer");
         final Class<?> managerHolder = XposedHelpers.findClass(LUT_MANAGER_HOLDER, classLoader);
 
         // The rebuild that produces the picture's BasicTone table runs from e(); capturing it here
@@ -275,7 +276,7 @@ final class GrMasterLiveLutRestore {
             final Class<?> manager = XposedHelpers.findClass(
                 "com.oplus.camera.common.utils.Lut3dDataManager", classLoader);
             XposedBridge.hookMethod(
-                XposedHelpers.findMethodExact(manager, "e", int.class, int.class, String.class),
+                Symbols.get().method("@Lut3d.load"),
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         if (!GrPreviewStreamRestore.hasLeftGr()) return;
@@ -333,7 +334,8 @@ final class GrMasterLiveLutRestore {
          * where stock decides from LutParameters.g whether the BasicTone sampler is bound at all.
          * Master leaves that flag cleared, so nothing samples renderer.s no matter what it holds.
          */
-        XposedBridge.hookAllMethods(liveRenderer, "p", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(liveRenderer,
+            Symbols.get().name("@WarpRenderer.draw"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 // r420: every live video frame draws through here, so the stale GR gate is
                 // cleared per frame before stock reads it -- covering the pre-shutter frames a

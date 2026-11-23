@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 import local.jiege.hook.common.Settings;
 import local.jiege.hook.common.Symbols;
 import local.jiege.settings.ModuleSettings;
@@ -110,7 +111,10 @@ public final class HighPixelEffects {
 
     /** The photo mode's answer to "palette supported" without the mode restriction (the config flag). */
     private static boolean paletteConfigured(Method paletteMode) throws Throwable {
-        return (Boolean) XposedBridge.invokeOriginalMethod(paletteMode, null, new Object[] {"common"});
+        // 7.006.123 takes (mode); 7.006.317 takes (mode, extra) - fill every parameter with "common".
+        Object[] args = new Object[paletteMode.getParameterCount()];
+        for (int i = 0; i < args.length; i++) args[i] = "common";
+        return (Boolean) XposedBridge.invokeOriginalMethod(paletteMode, null, args);
     }
 
     private static void hookEntries(Class<?> mode, final Method paletteMode) {
@@ -272,12 +276,13 @@ public final class HighPixelEffects {
         }
         Class<?> host;
         try {
-            host = XposedHelpers.findClass("tp.k0", classLoader);
+            host = Symbols.get().cls("MenuRightButtonHost");
         } catch (Throwable missing) {
             Log.i(TAG, "entry force-show: no effect container host, skipped");
             return;
         }
-        XposedBridge.hookAllMethods(host, "M6", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(host,
+            Symbols.get().name("@MenuRightButtonHost.bindListener"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 Object view = XposedHelpers.getObjectField(param.thisObject, "o");
                 if (!(view instanceof View)) return;
@@ -406,8 +411,8 @@ public final class HighPixelEffects {
                 } catch (Throwable ignored) {
                     // mode field missing: the log below stays generic
                 }
-                if (reportedModes.add("setup:" + name + ":" + param.args[1] + "," + param.args[2])) {
-                    Log.i(TAG, "entry setup: mode=" + name + " flags=" + param.args[1] + "," + param.args[2]);
+                if (reportedModes.add("setup:" + name + ":" + describeArgs(param.args))) {
+                    Log.i(TAG, "entry setup: mode=" + name + " args=" + describeArgs(param.args));
                 }
             }
         });
@@ -421,6 +426,16 @@ public final class HighPixelEffects {
             Log.i(TAG, "entry setup: no animation param (" + error + ")");
         }
         Log.i(TAG, "entry setup hooked");
+    }
+
+    /** Renders hook arguments of any arity; hook targets rebuilt by R8 may carry fewer args. */
+    private static String describeArgs(Object[] args) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; args != null && i < args.length; i++) {
+            if (i > 0) out.append(',');
+            out.append(args[i]);
+        }
+        return out.toString();
     }
 
     /**

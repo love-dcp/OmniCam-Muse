@@ -199,6 +199,14 @@ else
     # userspace but NOT the kernel, so a bind made by an older build survives across reboots and
     # would keep the black frames coming even after the module is updated.
     BTFIX_SRC="$MODDIR/payload_pkj110/lib64/libAlgoInterface.so"
+    # The patch carries 17.0.0.x offsets; ColorOS 17.0.1.201 relinked the camera
+    # stack, so it is not applied there even when the opt-in property is set.
+    case "$(getprop_safe ro.build.display.id)" in
+        *17.0.1.2*|*17.0.2*|*17.1*)
+            BTFIX_SRC=""
+            log "PKJ110: sdrbt patch not built for this camera stack, ignored"
+            ;;
+    esac
     if grep -q " /odm/lib64/libAlgoInterface.so " /proc/self/mounts 2>/dev/null; then
         umount /odm/lib64/libAlgoInterface.so 2>>"$LOG" \
             && log "PKJ110: detached libAlgoInterface.so bind"

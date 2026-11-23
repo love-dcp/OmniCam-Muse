@@ -496,27 +496,94 @@ if [ "$PROFILE" = PKJ110 ]; then
             log "native bind FAIL $TARGET"
         fi
     }
+    # Stock fingerprint -> payload generation.
+    #
+    # A ColorOS point release relinks the camera stack: PKJ110_17.0.1.201 raised
+    # libextensionlayer.so from 1723576 to 1756488 bytes and moved
+    # IsIZoomEnableVideo from 0xa61c8 to 0xaa838. Binding the 17.0.0.x payload
+    # there put an old-ABI CameraHWConfiguration.config on the new HAL, and
+    # ChiHwConfigWrapper::Create then handed CFI an unmapped pointer:
+    #   SIGSEGV #00 __cfi_slowpath+28 / #01 ChiHwConfigWrapper::Create (.cfi)
+    #   -> vendor.qti.camera.provider-service_64 died with Process uptime 0s.
+    # So the payload is chosen by hashing the stock library that is about to be
+    # replaced, never by build-string guessing, and an unrecognised stock file
+    # binds nothing at all (a camera without ISZ beats a camera that cannot open).
+    PKJ_LIB=/odm/lib64/libextensionlayer.so
+    PKJ_STOCK_17_0_0=6af236b1dbfae3629c86e8f956d33f77
+    PKJ_STOCK_17_0_1=36d10228409c766502b8e67566c6be49
+    PKJ_PAYLOAD_17_0_0=6c3d0eb13f2e2dd0efa6e608b5d70b43
+    PKJ_PAYLOAD_17_0_1=47db6163f275a0fe2430315d447a6390
+    PKJ_CUR=$(md5sum "$PKJ_LIB" 2>/dev/null | cut -d' ' -f1)
+    if [ -f "$MODDIR/force_pkj_payload" ]; then
+        PKJ_GEN=$(cat "$MODDIR/force_pkj_payload" 2>/dev/null | tr -d ' \r\n')
+        log "pkj payload forced -> $PKJ_GEN"
+    else
+        case "$PKJ_CUR" in
+            "$PKJ_STOCK_17_0_0") PKJ_GEN=17.0.0 ;;
+            "$PKJ_STOCK_17_0_1") PKJ_GEN=17.0.1.201 ;;
+            "$PKJ_PAYLOAD_17_0_0"|"$PKJ_PAYLOAD_17_0_1")
+                # Already one of ours (hot re-apply): the library itself carries
+                # no stock hash any more, so fall back to the build string.
+                case "$(getprop_safe ro.build.display.id)" in
+                    *17.0.1.2*|*17.0.2*|*17.1*) PKJ_GEN=17.0.1.201 ;;
+                    *) PKJ_GEN=17.0.0 ;;
+                esac
+                log "pkj payload already bound, build-string fallback -> $PKJ_GEN"
+                ;;
+            "")
+                # /odm not readable yet or md5sum missing. Do NOT guess from the
+                # build string here: getting it wrong is exactly the CFI crash
+                # above, and no ISZ is the cheaper failure.
+                PKJ_GEN=unknown
+                log "pkj stock hash unavailable, payload disabled for this boot"
+                ;;
+            *) PKJ_GEN=unknown ;;
+        esac
+    fi
+    case "$PKJ_GEN" in
+        17.0.0) PKJ_SRC="$MODDIR/payload_pkj110" ;;
+        17.0.1.201) PKJ_SRC="$MODDIR/payload_pkj110_201" ;;
+        *) PKJ_SRC="" ;;
+    esac
+    log "pkj camera stock md5=${PKJ_CUR:-none} payload=${PKJ_SRC:-none}"
+
     if [ -f "$MODDIR/enable_native_isz" ]; then
-        # 双 bind：lib + 增强 config（仅主摄 2X-3X 的 0x830B 行），只挂 lib
-        # 时 ISZ 无法真正切 sensor 裁剪。config 上下文=vendor_configs_file。
-        bind_native_file "$MODDIR/payload_pkj110/lib64/libextensionlayer.so" \
-            /odm/lib64/libextensionlayer.so vendor_file
-        bind_native_file "$MODDIR/payload_pkj110/etc/camera/CameraHWConfiguration.config" \
-            /odm/etc/camera/CameraHWConfiguration.config vendor_configs_file
+        if [ -z "$PKJ_SRC" ] || [ ! -f "$PKJ_SRC/lib64/libextensionlayer.so" ]; then
+            log "video isz skipped: no payload matches this camera stack"
+        else
+            bind_native_file "$PKJ_SRC/lib64/libextensionlayer.so" \
+                /odm/lib64/libextensionlayer.so vendor_file
+            # The [InsensorZoom] config rows are only meaningful on the build they
+            # were generated from (AECStatsProcessor consumes them; on X8U it is
+            # never instantiated, so the library patch above is what actually
+            # enables ISZ). 17.0.1.201 therefore binds no config: a stale one is
+            # exactly what crashed the provider.
+            if [ "$PKJ_GEN" = 17.0.0 ] && \
+                    [ -f "$PKJ_SRC/etc/camera/CameraHWConfiguration.config" ]; then
+                bind_native_file "$PKJ_SRC/etc/camera/CameraHWConfiguration.config" \
+                    /odm/etc/camera/CameraHWConfiguration.config vendor_configs_file
+            else
+                log "isz config bind skipped on $PKJ_GEN (lib-only)"
+            fi
+        fi
     else
         log "video isz skipped (off by default)"
     fi
     if [ -f "$MODDIR/disable_caf_ubsan_fix" ]; then
         log "caf ubsan fix disabled"
-    else
-        bind_native_file "$MODDIR/payload_pkj110/lib64/com.qti.stats.caflogicaldriver.so" \
+    elif [ -n "$PKJ_SRC" ] && [ -f "$PKJ_SRC/lib64/com.qti.stats.caflogicaldriver.so" ]; then
+        bind_native_file "$PKJ_SRC/lib64/com.qti.stats.caflogicaldriver.so" \
             /vendor/lib64/camera/components/com.qti.stats.caflogicaldriver.so vendor_file
+    else
+        log "caf ubsan fix skipped: no payload for this camera stack"
     fi
     if [ -f "$MODDIR/disable_eis_config" ]; then
         log "eis config fix disabled"
-    else
-        bind_native_file "$MODDIR/payload_pkj110/etc/oplus_eis_camera.vcfg" \
+    elif [ -n "$PKJ_SRC" ] && [ -f "$PKJ_SRC/etc/oplus_eis_camera.vcfg" ]; then
+        bind_native_file "$PKJ_SRC/etc/oplus_eis_camera.vcfg" \
             /odm/etc/camera/oplus_eis_camera.vcfg vendor_configs_file
+    else
+        log "eis config fix skipped: no payload for this camera stack"
     fi
 fi
 

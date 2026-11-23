@@ -303,9 +303,9 @@ public final class MasterColor {
                 if (master) inMaster = true;
                 if (master) lastLoadArgs = param.args.clone();
                 String dir = master && enabled ? previewDir : null;
-                // Entering / leaving master or a new look table invalidates the cached LUT (index -1).
+                // Entering / leaving master or a new look table invalidates the cached LUT (cache keys -1).
                 if (master != wasMaster || (master && !String.valueOf(dir).equals(String.valueOf(loadedDir)))) {
-                    symbols.set("Lut3d.index", param.thisObject, -1);
+                    symbols.setAll("Lut3d.cacheKeys", param.thisObject, -1);
                 }
                 if (master) loadedDir = dir;
                 liveDir.set(dir);
@@ -391,7 +391,7 @@ public final class MasterColor {
         String wanted = enabled ? dir : null;
         if (String.valueOf(wanted).equals(String.valueOf(loadedDir))) return;
         Symbols symbols = Symbols.get();
-        symbols.set("Lut3d.index", lut, -1);
+        symbols.setAll("Lut3d.cacheKeys", lut, -1);
         symbols.call("Lut3d.load", lut, args);
     }
 

@@ -127,6 +127,78 @@ def vaddr_to_offset(data: bytes, vaddr: int) -> int:
     sys.exit(f"error: vaddr {vaddr:#x} is not covered by any PT_LOAD segment")
 
 
+def offset_to_vaddr(data: bytes, off: int) -> int:
+    """Inverse of vaddr_to_offset: file offset -> vaddr inside a PF_X PT_LOAD."""
+    e_phoff = struct.unpack_from("<Q", data, 0x20)[0]
+    e_phentsize = struct.unpack_from("<H", data, 0x36)[0]
+    e_phnum = struct.unpack_from("<H", data, 0x38)[0]
+    for i in range(e_phnum):
+        p = e_phoff + i * e_phentsize
+        p_type, p_flags = struct.unpack_from("<II", data, p)
+        p_offset, p_vaddr, _pa, p_filesz = struct.unpack_from("<QQQQ", data, p + 8)
+        if p_type != 1 or not p_flags & 1:
+            continue
+        if p_offset <= off < p_offset + p_filesz:
+            return p_vaddr + (off - p_offset)
+    sys.exit(f"error: file offset {off:#x} is not inside an executable segment")
+
+
+def locate(data: bytes, words, label: str) -> int:
+    """Find a unique instruction signature; return its vaddr.
+
+    The X8U port shipped fixed vaddrs because they were derived from one build.
+    A ColorOS point release relinks the library and every offset moves, so the
+    bytes of the code being replaced are the only stable anchor. Refusing to
+    patch unless the signature is unique keeps a wrong build from being edited
+    at a random address.
+    """
+    pat = b"".join(struct.pack("<I", w) for w in words)
+    hits, start = [], 0
+    while True:
+        i = data.find(pat, start)
+        if i < 0:
+            break
+        hits.append(i)
+        start = i + 1
+    if len(hits) != 1:
+        sys.exit(f"error: {label} signature matched {len(hits)} sites "
+                 f"({', '.join(hex(h) for h in hits[:6])}); refusing to patch")
+    return offset_to_vaddr(data, hits[0])
+
+
+def resolve_gate(data: bytes, vaddr: int, words, label: str):
+    """Prefer the recorded vaddr; fall back to signature relocation."""
+    off = vaddr_to_offset(data, vaddr)
+    got = struct.unpack_from(f"<{len(words)}I", data, off)
+    if tuple(got) == tuple(words):
+        return vaddr, False
+    moved = locate(data, words, label)
+    print(f"note: {label} relocated {vaddr:#x} -> {moved:#x} "
+          f"(build differs, signature matched once)")
+    return moved, True
+
+
+def build_id(data: bytes) -> str:
+    if data[:4] != b"\x7fELF":
+        return "?"
+    e_shoff = struct.unpack_from("<Q", data, 0x28)[0]
+    e_shentsize = struct.unpack_from("<H", data, 0x3A)[0]
+    e_shnum = struct.unpack_from("<H", data, 0x3C)[0]
+    e_shstrndx = struct.unpack_from("<H", data, 0x3E)[0]
+
+    def sh(i):
+        return struct.unpack_from("<IIQQQQIIQQ", data, e_shoff + i * e_shentsize)
+
+    strtab = sh(e_shstrndx)
+    for i in range(e_shnum):
+        s = sh(i)
+        name = data[strtab[4] + s[0]:].split(b"\0")[0]
+        if name == b".note.gnu.build-id":
+            raw = data[s[4]:s[4] + s[5]]
+            return raw.split(b"\0", 1)[-1].hex()
+    return "?"
+
+
 def capstone_check(word: int, expect: str) -> None:
     try:
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
@@ -165,14 +237,16 @@ def main() -> None:
     args = ap.parse_args()
 
     data = bytearray(open(args.input, "rb").read())
+    print(f"input build-id {build_id(bytes(data))}")
 
-    off = vaddr_to_offset(bytes(data), MODE_GATE_VADDR)
+    mode_vaddr, mode_moved = resolve_gate(
+        bytes(data), MODE_GATE_VADDR, MODE_GATE_ORIG_WORDS, "mode gate")
+    off = vaddr_to_offset(bytes(data), mode_vaddr)
     actual = struct.unpack_from(f"<{len(MODE_GATE_ORIG_WORDS)}I", data, off)
     if actual != MODE_GATE_ORIG_WORDS:
         printable = ", ".join(f"{word:#x}" for word in actual)
-        expected = ", ".join(f"{word:#x}" for word in MODE_GATE_ORIG_WORDS)
-        sys.exit(f"error: mode gate at vaddr {MODE_GATE_VADDR:#x} (file offset {off:#x}) is "
-                 f"({printable}), expected ({expected}) -- wrong build or already patched?")
+        sys.exit(f"error: mode gate at vaddr {mode_vaddr:#x} (file offset {off:#x}) is "
+                 f"({printable}) -- already patched or unknown build")
     for expect, word in zip(
         ("and w11, w7, #0xfffffffd", "cmp w11, #4", "ccmp w11, #8, #4, ne",
          "ccmp w7, #0x1e, #4, ne", "cset w21, eq"),
@@ -186,17 +260,21 @@ def main() -> None:
     ):
         capstone_check(word, expect)
     struct.pack_into(f"<{len(MODE_GATE_NEW_WORDS)}I", data, off, *MODE_GATE_NEW_WORDS)
-    print(f"patched {args.input} vaddr {MODE_GATE_VADDR:#x} (file offset {off:#x}): "
+    print(f"patched vaddr {mode_vaddr:#x} (file offset {off:#x}): "
           f"descriptor whitelist -> professional video within 3.0x")
 
+    aec_vaddr, _ = resolve_gate(
+        bytes(data), AEC_GATE_VADDR, (AEC_GATE_ORIG_WORD,), "aec gate")
     patch_word(
-        data, AEC_GATE_VADDR, AEC_GATE_ORIG_WORD, AEC_GATE_NEW_WORD,
+        data, aec_vaddr, AEC_GATE_ORIG_WORD, AEC_GATE_NEW_WORD,
         "ccmp w16, #1, #0, ne", "ccmp wzr, #0, #0, ne",
     )
 
     if args.allow_60fps:
+        fps_vaddr, _ = resolve_gate(
+            bytes(data), FPS_VADDR, (FPS_ORIG_WORD,), "fps gate")
         patch_word(
-            data, FPS_VADDR, FPS_ORIG_WORD, NOP_WORD,
+            data, fps_vaddr, FPS_ORIG_WORD, NOP_WORD,
             "csel w21, wzr, w21, eq", "nop",
         )
 

@@ -176,7 +176,7 @@ public final class HighPixelFilters {
      */
     private static void hookFeatureGate(ClassLoader classLoader) {
         try {
-            Class<?> factory = XposedHelpers.findClass("gb.d0", classLoader);
+            Class<?> factory = Symbols.get().cls("FeatureFactory");
             XposedBridge.hookAllMethods(factory, "d", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (param.args.length != 3 || !(param.args[1] instanceof String)

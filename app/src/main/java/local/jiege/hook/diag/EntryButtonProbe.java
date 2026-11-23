@@ -7,6 +7,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import java.util.concurrent.atomic.AtomicInteger;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * Narrow, read-only probe for the right-hand enter button ({@code camera_menu_right_enter_button} /
@@ -105,8 +106,9 @@ public final class EntryButtonProbe {
 
     /** The four setters are the only place a click listener reaches these buttons. */
     private static void hookSetters(ClassLoader loader) throws Throwable {
-        Class<?> k0 = XposedHelpers.findClass("tp.k0", loader);
-        for (String name : new String[] {"Ad", "Bf", "Q7", "M6"}) {
+        Class<?> k0 = Symbols.get().cls("MenuRightButtonHost");
+        for (String name : new String[] {"Ad", "Bf", "Q7",
+                Symbols.get().name("@MenuRightButtonHost.bindListener")}) {
             XposedBridge.hookAllMethods(k0, name, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     Log.i(TAG, "click listener installed by tp.k0." + param.method.getName()
@@ -129,7 +131,7 @@ public final class EntryButtonProbe {
     }
 
     private static void hookPanelToggle(ClassLoader loader) throws Throwable {
-        Class<?> k0 = XposedHelpers.findClass("tp.k0", loader);
+        Class<?> k0 = Symbols.get().cls("MenuRightButtonHost");
         XposedBridge.hookAllMethods(k0, "wg", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 Log.i(TAG, "tp.k0.wg(" + (param.args.length > 0 ? param.args[0] : "-")

@@ -346,9 +346,18 @@
   "CaptureParams.refreshEffectEntry": {
    "kind": "method",
    "in": "@CaptureParams",
-   "name": "Q3",
    "params": [],
-   "ret": "void"
+   "ret": "void",
+   "invokes": [
+    "Lcom/oplus/camera/common/thread/ThreadManager;->m(Ljava/lang/Runnable;)V"
+   ],
+   "notInvokes": [
+    "Landroid/view/LayoutInflater;->from(Landroid/content/Context;)Landroid/view/LayoutInflater;",
+    "Lcom/oplus/camera/common/utils/ScreenUtil;->j()Z",
+    "Lcom/oplus/camera/data/DataManager;->getInstance()Lcom/oplus/camera/data/DataManager;",
+    "Landroid/app/Dialog;->show()V",
+    "Ljava/lang/Object;->getClass()Ljava/lang/Class;"
+   ]
   },
   "CaptureParams.menuClick": {
    "kind": "method",
@@ -501,7 +510,6 @@
   },
   "Lut3dData.paletteMode": {
    "kind": "method",
-   "in": "com.oplus.camera.common.utils.Lut3dDataManager",
    "params": [
     "java.lang.String"
    ],
@@ -509,6 +517,9 @@
    "static": true,
    "strings": [
     "com.oplus.feature.color.palette.support"
+   ],
+   "notInvokes": [
+    "Ljava/util/Objects;->equals(Ljava/lang/Object;Ljava/lang/Object;)Z"
    ]
   },
   "Mode.afMode": {
@@ -881,8 +892,7 @@
   "FilterPresenter": {
    "kind": "class",
    "strings": [
-    "resetFilterList()",
-    "stopGetGradienter"
+    "getIntentEffectFilterIndex, invalid index, reset it!"
    ]
   },
   "FilterBeans.typeList": {
@@ -1347,7 +1357,8 @@
   "LivePhotoPresenter": {
    "kind": "class",
    "strings": [
-    "onModeSwitchStageChanged, mbPreviewHdr: "
+    "LivePhotoPresenter-",
+    "persist.camera.livephoto.sub.video.bitrate.4k"
    ]
   },
   "LivePhotoPresenter.create": {
@@ -1604,8 +1615,10 @@
   "Lut3d.mode": {
    "kind": "field",
    "in": "com.oplus.camera.common.utils.Lut3dDataManager",
-   "name": "P",
-   "type": "java.lang.String"
+   "type": "java.lang.String",
+   "writtenBy": [
+    "@Lut3d.release"
+   ]
   },
   "Lut3d.index": {
    "kind": "field",
@@ -1670,9 +1683,11 @@
   "Zoom.fadeLabels": {
    "kind": "method",
    "in": "com.oplus.camera.feature.zoom.view.ZoomSeekBar",
-   "name": "b",
    "params": [],
-   "ret": "void"
+   "ret": "void",
+   "invokes": [
+    "@Zoom.fadeTarget"
+   ]
   },
   "ZoomBase.fadeLabels": {
    "kind": "method",
@@ -2095,21 +2110,26 @@
   "ScaleBar.select": {
    "kind": "method",
    "in": "com.oplus.camera.coui.seekbar.HSScaleBar",
-   "name": "L",
    "params": [
     "int",
     "boolean"
    ],
-   "ret": "void"
+   "ret": "void",
+   "invokes": [
+    "Lcom/oplus/camera/common/thread/ThreadManager;->m(Ljava/lang/Runnable;)V"
+   ]
   },
   "ScaleBar.scrollTo": {
    "kind": "method",
    "in": "com.oplus.camera.coui.seekbar.HSScaleBar",
-   "name": "G",
    "params": [
     "int"
    ],
-   "ret": "void"
+   "ret": "void",
+   "invokes": [
+    "Landroid/view/View;->postInvalidate()V"
+   ],
+   "final": false
   },
   "FilterNames.presenter": {
    "kind": "field",
@@ -2168,6 +2188,784 @@
    "strings": [
     "updateBasicToneData, palette branch skip process, capModeName: "
    ]
+  },
+  "CaptureParams.effectCaller": {
+   "kind": "method",
+   "strings": [
+    "gr",
+    "masterVideo",
+    "professional"
+   ],
+   "invokes": [
+    "Lcom/oplus/camera/common/utils/Lut3dDataManager;->s(I)V"
+   ]
+  },
+  "Lut3d.release": {
+   "kind": "method",
+   "in": "com.oplus.camera.common.utils.Lut3dDataManager",
+   "params": [
+    "boolean"
+   ],
+   "ret": "void",
+   "invokes": [
+    "Lcom/oplus/camera/common/utils/Lut3dDataManager;->m()V",
+    "Lcom/oplus/ocs/camera/CombineLutHelper;->release()V"
+   ]
+  },
+  "Lut3d.cacheKeys": {
+   "kind": "field",
+   "in": "com.oplus.camera.common.utils.Lut3dDataManager",
+   "type": "int",
+   "writtenBy": [
+    "@Lut3d.load"
+   ],
+   "multi": true
+  },
+  "Zoom.fadeTarget": {
+   "kind": "method",
+   "in": "@ZoomBase",
+   "params": [
+    "boolean"
+   ],
+   "ret": "void",
+   "invokes": [
+    "Landroid/os/Handler;->sendEmptyMessageDelayed(IJ)Z"
+   ],
+   "numbers": [
+    2,
+    15
+   ]
+  },
+  "LivePhotoSession": {
+   "kind": "class",
+   "strings": [
+    "genImageDataPool, format: ",
+    "run parallel_proc_unit_%s_LivePhoto_exe cost 0 ms"
+   ]
+  },
+  "LivePhotoEventConsumer": {
+   "kind": "class",
+   "strings": [
+    "getGalleryDataSource, handler is null, so return",
+    "com.oplus.split.gallery.record.support"
+   ]
+  },
+  "LivePhotoFeatureFlags": {
+   "kind": "class",
+   "strings": [
+    "updateGalleryLivePhotoFovMeta, sGalleryLivePhotoFovMeta: "
+   ]
+  },
+  "LivePhotoEisProcessor": {
+   "kind": "class",
+   "strings": [
+    "persist.camera.livephoto.enable.eis.gyro.dump",
+    "super_eis_out_frame_timestamp"
+   ]
+  },
+  "LivePhotoEisWrapper": {
+   "kind": "class",
+   "strings": [
+    "sendToEis, mbQuit is true, so return, dataHandle: ",
+    "putImageDataToCacheMap, repeat value key: "
+   ]
+  },
+  "EisGridData": {
+   "kind": "class",
+   "strings": [
+    ", mTexcoordsRefSize: ",
+    ", mVerticesCount: "
+   ]
+  },
+  "WatermarkProcessor": {
+   "kind": "class",
+   "strings": [
+    "WatermarkProcessor create."
+   ]
+  },
+  "LiveVideoSizeChooser": {
+   "kind": "class",
+   "strings": [
+    ", kickFrameTimeStamp: ",
+    ", guaranteedFrameCount: "
+   ]
+  },
+  "VideoEffectPipeline": {
+   "kind": "class",
+   "strings": [
+    "%s/input_%03d_frame_%d_%d_%dx%d.yuv",
+    "%s/output_%03d_frame_%d_%d_%dx%d_RGBA.yuv"
+   ]
+  },
+  "PresenterBase": {
+   "kind": "class",
+   "strings": [
+    "BaseFeaturePresenter",
+    "setStateEvent, not cache in hashMap"
+   ]
+  },
+  "MenuRightButtonHost": {
+   "kind": "class",
+   "strings": [
+    "EffectPanelUIContainer",
+    "MenuRightEnterButton"
+   ]
+  },
+  "CaptureParamPresenter": {
+   "kind": "class",
+   "strings": [
+    "CaptureParamPresenter",
+    "CAPTURE_PARAM_UPDATE_FOCUES_PROGRESS"
+   ]
+  },
+  "MasterCapMode": {
+   "kind": "class",
+   "strings": [
+    "MasterCapMode",
+    "checkOutputSizeForHRQBC, crop size < binning size, return binning size"
+   ]
+  },
+  "InnerShadowEffectFactory": {
+   "kind": "class",
+   "strings": [
+    "InnerShadowEffectFactory, context is null."
+   ]
+  },
+  "FeatureFactory": {
+   "kind": "class",
+   "strings": [
+    "FeatureFactory",
+    "getFeatureByFeatureName, featureName: "
+   ]
+  },
+  "MemoryGateClass": {
+   "kind": "class",
+   "strings": [
+    "checkMemoryAndStorage, realfree("
+   ]
+  },
+  "VideoMode": {
+   "kind": "class",
+   "strings": [
+    "VideoMode",
+    "pref_video_recording_switch",
+    "com.oplus.reset.focus.in.recording.support"
+   ]
+  },
+  "LogVideoPresenter": {
+   "kind": "class",
+   "strings": [
+    "checkLogPreviewVisible, isSupportCustomLut is true, skip LogPreviewView"
+   ]
+  },
+  "PortraitCapMode": {
+   "kind": "class",
+   "strings": [
+    "PortraitCapMode",
+    "com.oplus.portrait.capture.delay"
+   ]
+  },
+  "CameraImplementation": {
+   "kind": "class",
+   "strings": [
+    "50pv_setRepeatingRequest",
+    "CameraStartupPerformance.openCamera"
+   ]
+  },
+  "LiveVideoEncoder": {
+   "kind": "class",
+   "strings": [
+    " have something error, ",
+    "'s meta do not add ref count."
+   ]
+  },
+  "CameraMetadataKey": {
+   "kind": "class",
+   "strings": [
+    "android.logicalMultiCamera.physicalIds",
+    "com.mediatek.configure.setting.initrequest"
+   ]
+  },
+  "CommonShader": {
+   "kind": "class",
+   "strings": [
+    "apply3dlut, skip apply 3dlut",
+    "createOrUpdateLut3dTexture, create raw3dTexture"
+   ]
+  },
+  "EglHelper": {
+   "kind": "class",
+   "strings": [
+    "70pv_eglSwapBuffers",
+    "Create EGL surface with Display-P3 color space"
+   ]
+  },
+  "WarpRenderer": {
+   "kind": "class",
+   "strings": [
+    "WarpShader",
+    "uBasicToneLut3dTexture",
+    "uNeedBasicTone",
+    "uTransformTexture"
+   ]
+  },
+  "WatermarkRenderer": {
+   "kind": "class",
+   "strings": [
+    "WatermarkRenderer",
+    "WatermarkShader"
+   ]
+  },
+  "Rgba2YuvConversion": {
+   "kind": "class",
+   "strings": [
+    "LivePhoto.Rgba2YuvConversion",
+    "Rgba2Nv21Conversion failed"
+   ]
+  },
+  "LivePhotoPresenter.enable": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "strings": [
+    "enableLivePhoto, mSession is not null, this should never be happend here. mSession:"
+   ]
+  },
+  "LivePhotoPresenter.session": {
+   "kind": "field",
+   "in": "@LivePhotoPresenter",
+   "writtenBy": [
+    "@LivePhotoPresenter.enable"
+   ],
+   "type": "@LivePhotoSession"
+  },
+  "LivePhotoPresenter.onPreviewDrawn": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "strings": [
+    "onPreviewDrawn, frame number is backward: "
+   ]
+  },
+  "LivePhotoPresenter.closeReason": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "strings": [
+    "setLivePhotoCloseReason, reason: "
+   ]
+  },
+  "LivePhotoPresenter.dataOff": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "strings": [
+    "setLivePhotoDataOff."
+   ]
+  },
+  "LivePhotoPresenter.dataOn": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "strings": [
+    "setLivePhotoDataOn."
+   ]
+  },
+  "LivePhotoSession.mode": {
+   "kind": "method",
+   "in": "@LivePhotoSession",
+   "params": [],
+   "ret": "boolean",
+   "strings": [
+    "high_pixel_mode"
+   ]
+  },
+  "LivePhotoSession.close": {
+   "kind": "method",
+   "in": "@LivePhotoSession",
+   "params": [],
+   "ret": "void",
+   "strings": [
+    "release， video processor release",
+    "Session is closed"
+   ]
+  },
+  "LivePhotoSession.captureStage": {
+   "kind": "method",
+   "in": "@LivePhotoSession",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessageCaptureRequestStage"
+   ],
+   "ret": "void"
+  },
+  "LivePhotoEisWrapper.sendFrame": {
+   "kind": "method",
+   "in": "@LivePhotoEisWrapper",
+   "strings": [
+    "sendToEis, mbQuit is true, so return, dataHandle: "
+   ]
+  },
+  "LivePhotoEisWrapper.sendMeta": {
+   "kind": "method",
+   "in": "@LivePhotoEisWrapper",
+   "strings": [
+    "sendMetaToEis, mStatusCode is idle. captureResult: "
+   ]
+  },
+  "PresenterBase.modeFlag": {
+   "kind": "field",
+   "in": "@PresenterBase",
+   "name": "a"
+  },
+  "PresenterBase.modeName": {
+   "kind": "field",
+   "in": "@PresenterBase",
+   "name": "q"
+  },
+  "PresenterBase.mode": {
+   "kind": "method",
+   "in": "@PresenterBase",
+   "params": [],
+   "ret": "java.lang.String",
+   "fields": [
+    "@PresenterBase.modeFlag",
+    "@PresenterBase.modeName"
+   ]
+  },
+  "MenuRightButtonHost.bindListener": {
+   "kind": "method",
+   "in": "@MenuRightButtonHost",
+   "params": [
+    "android.view.View$OnClickListener"
+   ],
+   "ret": "void",
+   "fields": [
+    "@MenuRightButtonHost.rightButton"
+   ]
+  },
+  "VideoEffectPipeline.lutParams": {
+   "kind": "field",
+   "in": "@VideoEffectPipeline",
+   "name": "o0"
+  },
+  "VideoEffectPipeline.renderer": {
+   "kind": "field",
+   "in": "@VideoEffectPipeline",
+   "name": "w"
+  },
+  "LutParameters": {
+   "kind": "class",
+   "typeOf": "@VideoEffectPipeline.lutParams"
+  },
+  "LutParameters.texture": {
+   "kind": "field",
+   "in": "@LutParameters",
+   "name": "e"
+  },
+  "MenuContainer": {
+   "kind": "class",
+   "strings": [
+    "calculateInsertIndex, menuListIndex: ",
+    ", mShowMenuList.size: "
+   ]
+  },
+  "LivePhotoPresenter.eligibility": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.data.DataKey"
+   ],
+   "ret": "boolean",
+   "strings": [
+    "com.oplus.feature.retro.camera.livephoto.default.open",
+    "livePhoto closed by user click, no need turn on"
+   ]
+  },
+  "LivePhotoPresenter.masterModeClose": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "boolean"
+   ],
+   "ret": "void",
+   "strings": [
+    "com.oplus.camera.livephoto.mastermode.support",
+    "check should close LivePhoto!"
+   ]
+  },
+  "LivePhotoPresenter.previewStage": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessagePreviewRequestStage"
+   ],
+   "ret": "void",
+   "strings": [
+    "high_pixel_mode",
+    "telephoto_capture_mode"
+   ]
+  },
+  "LivePhotoPresenter.captureStagePrepare": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessageCaptureRequestStage"
+   ],
+   "ret": "void",
+   "strings": [
+    "onPrepareRequestTag, requestTag is null, skip"
+   ]
+  },
+  "LivePhotoPresenter.captureStageStart": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessageCaptureRequestStage"
+   ],
+   "ret": "void",
+   "strings": [
+    "onCaptureStageChanged,  at least one of [mediaCodec audioRecorder audioEncoder] is not prepare, stage: ",
+    "onCaptureStarted, requestTag is null!!!"
+   ]
+  },
+  "LivePhotoPresenter.frameGen": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.previewProtocol.EventMessagePreviewData",
+    "long",
+    "java.lang.String",
+    "java.lang.String",
+    "java.lang.String",
+    "boolean",
+    "boolean"
+   ],
+   "ret": "com.oplus.camera.feature.livephoto.data.ImageData",
+   "strings": [
+    "on_draw_effect/",
+    "on_draw_effect_input/"
+   ]
+  },
+  "LivePhotoSession.frameSink": {
+   "kind": "method",
+   "in": "@LivePhotoSession",
+   "params": [
+    "com.oplus.camera.feature.livephoto.data.ImageData"
+   ],
+   "ret": "void",
+   "strings": [
+    "meta_session_id"
+   ]
+  },
+  "VideoEffectPipeline.renderSubVideo": {
+   "kind": "method",
+   "in": "@VideoEffectPipeline",
+   "params": [
+    "com.oplus.camera.feature.livephoto.data.ImageData",
+    "boolean",
+    "int",
+    "int",
+    "float[]"
+   ],
+   "ret": "void",
+   "strings": []
+  },
+  "LivePhotoEisWrapper.acquire": {
+   "kind": "method",
+   "in": "@LivePhotoEisWrapper",
+   "params": [
+    "long"
+   ],
+   "ret": "@LivePhotoEisHandle"
+  },
+  "LivePhotoEisHandle": {
+   "kind": "class",
+   "strings": [
+    "DataHandle@"
+   ]
+  },
+  "Raw3dTexture": {
+   "kind": "class",
+   "typeOf": "@LutParameters.texture"
+  },
+  "MenuContainerTopLeft": {
+   "kind": "class",
+   "superOf": "@MenuContainer"
+  },
+  "LivePhotoPresenter.x2Dispatch": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.previewProtocol.EventMessagePreviewData",
+    "long",
+    "java.lang.String",
+    "java.lang.String",
+    "java.lang.String",
+    "boolean",
+    "boolean"
+   ],
+   "ret": "com.oplus.camera.feature.livephoto.data.ImageData",
+   "strings": [
+    "handleHDRData, some thing has error!",
+    "/on_draw/"
+   ]
+  },
+  "LivePhotoPresenter.yuvFallback": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.previewProtocol.EventMessagePreviewData",
+    "long",
+    "java.lang.String",
+    "java.lang.String",
+    "java.lang.String",
+    "boolean",
+    "boolean"
+   ],
+   "ret": "com.oplus.camera.feature.livephoto.data.ImageData",
+   "strings": [
+    "LivePhoto.handleYUVData:"
+   ]
+  },
+  "LivePhotoPresenter.photoGate": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [],
+   "ret": "boolean",
+   "invokes": [
+    "Ljava/util/Optional;->map(Ljava/util/function/Function;)Ljava/util/Optional;",
+    "Ljava/util/Optional;->orElse(Ljava/lang/Object;)Ljava/lang/Object;",
+    "Ljava/lang/Boolean;->booleanValue()Z"
+   ]
+  },
+  "LivePhotoPresenter.xpanGate": {
+   "kind": "field",
+   "in": "@LivePhotoPresenter",
+   "type": "boolean",
+   "readBy": [
+    "@LivePhotoPresenter.photoGate"
+   ]
+  },
+  "Rgba2YuvConversion.convert": {
+   "kind": "method",
+   "in": "@Rgba2YuvConversion",
+   "strings": [
+    "convert glGenFramebuffers failed",
+    "convert glBindFramebuffer failed"
+   ]
+  },
+  "Rgba2YuvConversion.hardwareBuffer": {
+   "kind": "method",
+   "in": "@Rgba2YuvConversion",
+   "params": [
+    "android.hardware.HardwareBuffer"
+   ],
+   "ret": "void"
+  },
+  "Rgba2YuvConversion.oesSource": {
+   "kind": "method",
+   "in": "@Rgba2YuvConversion",
+   "params": [
+    "com.oplus.camera.common.gl.c"
+   ],
+   "ret": "void",
+   "optional": true
+  },
+  "WarpRenderer.draw": {
+   "kind": "method",
+   "in": "@WarpRenderer",
+   "params": [
+    null,
+    null,
+    "int",
+    "int",
+    "int",
+    "float",
+    "float",
+    "boolean",
+    null,
+    null
+   ],
+   "ret": "void"
+  },
+  "WatermarkRenderer.composite": {
+   "kind": "method",
+   "in": "@WatermarkRenderer",
+   "params": [
+    "java.util.ArrayList",
+    "float[]",
+    "float[]",
+    "float[]",
+    "int",
+    "int",
+    "int",
+    null,
+    null
+   ],
+   "ret": "void"
+  },
+  "CommonShader.commonDraw": {
+   "kind": "method",
+   "in": "@CommonShader",
+   "params": [
+    null,
+    "int",
+    "int",
+    "int",
+    "int",
+    "int",
+    "float",
+    "float",
+    "boolean",
+    "boolean"
+   ],
+   "ret": "void"
+  },
+  "CommonShader.transformUpload": {
+   "kind": "method",
+   "in": "@CommonShader",
+   "params": [
+    "com.oplus.camera.common.gl.y0",
+    "int",
+    "float[]",
+    "float[]",
+    "boolean"
+   ],
+   "ret": "void",
+   "optional": true
+  },
+  "CommonShader.transformUpload2": {
+   "kind": "method",
+   "in": "@CommonShader",
+   "params": [
+    "com.oplus.camera.common.gl.y0",
+    "int",
+    "float[]",
+    "float[]",
+    "boolean",
+    "boolean"
+   ],
+   "ret": "void",
+   "optional": true
+  },
+  "LiveVideoEncoder.configureFormat": {
+   "kind": "method",
+   "in": "@LiveVideoEncoder",
+   "params": [
+    null,
+    "android.media.MediaFormat",
+    "int",
+    "int",
+    "boolean"
+   ]
+  },
+  "Lut3dDataManager.combineHelper": {
+   "kind": "field",
+   "in": "com.oplus.camera.common.utils.Lut3dDataManager",
+   "type": "com.oplus.ocs.camera.CombineLutHelper"
+  },
+  "MasterVideoDecision": {
+   "kind": "class",
+   "strings": [
+    "com.oplus.camera.master.video.feature.list",
+    "MasterVideoDecision"
+   ]
+  },
+  "LogVideoModel": {
+   "kind": "class",
+   "clinitStrings": [
+    "pref_log_video_key"
+   ]
+  },
+  "LogVideoPresenter.visibilityProbe": {
+   "kind": "method",
+   "in": "@LogVideoPresenter",
+   "params": [
+    "boolean"
+   ],
+   "ret": "void",
+   "strings": [
+    "checkLogPreviewVisible, isSupportCustomLut is true, skip LogPreviewView"
+   ]
+  },
+  "FilterPresenter.captureStage": {
+   "kind": "method",
+   "in": "@FilterPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessageCaptureRequestStage"
+   ],
+   "ret": "boolean",
+   "strings": [
+    "glow_sdr_gen_0_1.bin"
+   ]
+  },
+  "ZoomPresenter": {
+   "kind": "class",
+   "strings": [
+    "com.oplus.feature.front.camera.auto.zoom.support",
+    "com.oplus.available.lens.bag.zoomvalues",
+    "com.oplus.portrait.max.zoom.value"
+   ]
+  },
+  "ZoomPresenter.commit": {
+   "kind": "method",
+   "in": "@ZoomPresenter",
+   "params": [
+    "float",
+    "boolean"
+   ],
+   "ret": "void",
+   "strings": [
+    "pref_front_zoom_key",
+    "com.oplus.camera.feature.video.blur"
+   ]
+  },
+  "Nv21Conversion.shaderPick": {
+   "kind": "method",
+   "fields": [
+    "Lcom/oplus/camera/feature/livephoto/R$raw;->rgba2nv21_frag_oes:I",
+    "Lcom/oplus/camera/feature/livephoto/R$raw;->rgba2nv21_frag:I"
+   ],
+   "ret": "int"
+  },
+  "Nv21Conversion": {
+   "kind": "class",
+   "ownerOf": "@Nv21Conversion.shaderPick"
+  },
+  "P010Conversion.shaderPick": {
+   "kind": "method",
+   "fields": [
+    "Lcom/oplus/camera/feature/livephoto/R$raw;->rgba2p010_frag:I"
+   ],
+   "ret": "int"
+  },
+  "P010Conversion": {
+   "kind": "class",
+   "ownerOf": "@P010Conversion.shaderPick"
+  },
+  "CaptureParamPresenter.view": {
+   "kind": "field",
+   "in": "@CaptureParamPresenter",
+   "type": "com.oplus.camera.feature.captureparam.view.CaptureParamView"
+  },
+  "MenuRightButtonHost.marginProbe": {
+   "kind": "method",
+   "in": "@MenuRightButtonHost",
+   "ret": "int",
+   "strings": [
+    "getRightFloatingMenuButtonMarginBottom, parent null"
+   ]
+  },
+  "MenuRightButtonHost.rightButton": {
+   "kind": "field",
+   "in": "@MenuRightButtonHost",
+   "type": "com.oplus.camera.ui.effectcontainer.MenuRightButton",
+   "readBy": [
+    "@MenuRightButtonHost.marginProbe"
+   ]
+  },
+  "LutTask": {
+   "kind": "class",
+   "strings": [
+    "GLRenderingThread",
+    "lutTaskComplete."
+   ],
+   "multi": true
   }
  },
  "gallery": {

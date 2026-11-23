@@ -4,6 +4,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * Restores the P010 operation flag for Hasselblad high-pixel live photos on PKJ110.
@@ -22,16 +23,11 @@ import local.jiege.hook.common.Log;
  */
 public final class HighPixelLivePhoto {
     private static final String TAG = "HighPixelLivePhoto";
-    private static final String PRESENTER = "gh.e2";
-    private static final String SESSION = "gh.i2";
-    private static final String EVENT_CONSUMER = "b9.p";
-    private static final String FLAGS = "fh.a";
-    private static final String ENABLE_METHOD = "M2";
-    private static final String MODE_METHOD = "i";
-    private static final String SESSION_MODE_METHOD = "g";
-    private static final String CAPTURE_STAGE_METHOD = "h";
-    private static final String SESSION_CLOSE_METHOD = "d";
-    private static final String SESSION_FIELD = "p1";
+    // Symbol ids in assets/symbols.json (fingerprint-matched; never hardcode R8 short names here).
+    private static final String PRESENTER = "@LivePhotoPresenter";
+    private static final String SESSION = "@LivePhotoSession";
+    private static final String EVENT_CONSUMER = "@LivePhotoEventConsumer";
+    private static final String FLAGS = "@LivePhotoFeatureFlags";
     private static final String ACTIVE_CAPTURES_FIELD = "c";
     private static final String PENDING_CAPTURES_FIELD = "i";
     private static final String CONSUMER_CASE_FIELD = "a";
@@ -39,6 +35,14 @@ public final class HighPixelLivePhoto {
     private static final String ACCEPT_METHOD = "accept";
     private static final String MODE = "highPixel";
     private static final String SESSION_MODE = "high_pixel_mode";
+
+    private static Class<?> cls(String id) {
+        return Symbols.get().cls(id.substring(1));
+    }
+
+    private static String member(String id) {
+        return Symbols.get().name(id.substring(1));
+    }
     private static final int VIDEO_CAPTURE_COMPLETED_CASE = 8;
     private static final int FLAG_ENABLE_PACK_P010 = 8388608;
 
@@ -58,14 +62,14 @@ public final class HighPixelLivePhoto {
     }
 
     private static void install(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClass(PRESENTER, classLoader);
-        sessionClass = XposedHelpers.findClass(SESSION, classLoader);
-        consumerClass = XposedHelpers.findClass(EVENT_CONSUMER, classLoader);
-        flagsClass = XposedHelpers.findClass(FLAGS, classLoader);
+        Class<?> presenter = cls(PRESENTER);
+        sessionClass = cls(SESSION);
+        consumerClass = cls(EVENT_CONSUMER);
+        flagsClass = cls(FLAGS);
         // Resolve the field at install time so an app-build mismatch is reported once at startup.
         XposedHelpers.getStaticIntField(flagsClass, "a");
 
-        XposedBridge.hookAllMethods(presenter, ENABLE_METHOD, new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("LivePhotoPresenter.enable"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 applyP010(param.thisObject);
             }
@@ -74,7 +78,7 @@ public final class HighPixelLivePhoto {
                 rememberSession(param.thisObject);
             }
         });
-        XposedBridge.hookAllMethods(sessionClass, CAPTURE_STAGE_METHOD, new XC_MethodHook() {
+        XposedBridge.hookAllMethods(sessionClass, member("LivePhotoSession.captureStage"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 applyForSession(param.thisObject);
             }
@@ -88,7 +92,7 @@ public final class HighPixelLivePhoto {
                 clearAfterVideoCaptureCompleted(param.thisObject, param.args);
             }
         });
-        XposedBridge.hookAllMethods(sessionClass, SESSION_CLOSE_METHOD, new XC_MethodHook() {
+        XposedBridge.hookAllMethods(sessionClass, member("LivePhotoSession.close"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (param.thisObject == activeSession) {
                     clearP010("session closed");
@@ -100,7 +104,7 @@ public final class HighPixelLivePhoto {
     }
 
     private static void applyP010(Object presenter) {
-        if (!MODE.equals(XposedHelpers.callMethod(presenter, MODE_METHOD))) return;
+        if (!MODE.equals(XposedHelpers.callMethod(presenter, member("PresenterBase.mode")))) return;
 
         synchronized (HighPixelLivePhoto.class) {
             int before = XposedHelpers.getStaticIntField(flagsClass, "a");
@@ -127,9 +131,9 @@ public final class HighPixelLivePhoto {
      * its capture-stage callback can restore the flag for every later photo in the same session.
      */
     private static void rememberSession(Object presenter) {
-        Object session = XposedHelpers.getObjectField(presenter, SESSION_FIELD);
+        Object session = XposedHelpers.getObjectField(presenter, member("LivePhotoPresenter.session"));
         if (session == null || !sessionClass.isInstance(session)) return;
-        if (!Boolean.TRUE.equals(XposedHelpers.callMethod(session, SESSION_MODE_METHOD))) {
+        if (!Boolean.TRUE.equals(XposedHelpers.callMethod(session, member("LivePhotoSession.mode")))) {
             return;
         }
         activeSession = session;
@@ -137,7 +141,7 @@ public final class HighPixelLivePhoto {
 
     private static void applyForSession(Object session) {
         if (session == null || !sessionClass.isInstance(session)) return;
-        if (!Boolean.TRUE.equals(XposedHelpers.callMethod(session, SESSION_MODE_METHOD))) return;
+        if (!Boolean.TRUE.equals(XposedHelpers.callMethod(session, member("LivePhotoSession.mode")))) return;
         activeSession = session;
         applyP010ForSession();
     }
@@ -186,7 +190,7 @@ public final class HighPixelLivePhoto {
                 : Integer.toHexString(System.identityHashCode(activeSession)))
             + " match=" + (session == activeSession)
             + " highPixel=" + Boolean.TRUE.equals(
-                XposedHelpers.callMethod(session, SESSION_MODE_METHOD))
+                XposedHelpers.callMethod(session, member("LivePhotoSession.mode")))
             + " owned=" + p010OwnedByHook
             + " p010=" + p010
             + " activeHandles=" + collectionSize(session, ACTIVE_CAPTURES_FIELD)
@@ -212,7 +216,7 @@ public final class HighPixelLivePhoto {
         }
         Object session = XposedHelpers.getObjectField(consumer, CONSUMER_TARGET_FIELD);
         if (session == null || !sessionClass.isInstance(session)) return;
-        if (!Boolean.TRUE.equals(XposedHelpers.callMethod(session, SESSION_MODE_METHOD))) {
+        if (!Boolean.TRUE.equals(XposedHelpers.callMethod(session, member("LivePhotoSession.mode")))) {
             return;
         }
         if (collectionSize(session, ACTIVE_CAPTURES_FIELD) != 0

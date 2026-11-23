@@ -4,6 +4,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * Writes the palette dial's tone/saturation into the capture params of a 哈苏超清 shot.
@@ -21,7 +22,7 @@ import local.jiege.hook.common.Log;
  */
 final class HighPixelPaletteCapture {
     private static final String TAG = "HighPixelPalette";
-    private static final String PRESENTER = "bg.v";
+    private static final String PRESENTER = "FilterPresenter";
     private static final String PARAMETER = "com.oplus.ocs.camera.CameraParameter";
     private static final java.util.Set<String> seen =
         java.util.Collections.synchronizedSet(new java.util.HashSet<>());
@@ -30,8 +31,9 @@ final class HighPixelPaletteCapture {
 
     static void install(ClassLoader loader) {
         try {
-            Class<?> presenter = XposedHelpers.findClass(PRESENTER, loader);
-            XposedBridge.hookAllMethods(presenter, "U1", new XC_MethodHook() {
+            Class<?> presenter = Symbols.get().cls(PRESENTER);
+            XposedBridge.hookAllMethods(presenter,
+                Symbols.get().name("@FilterPresenter.captureStage"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         stamp(loader, param.args == null || param.args.length == 0 ? null : param.args[0]);

@@ -6,6 +6,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 import local.jiege.hook.common.Settings;
 import local.jiege.settings.ModuleSettings;
 
@@ -29,9 +30,9 @@ import local.jiege.settings.ModuleSettings;
  */
 public final class OpenGate {
     private static final String TAG = "OpenGate";
-    private static final String DECISION = "o9.h";
+    private static final String DECISION = "MasterVideoDecision";
     private static final String MASTER_VIDEO_MODE = "rm.e";
-    private static final String VIDEO_MODE = "qm.w0";
+    private static final String VIDEO_MODE = "VideoMode";
     /** The option value the panel and the recorder both know; stock hides it, never removes it. */
     private static final String OPEN_GATE_VALUE = "video_size_open_gate";
 
@@ -57,9 +58,9 @@ public final class OpenGate {
     }
 
     private static void install(ClassLoader classLoader) throws Throwable {
-        Class<?> decision = XposedHelpers.findClass(DECISION, classLoader);
+        Class<?> decision = Symbols.get().cls(DECISION);
         masterVideoMode = XposedHelpers.findClass(MASTER_VIDEO_MODE, classLoader);
-        Class<?> videoMode = XposedHelpers.findClass(VIDEO_MODE, classLoader);
+        Class<?> videoMode = Symbols.get().cls(VIDEO_MODE);
 
         // The single gate in front of the resolution entry. It is asked once per panel build, so
         // the log line is kept to the first answer of the process.

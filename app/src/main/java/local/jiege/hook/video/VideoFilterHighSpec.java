@@ -137,20 +137,26 @@ public final class VideoFilterHighSpec {
         // ourselves while such a filter is active, so the encoder is fed from the app pipeline
         // the filter is on. Everywhere else, including when the camera itself already picks the
         // app encoder (1080p with a filter), its own choice stands.
-        Class<?> recorderKeys = XposedHelpers.findClass("om.e0$g", classLoader);
-        final Object appCodecKey = XposedHelpers.getStaticObjectField(recorderKeys, "b");
-        if (!"is_use_media_codec".contentEquals(
-                String.valueOf(XposedHelpers.getObjectField(appCodecKey, "a")))) {
-            throw new IllegalStateException("recorder key mismatch");
-        }
-        XposedBridge.hookAllMethods(XposedHelpers.findClass("om.c0", classLoader), "a", new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (param.args.length != 1 || param.args[0] != appCodecKey || !wantAppEncoder) return;
-                if (Boolean.TRUE.equals(param.getResult())) return;
-                param.setResult(Boolean.TRUE);
+        try {
+            Class<?> recorderKeys = XposedHelpers.findClass("om.e0$g", classLoader);
+            final Object appCodecKey = XposedHelpers.getStaticObjectField(recorderKeys, "b");
+            if (!"is_use_media_codec".contentEquals(
+                    String.valueOf(XposedHelpers.getObjectField(appCodecKey, "a")))) {
+                throw new IllegalStateException("recorder key mismatch");
             }
-        });
-        Log.i(TAG, "4K recorder backend hook installed");
+            XposedBridge.hookAllMethods(XposedHelpers.findClass("om.c0", classLoader), "a", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args.length != 1 || param.args[0] != appCodecKey || !wantAppEncoder) return;
+                    if (Boolean.TRUE.equals(param.getResult())) return;
+                    param.setResult(Boolean.TRUE);
+                }
+            });
+            Log.i(TAG, "4K recorder backend hook installed");
+        } catch (Throwable error) {
+            // The recorder key classes were refactored away on newer builds; the 4K
+            // filter path then degrades to stock behaviour (unfiltered 4K clips).
+            Log.i(TAG, "4K recorder backend hook unavailable on this build: " + error);
+        }
     }
 
     /** Refreshes {@link #wantAppEncoder} from the presenter's current filter and spec. */

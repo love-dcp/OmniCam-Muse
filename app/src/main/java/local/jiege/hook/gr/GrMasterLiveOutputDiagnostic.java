@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * Read-only diagnostics for the RGBA-to-YUV converter used by live-photo video.
@@ -23,10 +24,10 @@ import local.jiege.hook.common.Log;
  */
 final class GrMasterLiveOutputDiagnostic {
     private static final String TAG = "RicohGrPort";
-    private static final String CONVERSION_BASE = "ch.e";
-    private static final String NV21_CONVERSION = "ch.b";
-    private static final String P010_CONVERSION = "ch.c";
-    private static final String RAW_RESOURCES =
+    private static final String CONVERSION_BASE = "Rgba2YuvConversion";
+    private static final String NV21_CONVERSION = "Nv21Conversion";
+    private static final String P010_CONVERSION = "P010Conversion";
+            private static final String RAW_RESOURCES =
         "com.oplus.camera.feature.livephoto.R$raw";
     private static final int YUV_FORMAT_NV21 = 17;
     private static final int YUV_FORMAT_NV21_ALTERNATE = 35;
@@ -106,7 +107,7 @@ final class GrMasterLiveOutputDiagnostic {
                 + " (persist.omnicam.liveyuv.diag not enabled)");
             return;
         }
-        Class<?> conversionBase = XposedHelpers.findClass(CONVERSION_BASE, classLoader);
+        Class<?> conversionBase = Symbols.get().cls(CONVERSION_BASE);
         XposedBridge.hookMethod(
             XposedHelpers.findMethodExact(
                 conversionBase,
@@ -139,9 +140,9 @@ final class GrMasterLiveOutputDiagnostic {
             });
 
         hookShaderSelection(
-            XposedHelpers.findClass(NV21_CONVERSION, classLoader), classLoader);
+            Symbols.get().cls(NV21_CONVERSION), classLoader);
         hookShaderSelection(
-            XposedHelpers.findClass(P010_CONVERSION, classLoader), classLoader);
+            Symbols.get().cls(P010_CONVERSION), classLoader);
 
         hookConverterWiring(conversionBase, classLoader);
         hookEncoderFeed(classLoader);
@@ -299,11 +300,29 @@ final class GrMasterLiveOutputDiagnostic {
      * whenever the wired identity CHANGES for a given converter (rewire = new capture) and
      * every handle creation, so good and green captures can be diffed link by link.
      */
-    private static void hookConverterWiring(Class<?> conversionBase, ClassLoader classLoader) {
-        try {
+    /**
+     * The native convert entry: (F,F,I,Z,Z,[F)J on older builds, a trailing boolean added on
+     * newer ones. Matched by the resolved name plus parameter prefix, never the name alone.
+     */
+    private static java.lang.reflect.Method convertMethod(Class<?> conversionBase) {
+        String name = Symbols.get().name("@Rgba2YuvConversion.convert");
+        for (java.lang.reflect.Method m : conversionBase.getDeclaredMethods()) {
+            Class<?>[] p = m.getParameterTypes();
+            if (m.getName().equals(name)
+                && p.length >= 6
+                && p[0] == float.class && p[1] == float.class && p[2] == int.class
+                && p[3] == boolean.class && p[4] == boolean.class
+                && p[5] == float[].class) {
+                return m;
+            }
+        }
+        throw new IllegalStateException("convert method not found on " + conversionBase);
+    }
+
+    private static void hookConverterWiring(Class<?> conversionBase, ClassLoader classLoader) {        try {
+            if (Symbols.get().has("@Rgba2YuvConversion.oesSource")) {
             XposedBridge.hookMethod(
-                XposedHelpers.findMethodExact(conversionBase, "k",
-                    XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader)),
+                Symbols.get().method("@Rgba2YuvConversion.oesSource"),
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         Object converter = param.thisObject;
@@ -317,13 +336,13 @@ final class GrMasterLiveOutputDiagnostic {
                             + ", changed=" + (previous != null));
                     }
                 });
+            }
         } catch (Throwable error) {
             Log.e(TAG, "live YUV conversion source hook failed", error);
         }
         try {
             XposedBridge.hookMethod(
-                XposedHelpers.findMethodExact(conversionBase, "l",
-                    android.hardware.HardwareBuffer.class),
+                Symbols.get().method("@Rgba2YuvConversion.hardwareBuffer"),
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         Object converter = param.thisObject;
@@ -344,10 +363,7 @@ final class GrMasterLiveOutputDiagnostic {
             Log.e(TAG, "live YUV conversion buffer hook failed", error);
         }
         try {
-            XposedBridge.hookMethod(
-                XposedHelpers.findMethodExact(conversionBase, "b",
-                    float.class, float.class, int.class,
-                    boolean.class, boolean.class, float[].class),
+            XposedBridge.hookMethod(convertMethod(conversionBase),
                 new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
                         Object converter = param.thisObject;
@@ -601,7 +617,7 @@ final class GrMasterLiveOutputDiagnostic {
         Class<?> encoder;
         Class<?> imageData;
         try {
-            encoder = XposedHelpers.findClass("eh.c0", classLoader);
+            encoder = Symbols.get().cls("LiveVideoEncoder");
             imageData = XposedHelpers.findClass(
                 "com.oplus.camera.feature.livephoto.data.ImageData", classLoader);
         } catch (Throwable error) {

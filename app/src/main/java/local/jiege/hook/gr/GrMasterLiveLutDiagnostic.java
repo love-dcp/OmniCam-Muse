@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 import local.jiege.hook.xpan.XpanLiveFeature;
 
 /**
@@ -24,13 +25,10 @@ import local.jiege.hook.xpan.XpanLiveFeature;
  */
 final class GrMasterLiveLutDiagnostic {
     private static final String TAG = "RicohGrPort";
-    private static final String PIPELINE = "gh.p3";
+    private static final String PIPELINE = "@VideoEffectPipeline";
     private static final String IMAGE_DATA =
         "com.oplus.camera.feature.livephoto.data.ImageData";
-    private static final String LIVE_RENDERER = "ch.g";
-    private static final String LUT_TASK =
-        "com.oplus.camera.feature.captureparam.view.r";
-    private static final String LUT_CALLBACK = PIPELINE + "$a";
+    private static final String LIVE_RENDERER = "@WarpRenderer";
     private static final String LUT_MANAGER_HOLDER =
         "com.oplus.camera.common.utils.Lut3dDataManager$b";
     private static final int MASTER_LIVE_LUT_TYPE = 7;
@@ -50,15 +48,93 @@ final class GrMasterLiveLutDiagnostic {
 
     private GrMasterLiveLutDiagnostic() {}
 
+    /** Inner class of a resolved outer class ("a" -> Outer$a); null if absent on this build. */
+    private static Class<?> inner(Class<?> outer, String simple) {
+        for (Class<?> candidate : outer.getDeclaredClasses()) {
+            if (candidate.getName().endsWith("$" + simple)) return candidate;
+        }
+        return null;
+    }
+
+    /**
+     * First captured reference of the task: an instance of "want" if one exists, else any
+     * non-primitive non-table field. Field names re-obfuscate every release; the roles do not.
+     */
+    private static Object firstRefField(Object task, Class<?> want) {
+        Class<?> cls = task.getClass();
+        for (Field f : cls.getDeclaredFields()) {
+            if (f.getType().isPrimitive()) continue;
+            f.setAccessible(true);
+            Object v;
+            try { v = f.get(task); } catch (Throwable error) { continue; }
+            if (v != null && want != null && want.isInstance(v)) return v;
+        }
+        for (Field f : cls.getDeclaredFields()) {
+            if (f.getType().isPrimitive()) continue;
+            f.setAccessible(true);
+            Object v;
+            try { v = f.get(task); } catch (Throwable error) { continue; }
+            if (v != null && !(v instanceof float[])) return v;
+        }
+        return null;
+    }
+
+    /** First float[] field of the task (the stock table slot, "d" on older builds). */
+    private static float[] firstTableField(Object task) {
+        for (Field f : task.getClass().getDeclaredFields()) {
+            if (f.getType().isPrimitive()) continue;
+            f.setAccessible(true);
+            Object v;
+            try { v = f.get(task); } catch (Throwable error) { continue; }
+            if (v instanceof float[]) return (float[]) v;
+        }
+        return null;
+    }
+
+    private static void setTableField(Object task, float[] value) {
+        for (Field f : task.getClass().getDeclaredFields()) {
+            if (f.getType().isPrimitive()) continue;
+            f.setAccessible(true);
+            Object v;
+            try { v = f.get(task); } catch (Throwable error) { continue; }
+            if (v instanceof float[]) {
+                try {
+                    f.set(task, value);
+                } catch (Throwable error) {
+                    // inaccessible on this build; the swap is optional
+                }
+                return;
+            }
+        }
+    }
+
+    /** int field value by name, or -1 when the name drifted to another type (log-only use). */
+    private static int intFieldSafe(Object task, String name) {
+        try {
+            return XposedHelpers.getIntField(task, name);
+        } catch (Throwable error) {
+            return -1;
+        }
+    }
+
     static void install(ClassLoader classLoader) throws Throwable {
-        Class<?> pipeline = XposedHelpers.findClass(PIPELINE, classLoader);
+        Class<?> pipeline = Symbols.get().cls("VideoEffectPipeline");
         Class<?> imageData = XposedHelpers.findClass(IMAGE_DATA, classLoader);
-        Class<?> liveRenderer = XposedHelpers.findClass(LIVE_RENDERER, classLoader);
-        Class<?> lutTask = XposedHelpers.findClass(LUT_TASK, classLoader);
-        Class<?> lutCallback = XposedHelpers.findClass(LUT_CALLBACK, classLoader);
+        Class<?> liveRenderer = Symbols.get().cls("WarpRenderer");
+        Class<?> lutCallback = inner(pipeline, "a");
         Class<?> managerHolder = XposedHelpers.findClass(LUT_MANAGER_HOLDER, classLoader);
         Class<?> manager = XposedHelpers.findClass(
             "com.oplus.camera.common.utils.Lut3dDataManager", classLoader);
+        /*
+         * The capture-param task class carries the stock table (task.d) into the GL thread.
+         * Every point release re-obfuscates its name, so resolve it by the fingerprint strings
+         * it shares with unrelated compiler-generated wrappers ("multi") and let the hook body
+         * gate on the pipeline/callback relation -- wrong-class run() bodies never match.
+         */
+        java.util.List<Class<?>> lutTasks = new java.util.ArrayList<>();
+        for (Object entry : Symbols.get().all("LutTask")) {
+            if (entry instanceof Class) lutTasks.add((Class<?>) entry);
+        }
         Method onInit = XposedHelpers.findMethodExact(pipeline, "onInit");
         Method renderFrame = XposedHelpers.findMethodExact(pipeline, "r", imageData);
 
@@ -128,7 +204,7 @@ final class GrMasterLiveLutDiagnostic {
             }
         });
 
-        XposedBridge.hookAllMethods(lutCallback, "b", new XC_MethodHook() {
+        if (lutCallback != null) XposedBridge.hookAllMethods(lutCallback, "b", new XC_MethodHook() {
             /*
              * r426: the r425 delivered-array replacement was reverted. It proved the task
              * data source is manager.c (taskData kept cb792680 after the swap), so the swap
@@ -156,13 +232,11 @@ final class GrMasterLiveLutDiagnostic {
             }
         });
 
-        XposedBridge.hookMethod(XposedHelpers.findMethodExact(lutTask, "run"),
-            new XC_MethodHook() {
+        XC_MethodHook taskHook = new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    Object callback = objectField(param.thisObject, "c");
+                    Object callback = firstRefField(param.thisObject, lutCallback);
                     Object instance = outerPipeline(callback, pipeline);
-                    boolean callbackTask = callback != null
-                        && LUT_CALLBACK.equals(callback.getClass().getName());
+                    boolean callbackTask = callback != null;
                     if (!callbackTask && instance == null) return;
 
                     boolean target = isTargetMode();
@@ -196,14 +270,14 @@ final class GrMasterLiveLutDiagnostic {
                      */
                     boolean probeTargetsTask = instance != null
                         && XpanLiveFeature.videoChannelProbeTargetsTask();
-                    if (instance != null && !probeTargetsTask
-                            && objectField(param.thisObject, "d") instanceof float[]) {
-                        float[] stockTable = (float[]) objectField(param.thisObject, "d");
-                        float[] look = XpanLiveFeature.xpanLiveVideoLookTable(stockTable);
+                    float[] taskTable = firstTableField(param.thisObject);
+                    if (instance != null && !probeTargetsTask && taskTable != null) {
+                        float[] look = XpanLiveFeature.xpanLiveVideoLookTable(taskTable);
                         if (look != null) {
-                            XposedHelpers.setObjectField(param.thisObject, "d", look);
+                            setTableField(param.thisObject, look);
                             Log.i(TAG, "XPAN live video look: task.d swapped to composed"
                                 + " filter table, " + XpanLiveFeature.xpanVideoLookState());
+                            taskTable = firstTableField(param.thisObject);
                         }
                     }
                     /*
@@ -213,10 +287,8 @@ final class GrMasterLiveLutDiagnostic {
                      * regression), so "t" targets exactly this channel: red table in, and a red
                      * video proves it is the one the live encoder samples.
                      */
-                    if (probeTargetsTask
-                            && objectField(param.thisObject, "d") instanceof float[]) {
-                        XposedHelpers.setObjectField(
-                            param.thisObject, "d", XpanLiveFeature.redProbeTable());
+                    if (probeTargetsTask && taskTable != null) {
+                        setTableField(param.thisObject, XpanLiveFeature.redProbeTable());
                         Log.i(TAG, "XPAN video channel probe: task.d swapped to red table"
                             + ", mode=" + GrPreviewStreamRestore.modeName());
                     }
@@ -233,15 +305,15 @@ final class GrMasterLiveLutDiagnostic {
                     param.setObjectExtra("diagnosticTask",
                         new TaskRecord(instance, currentSession, target, masterLive));
                     Log.i(TAG, "master live LUT diagnostic task enter"
-                        + ", action=" + intField(param.thisObject, "a")
-                        + ", index=" + intField(param.thisObject, "b")
+                        + ", action=" + intFieldSafe(param.thisObject, "a")
+                        + ", index=" + intFieldSafe(param.thisObject, "b")
                         + ", callback=" + className(callback)
-                        + ", data=" + className(objectField(param.thisObject, "d"))
+                        + ", data=" + className(firstTableField(param.thisObject))
                         + ", targetMode=" + target
                         + ", masterLive=" + masterLive
                         + ", session=" + currentSession
                         + ", taskData=" + describeTable(
-                            objectField(param.thisObject, "d"))
+                            firstTableField(param.thisObject))
                         + ", " + describeTables(instance, managerHolder)
                         + ", " + describePipeline(instance));
                 }
@@ -255,7 +327,7 @@ final class GrMasterLiveLutDiagnostic {
                             failedTaskSession = task.currentSession;
                         }
                         Log.e(TAG, "master live LUT diagnostic task failed"
-                            + ", action=" + intField(param.thisObject, "a")
+                            + ", action=" + intFieldSafe(param.thisObject, "a")
                             + ", targetMode=" + task.targetMode
                             + ", masterLive=" + task.masterLive
                             + ", session=" + task.currentSession
@@ -267,16 +339,23 @@ final class GrMasterLiveLutDiagnostic {
                         completedTaskSession = task.currentSession;
                     }
                     Log.i(TAG, "master live LUT diagnostic task complete"
-                        + ", action=" + intField(param.thisObject, "a")
+                        + ", action=" + intFieldSafe(param.thisObject, "a")
                         + ", targetMode=" + task.targetMode
                         + ", masterLive=" + task.masterLive
                         + ", session=" + task.currentSession
                         + ", taskData=" + describeTable(
-                            objectField(param.thisObject, "d"))
+                            firstTableField(param.thisObject))
                         + ", " + describeTables(task.pipeline, managerHolder)
                         + ", " + describePipeline(task.pipeline));
                 }
-            });
+            };
+        for (Class<?> lutTask : lutTasks) {
+            for (Method run : lutTask.getDeclaredMethods()) {
+                if ("run".equals(run.getName()) && run.getParameterTypes().length == 0) {
+                    XposedBridge.hookMethod(run, taskHook);
+                }
+            }
+        }
 
         XposedBridge.hookMethod(renderFrame, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -313,7 +392,9 @@ final class GrMasterLiveLutDiagnostic {
          * Record every environment rebuild and dynamic process() result after a GR exit, without
          * touching either value, so the cover-side table identity becomes observable.
          */
-        XposedHelpers.findAndHookMethod(manager, "e", int.class, int.class, String.class,
+        XposedHelpers.findAndHookMethod(manager,
+            Symbols.get().name("@Lut3d.load"),
+            int.class, int.class, String.class,
             new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     /*
@@ -351,28 +432,36 @@ final class GrMasterLiveLutDiagnostic {
                         + ", after={" + describeManager(param.thisObject) + "}");
                 }
             });
-        XposedHelpers.findAndHookMethod(manager, "l", boolean.class, new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!traceManager()) return;
-                Log.i(TAG, "master live LUT diagnostic manager release"
-                    + ", clearTables=" + param.args[0]
-                    + ", state={" + describeManager(param.thisObject) + "}");
-            }
-        });
-        XposedHelpers.findAndHookMethod(manager, "p", new XC_MethodHook() {
-            @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!traceManager()) return;
-                String state = describeManager(param.thisObject);
-                long now = SystemClock.elapsedRealtime();
-                String previous = lastManagerState;
-                if (state.equals(previous) && now - lastManagerLogAt < 500L) return;
-                lastManagerState = state;
-                lastManagerLogAt = now;
-                Log.i(TAG, "master live LUT diagnostic manager process"
-                    + ", threw=" + param.hasThrowable()
-                    + ", state={" + state + "}");
-            }
-        });
+        try {
+            XposedHelpers.findAndHookMethod(manager, "l", boolean.class, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!traceManager()) return;
+                    Log.i(TAG, "master live LUT diagnostic manager release"
+                        + ", clearTables=" + param.args[0]
+                        + ", state={" + describeManager(param.thisObject) + "}");
+                }
+            });
+        } catch (Throwable error) {
+            Log.i(TAG, "master live LUT diagnostic manager release hook skipped " + error);
+        }
+        try {
+            XposedHelpers.findAndHookMethod(manager, "p", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!traceManager()) return;
+                    String state = describeManager(param.thisObject);
+                    long now = SystemClock.elapsedRealtime();
+                    String previous = lastManagerState;
+                    if (state.equals(previous) && now - lastManagerLogAt < 500L) return;
+                    lastManagerState = state;
+                    lastManagerLogAt = now;
+                    Log.i(TAG, "master live LUT diagnostic manager process"
+                        + ", threw=" + param.hasThrowable()
+                        + ", state={" + state + "}");
+                }
+            });
+        } catch (Throwable error) {
+            Log.i(TAG, "master live LUT diagnostic manager process hook skipped " + error);
+        }
 
         Log.i(TAG, "master live LUT diagnostic installed");
     }

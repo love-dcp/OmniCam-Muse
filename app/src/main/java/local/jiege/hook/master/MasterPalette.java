@@ -264,6 +264,7 @@ public final class MasterPalette {
 
     private static ClassLoader loader;
     private static boolean camera123;
+    private static boolean camera317;
     private static boolean diagnostics;
     private static final List<WeakReference<Object>> presenters = new ArrayList<>();
     private static final List<WeakReference<Object>> containers = new ArrayList<>();
@@ -292,6 +293,7 @@ public final class MasterPalette {
         String dump = prop(PROP_DUMP);
         diagnostics = !dump.isEmpty() && !"0".equals(dump);
         camera123 = XposedHelpers.findClassIfExists("ff.n", classLoader) != null;
+        camera317 = !camera123 && local.jiege.hook.common.Symbols.get().has("CaptureParamPresenter");
         try {
             // Every presenter of this family derives from the abstract base (kc.y / lc.w) and gets
             // its mode name through that constructor, so hooking the base catches the ones the
@@ -520,6 +522,13 @@ public final class MasterPalette {
                     if (current != null) current.onForeignClick((View) param.thisObject);
                 }
             });
+            // 调色盘的"上屏"自愈 - see installPreviewHeal. Its own try/catch: the photo page keeps
+            // working even when this hook cannot be resolved.
+            try {
+                installPreviewHeal(classLoader);
+            } catch (Throwable error) {
+                Log.i(TAG, "preview heal hook skipped " + error);
+            }
             Log.i(TAG, "installed independent button; original palette gates and APS configuration unchanged");
         } catch (Throwable error) {
             Log.e(TAG, "install failed", error);
@@ -615,6 +624,7 @@ public final class MasterPalette {
      * palette path touches; the mapping is taken from the build where {@code ff.n} exists.
      */
     private static String type(String name) {
+        if (camera317) return type317(name);
         if (!camera123) return name;
         switch (name) {
             case "ef.m": return "ff.n";
@@ -626,6 +636,27 @@ public final class MasterPalette {
             case "em.p0": return "fm.q0";
             case "yg.a": return "zg.a";
             case "ap.d": return "bp.d";
+            default: return name;
+        }
+    }
+
+    /**
+     * Logical camera class name to the 7.006.317 build's real name. Same families as the 123X
+     * mapping below, one more obfuscation pass later; classes the symbol table already carries
+     * resolve through it so the mapping cannot go stale.
+     */
+    private static String type317(String name) {
+        local.jiege.hook.common.Symbols symbols = local.jiege.hook.common.Symbols.get();
+        switch (name) {
+            case "ef.m":
+            case "ef.m$b":
+                Class<?> presenter = symbols.cls("CaptureParamPresenter");
+                return name.endsWith("$b") ? presenter.getName() + "$b" : presenter.getName();
+            case "kc.y": return symbols.cls("PresenterBase").getName();
+            case "rp.k0": return symbols.cls("MenuRightButtonHost").getName();
+            case "em.p0": return symbols.cls("MasterCapMode").getName();
+            case "ap.d": return symbols.cls("InnerShadowEffectFactory").getName();
+            case "yg.a": return "ah.a";
             default: return name;
         }
     }
@@ -1084,6 +1115,122 @@ public final class MasterPalette {
     }
 
     /**
+     * 调色盘的"上屏"自愈: the camera rebuilds the combined table and the native compose runs, but
+     * the viewfinder only receives a new BasicTone texture when the app uploads one through
+     * {@code gl.s.r(table, 64, true)}. Photo mode uploads it once when the tone environment comes
+     * up and then, on the builds reported so far, not again while the dial is dragged - the table
+     * changes, the picture does not.
+     *
+     * <p>Measured on the report of 2026-11-23 00:37 (ROM 17.0.1.201): 470 table rebuilds
+     * ({@code Lut3d.update}, palette=true) and 223 successful native palette composes
+     * ({@code CombineLut: Palette process success}) inside 40 s of dragging, against exactly ONE
+     * 64-cube preview upload whose content hash never changed. Read back, repair:
+     *
+     * <ul>
+     *   <li>the {@code r} hook remembers the content hash of every 64-cube table the app hands to
+     *       the canvas - that is what the viewfinder is actually drawing;</li>
+     *   <li>every fourth draw, while the stock palette is on screen and actually off-centre, that
+     *       hash is compared with the manager's own combined table ({@code Lut3dDataManager.c});</li>
+     *   <li>a mismatch is re-pushed through the same door, at most once per 120 ms.</li>
+     * </ul>
+     *
+     * <p>Only the palette pages ({@code common}/{@code portrait}/{@code night}) are touched, only
+     * while the stock palette panel is up (or our own presenter-free dial is docked), and only when
+     * tone or saturation is off-centre - so stock uploads that already work see nothing but a hash
+     * compare. {@code persist.omnicam.aura.paletteheal=0} turns it off.
+     */
+    private static final String PROP_HEAL = "persist.omnicam.aura.paletteheal";
+    /** The stock photo-mode palette panel, mirrored out of the session for the GL thread. */
+    private static volatile boolean photoPaletteUp;
+    /** Content hash of the last 64-cube table uploaded to the preview canvas. */
+    private static volatile long healUploadedHash;
+    /** Uptime of the last repair push, to keep a broken push from turning into a per-frame storm. */
+    private static volatile long healPushedAt;
+    private static volatile int healPushes;
+    private static final java.util.concurrent.atomic.AtomicInteger healDraws =
+        new java.util.concurrent.atomic.AtomicInteger();
+    private static final long HEAL_GAP_MS = 120;
+
+    private static void installPreviewHeal(ClassLoader classLoader) throws Throwable {
+        if ("0".equals(prop(PROP_HEAL))) {
+            Log.i(TAG, "preview heal off (" + PROP_HEAL + "=0)");
+            return;
+        }
+        Class<?> canvas = XposedHelpers.findClass("com.oplus.camera.common.gl.s", classLoader);
+        // What the viewfinder draws: the app's own BasicTone texture upload.
+        XposedBridge.hookAllMethods(canvas, "r", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length < 3) return;
+                Object data = param.args[0];
+                if (!(data instanceof float[])) return;
+                if (!(param.args[1] instanceof Number) || !(param.args[2] instanceof Boolean)) return;
+                if (((Number) param.args[1]).intValue() != 64) return;
+                if (!((Boolean) param.args[2])) return;
+                healUploadedHash = tableHash((float[]) data);
+            }
+        });
+        XposedBridge.hookAllMethods(canvas, "o0", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if ((healDraws.incrementAndGet() & 3) != 0) return;
+                repairPaletteTexture(param.thisObject);
+            }
+        });
+        Log.i(TAG, "preview heal hooked on gl.s (r/o0), off with " + PROP_HEAL + "=0");
+    }
+
+    /** True on the pages the camera itself ships the palette for. XPAN, GR, POP and video stay out. */
+    private static boolean isPalettePage(String mode) {
+        return "common".equals(mode) || "portrait".equals(mode) || "night".equals(mode);
+    }
+
+    /** Re-pushes the manager's combined table when the canvas is still drawing an older one. */
+    private static void repairPaletteTexture(Object canvas) {
+        if (canvas == null || !paletteEnabled()) return;
+        if (!photoPaletteUp && !directPaletteOpen) return;
+        String mode = currentMode();
+        if (!isPalettePage(mode)) return;
+        if (!paletteEngaged()) return;
+        Object manager = lut();
+        if (manager == null || !toneEnvUp(manager)) return;
+        final float[] want;
+        final int size;
+        try {
+            Object table = XposedHelpers.getObjectField(manager, "c");
+            if (!(table instanceof float[])) return;
+            want = (float[]) table;
+            size = XposedHelpers.getIntField(manager, "t");
+        } catch (Throwable error) {
+            return;
+        }
+        if (size <= 1 || want.length != size * size * size * 3) return;
+        long wantHash = tableHash(want);
+        if (wantHash == healUploadedHash) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - healPushedAt < HEAL_GAP_MS) return;
+        healPushedAt = now;
+        try {
+            XposedHelpers.callMethod(canvas, "r", want, size, true);
+            healUploadedHash = wantHash;
+            if (healPushes++ < 16) {
+                Log.i(TAG, "palette preview re-pushed #" + healPushes + " hash=" + wantHash
+                    + " size=" + size + " mode=" + mode);
+            }
+        } catch (Throwable error) {
+            if (healPushes++ < 4) Log.e(TAG, "palette preview re-push failed", error);
+        }
+    }
+
+    /** Length + strided samples; the same fingerprint the XPAN repair uses (r464). */
+    private static long tableHash(float[] table) {
+        long hash = table.length;
+        int stride = Math.max(1, table.length / 256);
+        for (int i = 0; i < table.length; i += stride) {
+            hash = hash * 1000003 ^ Float.floatToIntBits(table[i]);
+        }
+        return hash;
+    }
+
+    /**
      * True once the palette has been used on the video page during this visit, and kept for the rest
      * of the visit rather than only while the dial is on screen. Recording is what forces this: the
      * camera builds its preview program from the renderer's surface callback, starting a recording
@@ -1455,6 +1602,7 @@ public final class MasterPalette {
                         boolean photoOpen = findByIds(PHOTO_PALETTE_IDS) != null;
                         if (photoOpen != photoPaletteOpen) {
                             photoPaletteOpen = photoOpen;
+                            photoPaletteUp = photoOpen;
                             if (photoOpen) postDump("photo-palette");
                         }
                         View anchor = MasterPalette.anchor(activity);
@@ -1595,6 +1743,7 @@ public final class MasterPalette {
 
         void close() {
             stopped = true;
+            photoPaletteUp = false;
             decor.removeCallbacks(tick);
             hide();
             decor.removeView(button);

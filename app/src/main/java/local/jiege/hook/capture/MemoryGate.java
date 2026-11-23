@@ -5,8 +5,9 @@ import android.app.Activity;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.XposedBridge;
 import local.jiege.hook.common.Log;
+import local.jiege.hook.common.Symbols;
 
 /**
  * The camera answers every shutter press with "memory or storage is not enough" while the device
@@ -24,7 +25,6 @@ import local.jiege.hook.common.Log;
  */
 public final class MemoryGate {
     private static final String TAG = "MemGate";
-    private static final String CLASS = "in.c";
     private static final String METHOD = "m";
     private static final String PROP = "persist.omnicam.memgate";
 
@@ -38,8 +38,8 @@ public final class MemoryGate {
                 Log.i(TAG, "left as stock, persist.omnicam.memgate=0");
                 return;
             }
-            XposedHelpers.findAndHookMethod(CLASS, classLoader, METHOD,
-                Activity.class, long.class, new XC_MethodHook() {
+            XposedBridge.hookAllMethods(Symbols.get().cls("MemoryGateClass"),
+                METHOD, new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         if (Boolean.TRUE.equals(param.getResult())) return;
                         param.setResult(Boolean.TRUE);

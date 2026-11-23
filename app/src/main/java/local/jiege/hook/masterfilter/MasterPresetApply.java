@@ -230,20 +230,14 @@ public final class MasterPresetApply {
      */
     public static void installProPresenter(ClassLoader classLoader) {
         try {
-            final Class<?> presenter = de.robv.android.xposed.XposedHelpers.findClass("df.r", classLoader);
-            XposedBridge.hookAllConstructors(de.robv.android.xposed.XposedHelpers.findClass("df.b", classLoader),
+            // 面板实例直接从构造器捕获（旧方案借档位按钮监听器中转，各版本都未生效）。
+            XposedBridge.hookAllConstructors(
+                local.jiege.hook.common.Symbols.get().cls("CaptureParamPresenter"),
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         try {
-                            for (java.lang.reflect.Field field : param.thisObject.getClass().getDeclaredFields()) {
-                                if (!presenter.isAssignableFrom(field.getType())) continue;
-                                field.setAccessible(true);
-                                Object found = field.get(param.thisObject);
-                                if (found == null) continue;
-                                if (proPresenter == null) Log.i(TAG, "Pro 参数面板已捕获");
-                                proPresenter = found;
-                                return;
-                            }
+                            if (proPresenter == null) Log.i(TAG, "Pro 参数面板已捕获");
+                            proPresenter = param.thisObject;
                         } catch (Throwable error) {
                             Log.e(TAG, "取 Pro 参数面板失败", error);
                         }
@@ -260,7 +254,7 @@ public final class MasterPresetApply {
         if (presenter == null) return null;
         try {
             // CaptureParamView 的 k 字段就是「当前是不是 Pro 档」。
-            Object view = de.robv.android.xposed.XposedHelpers.getObjectField(presenter, "P");
+            Object view = Symbols.get().field("@CaptureParamPresenter.view").get(presenter);
             boolean pro = de.robv.android.xposed.XposedHelpers.getBooleanField(view, "k");
             return pro ? presenter : null;
         } catch (Throwable error) {

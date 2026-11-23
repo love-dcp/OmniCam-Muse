@@ -41,35 +41,55 @@ import local.jiege.hook.gr.GrPreviewStreamRestore;
  */
 public final class XpanLiveFeature {
     private static final String TAG = "XpanLiveFeature";
+
+    /** Resolve a symbol id ("@Xxx") to its runtime class via the fingerprint table. */
+    private static Class<?> cls(String id) {
+        return id.startsWith("@") ? Symbols.get().cls(id.substring(1))
+            : XposedHelpers.findClass(id, Symbols.get().loader());
+    }
+
+    /** Resolved runtime name of a symbol id. */
+    private static String member(String id) {
+        return Symbols.get().name(id.startsWith("@") ? id.substring(1) : id);
+    }
+
+    /** Inner class of a resolved class ("a" -> Outer$a); null if absent on this build. */
+    private static Class<?> innerOf(Class<?> outer, String simple) {
+        for (Class<?> candidate : outer.getDeclaredClasses()) {
+            if (candidate.getName().endsWith("$" + simple)) return candidate;
+        }
+        return null;
+    }
+
     private static final String XPAN_FEATURE = "com.oplus.camera.feature.xpan";
     private static final String LIVE_PHOTO_FEATURE = "com.oplus.camera.feature.live_photo";
     private static final String LIVE_PHOTO_SUPPORT = "pref_live_photo_key";
-    private static final String LIVE_PHOTO_PRESENTER = "gh.e2";
-    private static final String CAMERA_IMPLEMENTATION = "bb.c1";
+    private static final String LIVE_PHOTO_PRESENTER = "@LivePhotoPresenter";
+    private static final String CAMERA_IMPLEMENTATION = "@CameraImplementation";
     private static final String IMAGE_DATA = "com.oplus.camera.feature.livephoto.data.ImageData$a";
     private static final String VIDEO_IMAGE_DATA =
         "com.oplus.camera.feature.livephoto.data.ImageData";
-    private static final String VIDEO_EFFECT_PIPELINE = "gh.p3";
-    private static final String GL_RENDERER = "com.oplus.camera.common.gl.a0";
+    private static final String VIDEO_EFFECT_PIPELINE = "@VideoEffectPipeline";
+    private static final String GL_RENDERER = "@CommonShader";
     private static final String GL_SHADER = "com.oplus.camera.common.gl.y0";
-    private static final String RAW_3D_TEXTURE = "com.oplus.camera.common.gl.t0";
-    private static final String LIVE_WARP_RENDERER = "ch.g";
-    private static final String LIVE_VIDEO_ENCODER = "eh.c0";
-    private static final String EGL_HELPER = "com.oplus.camera.common.gl.j";
-    private static final String EIS_PROCESSOR = "gh.g";
-    private static final String EIS_WRAPPER = "gh.v";
-    private static final String EIS_GRID_DATA = "bh.j";
+    private static final String RAW_3D_TEXTURE = "@Raw3dTexture";
+    private static final String LIVE_WARP_RENDERER = "@WarpRenderer";
+    private static final String LIVE_VIDEO_ENCODER = "@LiveVideoEncoder";
+    private static final String EGL_HELPER = "@EglHelper";
+    private static final String EIS_PROCESSOR = "@LivePhotoEisProcessor";
+    private static final String EIS_WRAPPER = "@LivePhotoEisWrapper";
+    private static final String EIS_GRID_DATA = "@EisGridData";
     private static final String EIS_METADATA_QUEUE_FIELD = "z";
     private static final String LUT_MANAGER = "com.oplus.camera.common.utils.Lut3dDataManager";
     private static final String LUT_MANAGER_HOLDER = LUT_MANAGER + "$b";
-    private static final String CAMERA_METADATA_KEY = "bb.s";
-    private static final String LIVE_PHOTO_FEATURE_FLAGS = "fh.a";
+    private static final String CAMERA_METADATA_KEY = "@CameraMetadataKey";
+    private static final String LIVE_PHOTO_FEATURE_FLAGS = "@LivePhotoFeatureFlags";
     /** The encoder's watermark compositor (WatermarkProcessor) and the renderer it owns. */
-    private static final String WATERMARK_PROCESSOR = "gh.s4";
+    private static final String WATERMARK_PROCESSOR = "@WatermarkProcessor";
     private static final String WATERMARK_PROCESSOR_RENDERER = "j";
     /** The GL renderer the watermark processor composites the frame and the bitmap with. */
-    private static final String WATERMARK_COMPOSITE = "ch.h";
-    private static final String LUT_PARAMETERS = "bh.o";
+    private static final String WATERMARK_COMPOSITE = "@WatermarkRenderer";
+    private static final String LUT_PARAMETERS = "@LutParameters";
     private static final String XPAN_LIVE_WATERMARK_PROPERTY = "persist.omnicam.xpan.livewm";
     /**
      * Opt-in for the SDR output relabel. Stock renders the XPAN live attachment HLG end to end
@@ -109,15 +129,13 @@ public final class XpanLiveFeature {
      * Default 1 = redirect. Set 0 to restore stock Z2 conversion.
      */
     private static final String XPAN_SKIP_Z2_PROPERTY = "persist.omnicam.xpan.skipz2";
-    private static final String FRAME_SINK = "gh.i2";
-    private static final String YUV_CONVERSION_CLASS = "ch.e";
+    private static final String FRAME_SINK = "@LivePhotoSession";
+    private static final String YUV_CONVERSION_CLASS = "@Rgba2YuvConversion";
     private static final String XPAN_GYRO_KEY =
         "com.oplus.camera.gyro.value.gyrotoeis";
     private static final String BASE_MODE_NAME_FIELD = "U0";
-    private static final String MENU_CONTAINER_BASE =
-        "com.oplus.camera.ui.newsetting.container.r";
-    private static final String MENU_CONTAINER_TOP_LEFT =
-        "com.oplus.camera.ui.newsetting.container.CameraMenuContainerTopLeft";
+    private static final String MENU_CONTAINER_BASE = "@MenuContainer";
+    private static final String MENU_CONTAINER_TOP_LEFT = "@MenuContainerTopLeft";
     private static final String MENU_OPTION_BASE = "jq.h";
     private static final String MENU_OPTION_TOP = "dq.j";
     private static final String CAMERA_SETTING_UI_TOP = "cq.l";
@@ -144,7 +162,6 @@ public final class XpanLiveFeature {
     private static final String CAPTURE_REQUEST_STAGE =
         "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest"
             + ".EventMessageCaptureRequestStage";
-    private static final String PRESENTER_MODE_METHOD = "i";
     private static final String PRESENTER_MODE_FIELD = "f36506q";
     private static final String XPAN_MODE = "xpan";
     private static final String XPAN_UNIT_MODE = "xpan_mode";
@@ -576,7 +593,7 @@ public final class XpanLiveFeature {
             }
         });
         try {
-            Class<?> v2 = XposedHelpers.findClass("gh.v2", classLoader);
+            Class<?> v2 = cls("@LiveVideoSizeChooser");
             XposedBridge.hookAllMethods(v2, "m", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     try {
@@ -851,7 +868,7 @@ public final class XpanLiveFeature {
      * support and conflict checks.
      */
     private static void hookXpanSupport(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+        Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
         XposedBridge.hookAllMethods(presenter, "P2", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!supportProbeLogged) {
@@ -872,7 +889,7 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(presenter, "G2", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.eligibility"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!eligibilityProbeLogged) {
                     eligibilityProbeLogged = true;
@@ -895,7 +912,7 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(presenter, "H3", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.dataOff"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (Boolean.TRUE.equals(XPAN_RESUME_OVERRIDE.get())
                     && isXpanPresenter(param.thisObject)) {
@@ -904,7 +921,7 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(presenter, "G3", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.closeReason"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (Boolean.TRUE.equals(XPAN_RESUME_OVERRIDE.get())
                     && isXpanPresenter(param.thisObject)) {
@@ -914,7 +931,7 @@ public final class XpanLiveFeature {
         });
 
         Method onResume = XposedHelpers.findMethodExact(
-            presenter, "f2", boolean.class);
+            presenter, member("@LivePhotoPresenter.masterModeClose"), boolean.class);
         XposedBridge.hookMethod(onResume, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (isXpanPresenter(param.thisObject)) {
@@ -928,7 +945,7 @@ public final class XpanLiveFeature {
                 XPAN_RESUME_OVERRIDE.set(Boolean.FALSE);
                 if (!isLivePhotoStoredOn(param.thisObject)) return;
                 try {
-                    XposedHelpers.callMethod(param.thisObject, "G3", 0);
+                    XposedHelpers.callMethod(param.thisObject, member("@LivePhotoPresenter.closeReason"), 0);
                     if (!resumeOverrideLogged) {
                         resumeOverrideLogged = true;
                         Log.i(TAG, "XPAN resume live photo close suppressed");
@@ -1016,9 +1033,9 @@ public final class XpanLiveFeature {
      * modified, so other presenters still see xpan_mode.
      */
     private static void hookPreviewStage(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+        Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
         Class<?> stageClass = XposedHelpers.findClass(PREVIEW_STAGE, classLoader);
-        Method listener = XposedHelpers.findMethodExact(presenter, "a2", stageClass);
+        Method listener = XposedHelpers.findMethodExact(presenter, member("@LivePhotoPresenter.previewStage"), stageClass);
         Constructor<?> copy = XposedHelpers.findConstructorExact(
             stageClass, int.class, int.class, Size.class, Size.class, boolean.class);
 
@@ -1066,12 +1083,12 @@ public final class XpanLiveFeature {
      * presenter remains responsible for recording and packaging the dynamic photo.
      */
     private static void hookCaptureRequestStage(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+        Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
         Class<?> stageClass = XposedHelpers.findClass(CAPTURE_REQUEST_STAGE, classLoader);
         Method prepareRequestTag =
-            XposedHelpers.findMethodExact(presenter, "V1", stageClass);
+            XposedHelpers.findMethodExact(presenter, member("@LivePhotoPresenter.captureStagePrepare"), stageClass);
         Method captureStarted =
-            XposedHelpers.findMethodExact(presenter, "C1", stageClass);
+            XposedHelpers.findMethodExact(presenter, member("@LivePhotoPresenter.captureStageStart"), stageClass);
 
         XposedBridge.hookMethod(prepareRequestTag, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -1150,7 +1167,7 @@ public final class XpanLiveFeature {
     private static void hookExposureCompensationFix(ClassLoader classLoader) {
         final Class<?> baseMode = XposedHelpers.findClass(
             "com.oplus.camera.module.BaseMode", classLoader);
-        final Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+        final Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
         final int fix = clamp(
             property(XPAN_LIVE_EV_PROPERTY, DEFAULT_XPAN_LIVE_EV_UNITS),
             -MAX_AE_EV_UNITS, MAX_AE_EV_UNITS);
@@ -1196,8 +1213,7 @@ public final class XpanLiveFeature {
             Log.e(TAG, "XPAN mode switch tracking unavailable", error);
         }
 
-        Class<?> camera = XposedHelpers.findClass(
-            CAMERA_IMPLEMENTATION, classLoader);
+        Class<?> camera = cls(CAMERA_IMPLEMENTATION);
         XposedBridge.hookAllMethods(camera, "v", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length < 2
@@ -1404,8 +1420,8 @@ public final class XpanLiveFeature {
      */
     private static void hookXpanEisBypass(ClassLoader classLoader) {
         final Class<?> featureFlags =
-            XposedHelpers.findClass(LIVE_PHOTO_FEATURE_FLAGS, classLoader);
-        final Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+            cls(LIVE_PHOTO_FEATURE_FLAGS);
+        final Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
         Method isEisBypass = XposedHelpers.findMethodExact(featureFlags, "e");
 
         XposedBridge.hookMethod(isEisBypass, new XC_MethodHook() {
@@ -1472,8 +1488,9 @@ public final class XpanLiveFeature {
      * exactly like the healthy path. Other modes are untouched.
      */
     private static void hookXpanNativeConversion(ClassLoader classLoader) {
-        final Class<?> conversion = XposedHelpers.findClass(
-            YUV_CONVERSION_CLASS, classLoader);
+        final Class<?> conversion = cls(YUV_CONVERSION_CLASS);
+        final String convertName = member("@Rgba2YuvConversion.convert");
+        final String hardwareBufferName = member("@Rgba2YuvConversion.hardwareBuffer");
         XC_MethodHook skipHook = new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (!XPAN_MODE.equals(currentCameraMode)
@@ -1481,7 +1498,8 @@ public final class XpanLiveFeature {
                     return;
                 }
                 param.setResult(
-                    "b".equals(param.method.getName()) ? Long.valueOf(0L) : null);
+                    convertName.equals(param.method.getName())
+                        ? Long.valueOf(0L) : null);
                 int skips = ++xpanConversionSkips;
                 if (skips <= 3 || skips % 120 == 0) {
                     Log.i(TAG, "XPAN YUV converter call skipped"
@@ -1492,14 +1510,33 @@ public final class XpanLiveFeature {
                 }
             }
         };
-        // Exact signatures only: ch.e also has b([I) which must not be touched.
-        XposedBridge.hookMethod(XposedHelpers.findMethodExact(conversion, "k",
-            XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader)), skipHook);
-        XposedBridge.hookMethod(XposedHelpers.findMethodExact(conversion, "l",
-            android.hardware.HardwareBuffer.class), skipHook);
-        XposedBridge.hookMethod(XposedHelpers.findMethodExact(conversion, "b",
-            float.class, float.class, int.class,
-            boolean.class, boolean.class, float[].class), skipHook);
+        // Convert has a (F,F,I,Z,Z,[F)J shape on older builds and gains a trailing
+        // boolean on newer ones -- match by name and parameter prefix, never by name alone
+        // (the OES variant folded into it changed the arity between builds).
+        for (java.lang.reflect.Method m : conversion.getDeclaredMethods()) {
+            Class<?>[] p = m.getParameterTypes();
+            if (m.getName().equals(convertName)
+                && p.length >= 6
+                && p[0] == float.class && p[1] == float.class && p[2] == int.class
+                && p[3] == boolean.class && p[4] == boolean.class
+                && p[5] == float[].class) {
+                XposedBridge.hookMethod(m, skipHook);
+            }
+        }
+        // Hardware-buffer intake (l on older builds, m on newer ones).
+        for (java.lang.reflect.Method m : conversion.getDeclaredMethods()) {
+            Class<?>[] p = m.getParameterTypes();
+            if (m.getName().equals(hardwareBufferName) && p.length == 1
+                && p[0] == android.hardware.HardwareBuffer.class) {
+                XposedBridge.hookMethod(m, skipHook);
+            }
+        }
+        // OES-source variant: separate method on older builds, folded into convert on
+        // newer ones (the symbol resolves there and stays missing here by design).
+        if (Symbols.get().has("@Rgba2YuvConversion.oesSource")) {
+            XposedBridge.hookMethod(
+                Symbols.get().method("@Rgba2YuvConversion.oesSource"), skipHook);
+        }
         Log.i(TAG, "XPAN native conversion bypass armed (noconv)");
 
         /*
@@ -1539,8 +1576,8 @@ public final class XpanLiveFeature {
                 String via = "none";
                 if (x2GateOpen(param.thisObject)) {
                     try {
-                        redirected = XposedHelpers.callMethod(
-                            param.thisObject, "X2", param.args);
+                        redirected = XposedHelpers.callMethod(param.thisObject,
+                            member("@LivePhotoPresenter.x2Dispatch"), param.args);
                         if (redirected != null) via = "X2";
                     } catch (Throwable error) {
                         Log.i(TAG, "XPAN Z2 redirect X2 failed: " + error);
@@ -1548,8 +1585,8 @@ public final class XpanLiveFeature {
                 }
                 if (redirected == null) {
                     try {
-                        redirected = XposedHelpers.callMethod(
-                            param.thisObject, "b3", param.args);
+                        redirected = XposedHelpers.callMethod(param.thisObject,
+                            member("@LivePhotoPresenter.yuvFallback"), param.args);
                         if (redirected != null) via = "b3";
                     } catch (Throwable error) {
                         Log.i(TAG, "XPAN Z2 redirect b3 failed: " + error);
@@ -1567,10 +1604,36 @@ public final class XpanLiveFeature {
                 }
             }
         };
-        XposedBridge.hookAllMethods(
-            XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader),
-            "Z2", z2SkipHook);
-        Log.i(TAG, "XPAN Z2 frame path bypass armed (redirect X2/b3)");
+        /*
+         * Arm the redirect only when both dispatch targets resolve AND differ from the
+         * hooked frameGen itself: on builds where the YUV producer became the main
+         * frameGen the fingerprint would resolve to the same method and redirecting
+         * into it would recurse forever.
+         */
+        if (Symbols.get().has("@LivePhotoPresenter.x2Dispatch",
+                "@LivePhotoPresenter.yuvFallback",
+                "@LivePhotoPresenter.photoGate",
+                "@LivePhotoPresenter.xpanGate",
+                "@LivePhotoPresenter.session")) {
+            java.lang.reflect.Method frameGen = Symbols.get()
+                .method("@LivePhotoPresenter.frameGen");
+            java.lang.reflect.Method x2 = Symbols.get()
+                .method("@LivePhotoPresenter.x2Dispatch");
+            java.lang.reflect.Method yuv = Symbols.get()
+                .method("@LivePhotoPresenter.yuvFallback");
+            if (!frameGen.equals(x2) && !frameGen.equals(yuv)) {
+                XposedBridge.hookAllMethods(
+                    cls(LIVE_PHOTO_PRESENTER),
+                    member("@LivePhotoPresenter.frameGen"), z2SkipHook);
+                Log.i(TAG, "XPAN Z2 frame path bypass armed (redirect X2/b3)");
+            } else {
+                Log.i(TAG, "XPAN Z2 redirect not armed: dispatch targets"
+                    + " alias the frameGen on this build");
+            }
+        } else {
+            Log.i(TAG, "XPAN Z2 redirect not armed: dispatch symbols"
+                + " unresolved on this build");
+        }
 
         /*
          * Observe the single downstream fan-out for all three ImageData producers
@@ -1578,8 +1641,8 @@ public final class XpanLiveFeature {
          * frame source and which handle they carry.
          */
         XposedBridge.hookAllMethods(
-            XposedHelpers.findClass(FRAME_SINK, classLoader),
-            "k", new XC_MethodHook() {
+            cls(FRAME_SINK),
+            member("@LivePhotoSession.frameSink"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!XPAN_MODE.equals(currentCameraMode)
                         || param.args.length != 1
@@ -1614,12 +1677,15 @@ public final class XpanLiveFeature {
      */
     private static boolean x2GateOpen(Object presenter) {
         try {
-            if (!(Boolean) XposedHelpers.callMethod(presenter, "s3")) return false;
-            Object p1 = XposedHelpers.getObjectField(presenter, "p1");
-            if (p1 == null) return false;
-            if (!(Boolean) XposedHelpers.getBooleanField(presenter, "W0")) return false;
+            if (!(Boolean) XposedHelpers.callMethod(
+                presenter, member("@LivePhotoPresenter.photoGate"))) return false;
+            Object session = XposedHelpers.getObjectField(
+                presenter, member("@LivePhotoPresenter.session"));
+            if (session == null) return false;
+            if (!(Boolean) XposedHelpers.getBooleanField(
+                presenter, member("@LivePhotoPresenter.xpanGate"))) return false;
             int flags = XposedHelpers.getStaticIntField(
-                XposedHelpers.findClass("fh.a", presenter.getClass().getClassLoader()), "a");
+                cls(LIVE_PHOTO_FEATURE_FLAGS), "a");
             return (flags & 0x800000) != 0;
         } catch (Throwable error) {
             Log.i(TAG, "XPAN X2 gate check failed: " + error);
@@ -1664,15 +1730,15 @@ public final class XpanLiveFeature {
      */
     private static void hookXpanEisGridRouteDiagnostics(ClassLoader classLoader) {
         final Class<?> featureFlags =
-            XposedHelpers.findClass(LIVE_PHOTO_FEATURE_FLAGS, classLoader);
+            cls(LIVE_PHOTO_FEATURE_FLAGS);
         final Class<?> processor =
-            XposedHelpers.findClass(EIS_PROCESSOR, classLoader);
+            cls(EIS_PROCESSOR);
         final Class<?> wrapper =
-            XposedHelpers.findClass(EIS_WRAPPER, classLoader);
+            cls(EIS_WRAPPER);
         final Class<?> imageData =
             XposedHelpers.findClass(VIDEO_IMAGE_DATA, classLoader);
         final Class<?> gridData =
-            XposedHelpers.findClass(EIS_GRID_DATA, classLoader);
+            cls(EIS_GRID_DATA);
 
         XposedBridge.hookAllMethods(featureFlags, "e", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -1760,12 +1826,12 @@ public final class XpanLiveFeature {
             Log.e(TAG, "XPAN live EIS processor f pin failed", error);
         }
 
-        XposedBridge.hookAllMethods(wrapper, "f8", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(wrapper, member("@LivePhotoEisWrapper.sendFrame"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 logEisWrapperState(param, "send");
             }
         });
-        XposedBridge.hookAllMethods(wrapper, "e8", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(wrapper, member("@LivePhotoEisWrapper.sendMeta"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 /*
                  * r441 postmortem (supersedes the r439/r440 skip): "sendMetaToEis" is the
@@ -1806,7 +1872,7 @@ public final class XpanLiveFeature {
                 }
             }
         });
-        XposedBridge.hookAllMethods(wrapper, "c8", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(wrapper, member("@LivePhotoEisWrapper.acquire"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (param.hasThrowable()) return;
                 Object handle = param.getResult();
@@ -1891,9 +1957,9 @@ public final class XpanLiveFeature {
      * every r438-r441 session while encoder feeds kept running).
      */
     private static void hookXpanSessionLifecycleProbes(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+        Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
 
-        XposedBridge.hookAllMethods(presenter, "Y1", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.onPreviewDrawn"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (!XPAN_MODE.equals(currentCameraMode)) return;
                 xpanLivePresenterRef = new WeakReference<>(param.thisObject);
@@ -1936,7 +2002,7 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(presenter, "G3", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.closeReason"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 Log.i(TAG, "XPAN presenter G3 called, mode=" + liveEisRouteMode()
                     + ", args=" + java.util.Arrays.toString(param.args));
@@ -1956,8 +2022,8 @@ public final class XpanLiveFeature {
                 }
             }
         };
-        XposedBridge.hookAllMethods(presenter, "H3", toggleProbe);
-        XposedBridge.hookAllMethods(presenter, "I3", toggleProbe);
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.dataOff"), toggleProbe);
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.dataOn"), toggleProbe);
         Log.i(TAG, "XPAN session lifecycle probes armed");
     }
 
@@ -2158,9 +2224,9 @@ public final class XpanLiveFeature {
      */
     private static void hookXpanGyroFallback(ClassLoader classLoader) {
         Class<?> imageData = XposedHelpers.findClass(IMAGE_DATA, classLoader);
-        Class<?> presenter = XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+        Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
         Object gyroKey = findCaptureResultKey(
-            XposedHelpers.findClass(CAMERA_METADATA_KEY, classLoader),
+            cls(CAMERA_METADATA_KEY),
             XPAN_GYRO_KEY);
         Method readMetadata = XposedHelpers.findMethodExact(
             imageData, "b", CaptureResult.Key.class);
@@ -2201,14 +2267,14 @@ public final class XpanLiveFeature {
      */
     private static void hookXpanVideoCropFallback(ClassLoader classLoader) {
         final Class<?> pipeline =
-            XposedHelpers.findClass(VIDEO_EFFECT_PIPELINE, classLoader);
+            cls(VIDEO_EFFECT_PIPELINE);
         final Class<?> imageData =
             XposedHelpers.findClass(VIDEO_IMAGE_DATA, classLoader);
         final Class<?> presenter =
-            XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+            cls(LIVE_PHOTO_PRESENTER);
         Method renderFrame = XposedHelpers.findMethodExact(
             pipeline,
-            "E",
+            member("@VideoEffectPipeline.renderSubVideo"),
             imageData,
             boolean.class,
             int.class,
@@ -2241,7 +2307,7 @@ public final class XpanLiveFeature {
          * the ordinary LUT itself, so those bind probes cannot be attributed to p3.r() without
          * marking this call as a nested sub-video stage.
          */
-        XposedBridge.hookAllMethods(pipeline, "E", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(pipeline, member("@VideoEffectPipeline.renderSubVideo"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 5
                     || !imageData.isInstance(param.args[0])
@@ -2813,8 +2879,8 @@ public final class XpanLiveFeature {
             });
         }
 
-        final Class<?> baseRenderer = XposedHelpers.findClass(GL_RENDERER, classLoader);
-        final Class<?> warpRenderer = XposedHelpers.findClass(LIVE_WARP_RENDERER, classLoader);
+        final Class<?> baseRenderer = cls(GL_RENDERER);
+        final Class<?> warpRenderer = cls(LIVE_WARP_RENDERER);
         Method[][] targets = {baseRenderer.getDeclaredMethods(),
             warpRenderer.getDeclaredMethods()};
         for (Method[] methods : targets) {
@@ -4236,7 +4302,7 @@ public final class XpanLiveFeature {
 
     private static void hookXpanLiveBasicTone(ClassLoader classLoader) {
         final Class<?> glRenderer =
-            XposedHelpers.findClass(GL_RENDERER, classLoader);
+            cls(GL_RENDERER);
         final Class<?> shader =
             XposedHelpers.findClass(GL_SHADER, classLoader);
         final Class<?> managerHolder =
@@ -4244,9 +4310,9 @@ public final class XpanLiveFeature {
         installedGlRenderer = glRenderer;
         installedManagerHolder = managerHolder;
         final Class<?> presenter =
-            XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+            cls(LIVE_PHOTO_PRESENTER);
         final Class<?> liveWarpRenderer =
-            XposedHelpers.findClass(LIVE_WARP_RENDERER, classLoader);
+            cls(LIVE_WARP_RENDERER);
         final Class<?> videoImageData =
             XposedHelpers.findClass(VIDEO_IMAGE_DATA, classLoader);
         Method applyBasicTone = XposedHelpers.findMethodExact(
@@ -4259,7 +4325,7 @@ public final class XpanLiveFeature {
          * branch this frame actually used.
          */
         XposedBridge.hookAllMethods(
-            XposedHelpers.findClass(VIDEO_EFFECT_PIPELINE, classLoader),
+            cls(VIDEO_EFFECT_PIPELINE),
             "r",
             new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
@@ -4431,7 +4497,8 @@ public final class XpanLiveFeature {
          * path: set its LutParameters.g flag and create the stock BasicTone texture before stock
          * code consumes those values.
          */
-        XposedBridge.hookAllMethods(liveWarpRenderer, "p", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(liveWarpRenderer,
+            member("@WarpRenderer.draw"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 10) return;
                 Object renderer = param.thisObject;
@@ -4489,21 +4556,11 @@ public final class XpanLiveFeature {
          * size; this common quad passes normalized coordinates, so use a neutral 1x1 reference.
          * The original common program is restored immediately after the draw.
          */
-        final Class<?> texture = XposedHelpers.findClass(
-            "com.oplus.camera.common.gl.u0", classLoader);
-        Method commonDraw = XposedHelpers.findMethodExact(
-            glRenderer,
-            "i",
-            texture,
-            int.class,
-            int.class,
-            int.class,
-            int.class,
-            int.class,
-            float.class,
-            float.class,
-            boolean.class,
-            boolean.class);
+        // The draw entry's first parameter IS the texture type; its short name drifts
+        // between builds, so derive the class from the resolved symbol instead of a
+        // hardcoded descriptor.
+        Method commonDraw = Symbols.get().method("@CommonShader.commonDraw");
+        final Class<?> texture = commonDraw.getParameterTypes()[0];
         XposedBridge.hookMethod(commonDraw, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 Object renderer = param.thisObject;
@@ -4680,11 +4737,11 @@ public final class XpanLiveFeature {
      */
     private static void hookXpanLiveWatermarkCopy(ClassLoader classLoader) {
         final Class<?> processor =
-            XposedHelpers.findClass(WATERMARK_PROCESSOR, classLoader);
+            cls(WATERMARK_PROCESSOR);
         final Class<?> composite =
-            XposedHelpers.findClass(WATERMARK_COMPOSITE, classLoader);
+            cls(WATERMARK_COMPOSITE);
         final Class<?> lutParameters =
-            XposedHelpers.findClass(LUT_PARAMETERS, classLoader);
+            cls(LUT_PARAMETERS);
         XposedBridge.hookAllMethods(processor, "b", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 2
@@ -4719,13 +4776,14 @@ public final class XpanLiveFeature {
                 WATERMARK_COMPOSITE_ACTIVE.remove();
             }
         });
-        XposedBridge.hookAllMethods(composite, "p", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(composite,
+            member("@WatermarkRenderer.composite"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 9
                     || !Boolean.TRUE.equals(WATERMARK_COMPOSITE_ACTIVE.get())
                     || param.method == null
-                    || !WATERMARK_COMPOSITE.equals(
-                        param.method.getDeclaringClass().getName())) {
+                    || !cls(WATERMARK_COMPOSITE).equals(
+                        param.method.getDeclaringClass())) {
                     return;
                 }
                 try {
@@ -4853,7 +4911,7 @@ public final class XpanLiveFeature {
     private static boolean hasBasicToneData(Object texture) {
         if (texture == null) return false;
         try {
-            if (!RAW_3D_TEXTURE.equals(texture.getClass().getName())) return false;
+            if (!cls(RAW_3D_TEXTURE).isInstance(texture)) return false;
             float[] data = (float[]) XposedHelpers.getObjectField(texture, "A");
             int size = XposedHelpers.getIntField(texture, "z");
             int width = XposedHelpers.getIntField(texture, "a");
@@ -4874,27 +4932,28 @@ public final class XpanLiveFeature {
 
     private static void hookXpanLiveLutDiagnostics(ClassLoader classLoader) {
         final Class<?> glRenderer =
-            XposedHelpers.findClass(GL_RENDERER, classLoader);
+            cls(GL_RENDERER);
         final Class<?> shader =
             XposedHelpers.findClass(GL_SHADER, classLoader);
         final Class<?> presenter =
-            XposedHelpers.findClass(LIVE_PHOTO_PRESENTER, classLoader);
+            cls(LIVE_PHOTO_PRESENTER);
         final Class<?> liveWarpRenderer =
-            XposedHelpers.findClass(LIVE_WARP_RENDERER, classLoader);
+            cls(LIVE_WARP_RENDERER);
         final Class<?> pipeline =
-            XposedHelpers.findClass(VIDEO_EFFECT_PIPELINE, classLoader);
+            cls(VIDEO_EFFECT_PIPELINE);
 
         /*
          * p3.r() has two mutually exclusive main-video draw calls. Instrument both entry points
          * independently of the BasicTone workaround so the frame log records the path actually
          * used by this version instead of inferring it from texture state.
          */
-        XposedBridge.hookAllMethods(glRenderer, "i", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(glRenderer,
+            member("@CommonShader.commonDraw"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 10
                     || param.thisObject == null
-                    || !LIVE_WARP_RENDERER.equals(
-                        param.thisObject.getClass().getName())) {
+                    || !cls(LIVE_WARP_RENDERER).equals(
+                        param.thisObject.getClass())) {
                     return;
                 }
                 XpanMainFrame frame = XPAN_MAIN_FRAME.get();
@@ -4923,7 +4982,8 @@ public final class XpanLiveFeature {
          * as uTransformTexture by WarpRenderer. Capture both sides before changing any behaviour,
          * because a valid BasicTone table alone cannot prove that HDR transform/GTM is correct.
          */
-        XposedBridge.hookAllMethods(presenter, "Z2", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter,
+            member("@LivePhotoPresenter.frameGen"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!XPAN_MODE.equals(currentCameraMode)) {
                     return;
@@ -5026,7 +5086,8 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(liveWarpRenderer, "p", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(liveWarpRenderer,
+            member("@WarpRenderer.draw"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 10
                     || !XPAN_MODE.equals(currentCameraMode)) {
@@ -5067,12 +5128,24 @@ public final class XpanLiveFeature {
             }
         });
 
-        XposedBridge.hookAllMethods(glRenderer, "o", new XC_MethodHook() {
+        /*
+         * Transform upload probe. The entry has a 5-parameter shape on older builds and
+         * gains a trailing boolean on newer ones; hook whichever resolves.
+         */
+        java.util.List<Method> uploadEntries = new ArrayList<>();
+        if (Symbols.get().has("@CommonShader.transformUpload")) {
+            uploadEntries.add(Symbols.get().method("@CommonShader.transformUpload"));
+        }
+        if (Symbols.get().has("@CommonShader.transformUpload2")) {
+            uploadEntries.add(Symbols.get().method("@CommonShader.transformUpload2"));
+        }
+        for (Method uploadEntry : uploadEntries) {
+            XposedBridge.hookMethod(uploadEntry, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args.length != 5
+                if (param.args.length < 5
                     || param.thisObject == null
-                    || !LIVE_WARP_RENDERER.equals(
-                        param.thisObject.getClass().getName())
+                    || !cls(LIVE_WARP_RENDERER).equals(
+                        param.thisObject.getClass())
                     || !XPAN_MODE.equals(currentCameraMode)) {
                     return;
                 }
@@ -5096,28 +5169,34 @@ public final class XpanLiveFeature {
                     Log.e(TAG, "XPAN live transform upload probe failed", error);
                 }
             }
-        });
+            });
+        }
 
-        final Class<?> callback =
-            XposedHelpers.findClass(VIDEO_EFFECT_PIPELINE + "$a", classLoader);
-        Method onLutReady = XposedHelpers.findMethodExact(
-            callback, "b", float[].class, int.class, int.class);
-        XposedBridge.hookMethod(onLutReady, new XC_MethodHook() {
-            @Override protected void beforeHookedMethod(MethodHookParam param) {
-                float[] data = (float[]) param.args[0];
-                int size = (Integer) param.args[2];
-                lastSelectedLutSize = size;
-                lastSelectedLutHash = data == null ? 0 : Arrays.hashCode(data);
-                if (selectedLutCallbackLogged) return;
-                selectedLutCallbackLogged = true;
-                Log.i(TAG, "XPAN selected LUT callback"
-                    + ", size=" + size
-                    + ", dataLength=" + (data == null ? -1 : data.length)
-                    + ", dataHash=" + lastSelectedLutHash
-                    + ", callbackType=" + param.args[1]
-                    + ", mode=" + currentCameraMode);
+        try {
+            final Class<?> callback = innerOf(cls(VIDEO_EFFECT_PIPELINE), "a");
+            if (callback != null) {
+                Method onLutReady = XposedHelpers.findMethodExact(
+                    callback, "b", float[].class, int.class, int.class);
+                XposedBridge.hookMethod(onLutReady, new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        float[] data = (float[]) param.args[0];
+                        int size = (Integer) param.args[2];
+                        lastSelectedLutSize = size;
+                        lastSelectedLutHash = data == null ? 0 : Arrays.hashCode(data);
+                        if (selectedLutCallbackLogged) return;
+                        selectedLutCallbackLogged = true;
+                        Log.i(TAG, "XPAN selected LUT callback"
+                            + ", size=" + size
+                            + ", dataLength=" + (data == null ? -1 : data.length)
+                            + ", dataHash=" + lastSelectedLutHash
+                            + ", callbackType=" + param.args[1]
+                            + ", mode=" + currentCameraMode);
+                    }
+                });
             }
-        });
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN selected LUT callback probe unavailable", error);
+        }
 
         Log.i(TAG, "XPAN live LUT diagnostics armed");
     }
@@ -5134,8 +5213,9 @@ public final class XpanLiveFeature {
                 + ", enable with persist.omnicam.xpan.sdrout=1");
             return;
         }
-        final Class<?> encoder = XposedHelpers.findClass(LIVE_VIDEO_ENCODER, classLoader);
-        XposedBridge.hookAllMethods(encoder, "q8", new XC_MethodHook() {
+        final Class<?> encoder = cls(LIVE_VIDEO_ENCODER);
+        XposedBridge.hookAllMethods(encoder,
+            member("@LiveVideoEncoder.configureFormat"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length < 2
                     || !(param.args[1] instanceof MediaFormat)) {
@@ -5177,7 +5257,7 @@ public final class XpanLiveFeature {
             }
         });
 
-        final Class<?> eglHelper = XposedHelpers.findClass(EGL_HELPER, classLoader);
+        final Class<?> eglHelper = cls(EGL_HELPER);
         XposedBridge.hookAllMethods(eglHelper, "b", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 5
@@ -5458,7 +5538,8 @@ public final class XpanLiveFeature {
                 Log.i(TAG, "XPAN native filter composition skipped, manager null");
                 return;
             }
-            Object helper = XposedHelpers.getObjectField(manager, "L");
+            Object helper = XposedHelpers.getObjectField(manager,
+                member("@Lut3dDataManager.combineHelper"));
             if (helper == null) {
                 Log.i(TAG, "XPAN native filter composition skipped, CombineLutHelper null");
                 return;
@@ -5606,7 +5687,7 @@ public final class XpanLiveFeature {
      * XPAN instance is present and visible.
      */
     private static void hookMenuVisibility(ClassLoader classLoader) throws Throwable {
-        Class<?> containerClass = XposedHelpers.findClass(MENU_CONTAINER_BASE, classLoader);
+        Class<?> containerClass = cls(MENU_CONTAINER_BASE);
         Class<?> optionClass = XposedHelpers.findClass(MENU_OPTION_BASE, classLoader);
         Class<?> topOptionClass = XposedHelpers.findClass(MENU_OPTION_TOP, classLoader);
         Class<?> settingTopClass = XposedHelpers.findClass(CAMERA_SETTING_UI_TOP, classLoader);
@@ -6127,7 +6208,7 @@ public final class XpanLiveFeature {
 
     private static boolean isXpanMenuContainer(Object container) {
         if (container == null
-            || !MENU_CONTAINER_TOP_LEFT.equals(container.getClass().getName())) {
+            || !container.getClass().getName().equals(cls(MENU_CONTAINER_TOP_LEFT).getName())) {
             return false;
         }
         try {
@@ -6216,7 +6297,8 @@ public final class XpanLiveFeature {
 
     private static String presenterMode(Object presenter) {
         try {
-            Object value = XposedHelpers.callMethod(presenter, PRESENTER_MODE_METHOD);
+            Object value = XposedHelpers.callMethod(
+                presenter, member("@PresenterBase.mode"));
             if (value instanceof String) return (String) value;
         } catch (Throwable ignored) {
         }

@@ -64,6 +64,11 @@ public final class Symbols {
         return symbols;
     }
 
+    /** Class loader of the app section given at install(); used to resolve raw class names. */
+    public ClassLoader loader() {
+        return loader;
+    }
+
     /** Resolves the symbols of one app section; never throws (missing symbols are logged). */
     public static Symbols install(String section, ClassLoader loader, String apkPath, String dataDir) {
         Symbols symbols = new Symbols(loader);
@@ -131,7 +136,7 @@ public final class Symbols {
     }
 
     public boolean has(String... ids) {
-        for (String id : ids) if (!resolved.containsKey(id)) return false;
+        for (String id : ids) if (!resolved.containsKey(strip(id))) return false;
         return true;
     }
 
@@ -168,6 +173,11 @@ public final class Symbols {
         field(fieldId).set(target, value);
     }
 
+    /** Sets every int field of a multi field symbol (e.g. the LUT cache keys) to the given value. */
+    public void setAll(String fieldId, Object target, int value) throws IllegalAccessException {
+        for (Object entry : all(fieldId)) ((Field) entry).setInt(target, value);
+    }
+
     /** Invokes a method symbol (virtually, so subclasses' overrides run); rethrows the method's own exception. */
     public Object call(String methodId, Object target, Object... args) throws Throwable {
         try {
@@ -178,9 +188,14 @@ public final class Symbols {
     }
 
     private Object one(String id) {
-        List<Object> values = resolved.get(id);
-        if (values == null) throw new MissingSymbol(id, failures.get(id));
+        List<Object> values = resolved.get(strip(id));
+        if (values == null) throw new MissingSymbol(id, failures.get(strip(id)));
         return values.get(0);
+    }
+
+    /** Symbol ids are stored without the optional "@" decoration used at call sites. */
+    private static String strip(String id) {
+        return id.startsWith("@") ? id.substring(1) : id;
     }
 
     /** A feature asked for a symbol that did not resolve on this app build. */

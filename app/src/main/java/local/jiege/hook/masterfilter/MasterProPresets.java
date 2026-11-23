@@ -52,8 +52,11 @@ final class MasterProPresets {
 
     private static ClassLoader loader;
     private static final Map<String, Object> recordKeys = new HashMap<>();
-    /** The camera's gear button handler (df.b), captured when the presenter installs it. */
+    /** The camera's gear button handler, captured when the presenter installs it. */
     private static volatile Object gearListener;
+    /** The Pro parameter panel, captured straight from its constructor (the gear listener
+     *  route never worked on any build we ship for). */
+    private static volatile Object proPresenter;
     /** True while the current Pro gear and parameters come from a recorded preset. */
     private static boolean appliedByPreset;
 
@@ -62,17 +65,16 @@ final class MasterProPresets {
     static void install(ClassLoader classLoader) {
         loader = classLoader;
         try {
-            Class<?> presenter = XposedHelpers.findClass("df.r", classLoader);
-            XposedBridge.hookAllConstructors(XposedHelpers.findClass("df.b", classLoader), new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam param) {
-                    if (param.thisObject instanceof View.OnClickListener && presenterOf(param.thisObject, presenter) != null) {
-                        if (gearListener == null) Log.i(TAG, "gear button handler captured");
-                        gearListener = param.thisObject;
+            XposedBridge.hookAllConstructors(
+                local.jiege.hook.common.Symbols.get().cls("CaptureParamPresenter"),
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        if (proPresenter == null) Log.i(TAG, "Pro parameter panel captured");
+                        proPresenter = param.thisObject;
                     }
-                }
-            });
+                });
         } catch (Throwable error) {
-            Log.e(TAG, "gear button hook failed; presets cannot switch the gear", error);
+            Log.e(TAG, "Pro panel hook failed; presets cannot reload the panel", error);
         }
         Class<?> preset = XposedHelpers.findClass("l9.a", classLoader);
         XposedHelpers.findAndHookMethod("af.b", classLoader, "b", preset, new XC_MethodHook() {
@@ -178,16 +180,22 @@ final class MasterProPresets {
     }
 
     private static Object presenter() {
-        Object listener = gearListener;
-        return listener == null ? null : presenterOf(listener, XposedHelpers.findClass("df.r", loader));
+        return proPresenter;
     }
 
     private static boolean inProGear(Object presenter) {
-        return XposedHelpers.getBooleanField(XposedHelpers.getObjectField(presenter, "P"), "k");
+        try {
+            return XposedHelpers.getBooleanField(
+                    local.jiege.hook.common.Symbols.get()
+                        .field("@CaptureParamPresenter.view").get(presenter), "k");
+        } catch (Throwable error) {
+            Log.e(TAG, "pro gear check failed", error);
+            return false;
+        }
     }
 
     private static void clickGear() {
-        ((View.OnClickListener) gearListener).onClick(null);
+        Log.i(TAG, "gear switch unavailable: no gear listener on this build");
     }
 
     private static Object param(String field) {

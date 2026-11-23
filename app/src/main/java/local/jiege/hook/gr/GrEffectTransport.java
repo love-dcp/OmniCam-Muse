@@ -105,9 +105,9 @@ final class GrEffectTransport {
                     }
                     if (LUT_REPLAY.exists() && !gr && !GrState.isGrMode()) replayLut(symbols, param, id, arg, mode);
                 }
-                // Entering or leaving GR invalidates the cached LUT (index = -1).
+                // Entering or leaving GR invalidates the cached LUT (cache keys = -1).
                 if (gr != "gr".equals(symbols.get("Lut3d.mode", param.thisObject))) {
-                    symbols.set("Lut3d.index", param.thisObject, -1);
+                    symbols.setAll("Lut3d.cacheKeys", param.thisObject, -1);
                 }
                 loadingGrLut.set(gr);
             }
@@ -161,36 +161,73 @@ final class GrEffectTransport {
      * the post-shot grey regression currently coincides with two updates, and the previous probe
      * (instance id only) could not tell whether p() changed the mode memo, the selected table or
      * only the BasicTone float array.
+     *
+     * <p>Fingerprint rule: no obfuscated field names are hardcoded here. The mode string comes
+     * from the resolved {@code Lut3d.mode} symbol, the load cache keys from {@code Lut3d.cacheKeys},
+     * and everything else is dumped generically by type (scalars, arrays, String) so the same
+     * diagnostics work across camera builds where R8 reshuffles short names.
      */
     private static String describeLutState(Object manager) {
         try {
-            float[] basic = (float[]) XposedHelpers.getObjectField(manager, "c");
-            int[] sizeHolder = (int[]) XposedHelpers.getObjectField(manager, "l");
-            String selected = String.valueOf(XposedHelpers.getObjectField(manager, "P"));
-            int combine = XposedHelpers.getIntField(manager, "M");
-            int capMode = XposedHelpers.getIntField(manager, "O");
-            int selectedIndex = XposedHelpers.getIntField(manager, "Q");
-            int lutSize = XposedHelpers.getIntField(manager, "t");
-            boolean initialized = XposedHelpers.getBooleanField(manager, "N");
-            boolean palette = XposedHelpers.getBooleanField(manager, "W");
-            boolean hdr = XposedHelpers.getBooleanField(manager, "X");
-            String hash = basic == null ? "null" : Integer.toHexString(java.util.Arrays.hashCode(basic));
-            String samples = basic == null ? "null" : sampleFloats(basic, 8);
-            int holder = sizeHolder != null && sizeHolder.length != 0 ? sizeHolder[0] : -1;
-            return "inst=" + Integer.toHexString(System.identityHashCode(manager))
-                + " grMode=" + GrState.isGrMode()
-                + " selected=" + selected
-                + " combine=" + combine
-                + " cap=" + capMode
-                + " selectedIndex=" + selectedIndex
-                + " initialized=" + initialized
-                + " palette=" + palette
-                + " hdr=" + hdr
-                + " lutSize=" + lutSize
-                + " holderSize=" + holder
-                + " basicLen=" + (basic == null ? -1 : basic.length)
-                + " basicHash=" + hash
-                + " basicSamples=" + samples;
+            StringBuilder out = new StringBuilder("inst=")
+                .append(Integer.toHexString(System.identityHashCode(manager)))
+                .append(" grMode=").append(GrState.isGrMode());
+            Symbols symbols = Symbols.get();
+            if (symbols != null && symbols.has("Lut3d.mode")) {
+                try {
+                    out.append(" mode=").append(symbols.get("Lut3d.mode", manager));
+                } catch (Throwable error) {
+                    out.append(" mode=?");
+                }
+            }
+            if (symbols != null && symbols.has("Lut3d.cacheKeys")) {
+                for (Object entry : symbols.all("Lut3d.cacheKeys")) {
+                    java.lang.reflect.Field field = (java.lang.reflect.Field) entry;
+                    try {
+                        field.setAccessible(true);
+                        out.append(' ').append(field.getName()).append('=').append(field.get(manager));
+                    } catch (Throwable ignored) {
+                        // a single unreadable key must not sink the whole dump
+                    }
+                }
+            }
+            // Generic typed dump: scalars, primitive arrays and Strings by declared order.
+            int scalars = 0, arrays = 0;
+            for (java.lang.reflect.Field field : manager.getClass().getDeclaredFields()) {
+                int modifiers = field.getModifiers();
+                if (java.lang.reflect.Modifier.isStatic(modifiers)) continue;
+                Class<?> type = field.getType();
+                try {
+                    field.setAccessible(true);
+                    if (type == int.class || type == boolean.class || type == float.class) {
+                        if (scalars++ >= 10) continue;
+                        out.append(' ').append(field.getName()).append('=').append(field.get(manager));
+                    } else if (type == float[].class) {
+                        float[] values = (float[]) field.get(manager);
+                        out.append(' ').append(field.getName()).append("Len=")
+                            .append(values == null ? -1 : values.length);
+                        if (values != null && values.length != 0 && arrays++ < 4) {
+                            out.append(' ').append(field.getName()).append("Hash=")
+                                .append(Integer.toHexString(java.util.Arrays.hashCode(values)));
+                            out.append(' ').append(field.getName()).append("Samples=")
+                                .append(sampleFloats(values, 8));
+                        }
+                    } else if (type == int[].class) {
+                        int[] values = (int[]) field.get(manager);
+                        int first = values != null && values.length != 0 ? values[0] : -1;
+                        out.append(' ').append(field.getName()).append("Len=")
+                            .append(values == null ? -1 : values.length)
+                            .append(' ').append(field.getName()).append("[0]=").append(first);
+                    } else if (type == String.class) {
+                        Object value = field.get(manager);
+                        out.append(' ').append(field.getName()).append('=')
+                            .append(value == null ? "null" : value);
+                    }
+                } catch (Throwable ignored) {
+                    // an unreadable field must not sink the whole dump
+                }
+            }
+            return out.toString();
         } catch (Throwable error) {
             return "inst=" + Integer.toHexString(System.identityHashCode(manager))
                 + " grMode=" + GrState.isGrMode()

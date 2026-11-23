@@ -13,7 +13,11 @@ subst "$($drive):" $project
 try {
     Push-Location "$($drive):\"
     try {
-        & .\gradlew.bat :app:assembleRelease --console=plain "-PomnicamVersionCode=$versionCode" "-PomnicamVersionName=$versionName"
+        # javac notes go to stderr; PS 5.1 wraps them into ErrorRecords that would
+        # terminate the script under Stop. Demote for the gradle call only.
+        $ErrorActionPreference = 'Continue'
+        & .\gradlew.bat :app:assembleRelease --console=plain "-PomnicamVersionCode=$versionCode" "-PomnicamVersionName=$versionName" 2>&1 | ForEach-Object { "$_" }
+        $ErrorActionPreference = 'Stop'
         if ($LASTEXITCODE -ne 0) { throw 'Gradle build failed.' }
     } finally { Pop-Location }
 } finally { subst "$($drive):" /D }

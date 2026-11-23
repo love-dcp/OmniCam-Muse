@@ -358,18 +358,31 @@ class Erofs:
         filled = 0
         misses = 0
 
-        def try_decode(pblk, typ, start, span):
-            """Decode one pcluster; return (bytes, blocks_consumed) or (None, 0)."""
+        def try_decode(pblk, typ, start, span, cofs=0):
+            """Decode one pcluster; return (bytes, blocks_consumed) or (None, 0).
+
+            ``cofs`` is the offset of the compressed stream inside the cluster:
+            when a previous pcluster shares the cluster, the stream does not
+            begin on the cluster boundary and reading from ``pblk`` alone turns
+            into garbage (the classic truncated-tail symptom).
+            """
+            base = pblk * self.blksz
             if typ == T_PLAIN:
-                return (self.mm[pblk * self.blksz:pblk * self.blksz + span],
-                        max(1, (span + self.blksz - 1) // self.blksz))
+                return (self.mm[base:base + span],
+                        max(1, (cofs + span + self.blksz - 1) // self.blksz))
             want = min(span, 12 << 20)
+            dbg = os.environ.get("EROFS_DBG") == "1"
+            if dbg:
+                print(f"[try] pblk={pblk} typ={typ} cofs={cofs} start={start} "
+                      f"span={span} alg={alg} advise={h_advise} "
+                      f"head={self.mm[pblk*self.blksz:pblk*self.blksz+24].hex()}",
+                      file=sys.stderr)
             prev = -1
             dec = None
             blocks = 0
             fails = 0
             for attempt in range(1, 1024):
-                raw = self.mm[pblk * self.blksz:(pblk + attempt) * self.blksz]
+                raw = self.mm[base:(pblk + attempt) * self.blksz]
                 try:
                     if alg == 0:
                         cur = lz4.block.decompress(
@@ -383,10 +396,12 @@ class Erofs:
                     else:
                         raise ErofsError(
                             f"compression algorithm {alg} unsupported")
-                except Exception:
+                except Exception as exc:
                     # A multi-block pcluster fails outright until the whole run
                     # is handed over, so a failure means "add a block", not
                     # "give up". Bail only after a long dead streak.
+                    if dbg and fails < 3:
+                        print(f"[try] attempt={attempt} err={exc}", file=sys.stderr)
                     fails += 1
                     if fails > 64:
                         break
@@ -398,6 +413,20 @@ class Erofs:
                 blocks = attempt
                 if len(cur) >= want:
                     break
+            if dec is None and alg == 0:
+                # The C binding insists on an exact uncompressed size, which a
+                # tail pcluster or a partial reference does not always satisfy.
+                # Retry with the tolerant decoder from tools/ (same helper that
+                # handles prefix windows) and accept only exact-natural sizes.
+                for attempt in range(1, 64):
+                    raw = self.mm[base:(pblk + attempt) * self.blksz]
+                    for skip in (0, 1, 2, 3):
+                        try:
+                            cur = lz4_block_decode(raw[skip:])
+                        except Exception:
+                            continue
+                        if len(cur) == span or len(cur) == want:
+                            return cur, attempt
             return dec, blocks
 
         # The base_blkaddr stored per pack is not the block address of the run
@@ -421,7 +450,7 @@ class Erofs:
             blocks_used = 0
             pblk = cursor
             for cand in candidates:
-                dec, blocks_used = try_decode(cand, typ, start, span)
+                dec, blocks_used = try_decode(cand, typ, start, span, cofs)
                 if dec:
                     pblk = cand
                     break

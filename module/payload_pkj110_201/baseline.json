@@ -1,0 +1,40 @@
+{
+ "stock": {
+  "generation": "17.0.1.201",
+  "sources": {
+   "libextensionlayer.so": {
+    "path": "E:\\ota201\\stock\\odm\\lib64\\libextensionlayer.so",
+    "size": 1756488,
+    "md5": "36d10228409c766502b8e67566c6be49",
+    "build_id": "9b9b6754993b77568b21d1040a329637",
+    "elf": true
+   },
+   "caflogicaldriver.so": {
+    "path": "work\\ota201_pull\\caflogicaldriver.so",
+    "size": 231544,
+    "md5": "9cad5a741cc5610cd17b339543315096",
+    "build_id": "d1c070765497745de34fb66a20623771",
+    "elf": true
+   }
+  }
+ },
+ "payload": {
+  "generation": "17.0.1.201",
+  "files": {
+   "lib64/libextensionlayer.so": {
+    "path": "module\\payload_pkj110_201\\lib64\\libextensionlayer.so",
+    "size": 1756488,
+    "md5": "47db6163f275a0fe2430315d447a6390",
+    "build_id": "9b9b6754993b77568b21d1040a329637",
+    "elf": true
+   },
+   "lib64/com.qti.stats.caflogicaldriver.so": {
+    "path": "module\\payload_pkj110_201\\lib64\\com.qti.stats.caflogicaldriver.so",
+    "size": 231544,
+    "md5": "5a8f76d3778edf380f610c629863d8e4",
+    "build_id": "d1c070765497745de34fb66a20623771",
+    "elf": true
+   }
+  }
+ }
+}
