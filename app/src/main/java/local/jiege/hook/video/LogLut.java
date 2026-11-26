@@ -88,7 +88,7 @@ public final class LogLut {
         // Gate 1: "Log preview" master switch, index 4 of the master-video feature list.
         XposedBridge.hookAllMethods(decision, "m", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!enabled()) return;
+                if (!enabled() || LogLutDirect.masterModeActive()) return;
                 boolean stock = Boolean.TRUE.equals(param.getResult());
                 if (!stock) param.setResult(Boolean.TRUE);
                 if (!reportedM) {
@@ -101,7 +101,7 @@ public final class LogLut {
         // Gate 2: "custom LUT supported", index 8. True selects the full panel over the name label.
         XposedBridge.hookAllMethods(decision, "i", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!enabled()) return;
+                if (!enabled() || LogLutDirect.masterModeActive()) return;
                 boolean stock = Boolean.TRUE.equals(param.getResult());
                 if (!stock) param.setResult(Boolean.TRUE);
                 if (!reportedI) {
@@ -116,7 +116,7 @@ public final class LogLut {
         XposedBridge.hookAllMethods(model == null ? Object.class : model, "e",
             new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                if (!enabled()) return;
+                if (!enabled() || LogLutDirect.masterModeActive()) return;
                 Object stock = param.getResult();
                 if (!"on".equals(stock)) param.setResult("on");
                 if (!reportedE) {

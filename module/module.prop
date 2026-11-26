@@ -1,6 +1,6 @@
 id=ricoh_pop_x9u
 name=OmniCam Muse
-version=Muse 4.4.5-r511
-versionCode=951
+version=Muse 4.4.5-r580
+versionCode=1020
 author=love-dcp
 description=RICOH GR, POP, X10, master colour and master filter features (with the Leica M3 MONOPAN 50 / 迫冲 port) for PMA110 (Find X9 Ultra) and PKJ110 (Find X8 Ultra), with a settings app. Both device profiles verified: PMA110 by upstream Muse, PKJ110 by the X8U port. Device profile is detected at boot; see mount.log and bind.log. The PKJ110 camera payload is now selected by stock-library fingerprint, with a separate set for ColorOS 17.0.1.201. Requires a KernelSU metamodule (mountify tested) and mounts /odm files.

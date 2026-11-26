@@ -89,6 +89,24 @@ public final class XpanLiveFeature {
     private static final String WATERMARK_PROCESSOR_RENDERER = "j";
     /** The GL renderer the watermark processor composites the frame and the bitmap with. */
     private static final String WATERMARK_COMPOSITE = "@WatermarkRenderer";
+    /**
+     * r579: the second WatermarkRenderer.composite caller. The 317 dump shows
+     * WatermarkProcessor.b(t0, ImageData) AND the VideoEffectPipeline's own
+     * drawWatermark(ImageData, Z, I, I, [F) both invoke the composite; the filtered
+     * capture fired b probes yet produced zero composite logs, so the filtered branch
+     * is suspected of moving through this pipeline instead.
+     */
+    private static final String VIDEO_EFFECT_PROCESSOR = "@VideoEffectPipeline";
+    /**
+     * r579 A/B: r568/r569 force the YUV-converter skip and the Z2 redirect whenever an
+     * XPAN filter is active (the converter was measured raising GL 1282 under a filter),
+     * and the filtered capture then feeds the encoder through b3 hardware buffers, which
+     * play back Log-dark. Setting 0 lets the stock Z2+converter path through with a
+     * filter as an A/B probe: solid-colour clip = GL 1282 confirmed, bright clip = the
+     * forced bypass is the darkness culprit. Default 1 keeps the forced bypass.
+     */
+    private static final String XPAN_FILTER_BYPASS_PROPERTY =
+        "persist.omnicam.xpan.filterbypass";
     private static final String LUT_PARAMETERS = "@LutParameters";
     private static final String XPAN_LIVE_WATERMARK_PROPERTY = "persist.omnicam.xpan.livewm";
     /**
@@ -136,9 +154,9 @@ public final class XpanLiveFeature {
     private static final String BASE_MODE_NAME_FIELD = "U0";
     private static final String MENU_CONTAINER_BASE = "@MenuContainer";
     private static final String MENU_CONTAINER_TOP_LEFT = "@MenuContainerTopLeft";
-    private static final String MENU_OPTION_BASE = "jq.h";
-    private static final String MENU_OPTION_TOP = "dq.j";
-    private static final String CAMERA_SETTING_UI_TOP = "cq.l";
+    private static final String MENU_OPTION_BASE = "@MenuOptionBase";
+    private static final String MENU_OPTION_TOP = "@MenuOptionTop";
+    private static final String CAMERA_SETTING_UI_TOP = "@CameraSettingUiTop";
     private static final String XPAN_EXPOSURE_WHEEL =
         "com.oplus.camera.feature.xpan.view.widget.XPanExposureWheel";
     private static final String LIVE_PHOTO_VIEW_ID = "live_photo";
@@ -306,10 +324,33 @@ public final class XpanLiveFeature {
     /** r424: published for the pre-seed called from GrMasterLiveLutDiagnostic's task hook. */
     private static volatile Class<?> installedGlRenderer;
     private static volatile Class<?> installedManagerHolder;
+    /*
+     * r565: 7.006.317/352 refactored the XPAN preview canvas. The 123 build's renderer
+     * com.oplus.camera.common.gl.s lost its draw/float[] entries (18 methods, none of them
+     * o0/r/Z/e0), so every hook installed by the canvas layer below silently matched nothing
+     * and the read-back self-heal never ran -- a contaminated BasicTone table then stayed on
+     * the preview forever ("预览又变灰了"). The successor is com.oplus.camera.common.gl.n:
+     * the FIELD NAMES survived (n / o / u) and only the entry points were re-obfuscated:
+     *
+     *   123 gl.s                    317/352 gl.n
+     *   r([F,I,Z) -> field o        w([F,I,Z)  -> field o     (XPAN BasicTone)
+     *   Z([F,I,Z) -> field n        e0([F,I,Z) -> field n
+     *   e0([F,I,I) -> map u         j0([F,I,I) -> map u       (17^3 slots)
+     *   data in t0.A (float[])      data in r0.z (float[])
+     *
+     * The holder changed with it: field o is a gl.r0 (fields y:int, z:float[]) instead of a
+     * gl.t0, which is also why the old t0.A hash always returned -1 on those builds.
+     */
+    private static volatile Object modernCanvas;
+    private static volatile long modernRepairAt;
+    private static volatile int modernRepairCount;
+    private static volatile boolean modernCanvasLogged;
     private static volatile boolean watermarkCopyLogged;
     private static volatile boolean watermarkCopyErrorLogged;
     private static volatile boolean watermarkCompositeLogged;
     private static volatile boolean watermarkCompositeSkippedLogged;
+    /** Once-per-capture latch for the composite BasicTone gate force diagnostics. */
+    private static volatile boolean watermarkGateForcedLogged;
     private static volatile boolean watermarkCompositeStaleTextureLogged;
     private static volatile int watermarkCompositeProbe;
     /** LutParameters of the frame currently being drawn, reused by the watermark composite. */
@@ -318,6 +359,32 @@ public final class XpanLiveFeature {
     private static volatile Object activePipeline;
     /** Set while the stock watermark processor re-composites the frame on the GL thread. */
     private static final ThreadLocal<Boolean> WATERMARK_COMPOSITE_ACTIVE = new ThreadLocal<>();
+    /**
+     * r576: static mirror of the latest XPAN main frame's watermark state. The composite
+     * arm used to read the XPAN_MAIN_FRAME ThreadLocal inside WatermarkProcessor.b, but the
+     * encoder calls b() OUTSIDE the gh.p3.r draw scope where that ThreadLocal is already
+     * cleared -- the arm silently never fired (r575 log: watermarked capture 21:45:39-42
+     * produced no "composite armed", no composite probes, no skip logs) and every
+     * watermarked clip was repainted by the stock composite with a null LutParameters,
+     * i.e. without BasicTone tone mapping: the clip reads Log, ~2 stops dark (measured
+     * meanV 29.5 watermarked vs 121.9 clean on the same scene).
+     */
+    private static volatile boolean lastMainWatermarkOpen;
+    /** Once-per-capture latch for the composite gate-closed diagnostics. */
+    private static volatile boolean watermarkCompositeGateLogged;
+    /** Once-per-capture counter for the WatermarkProcessor.b shape probes. */
+    private static volatile int watermarkProcessorProbe;
+    /**
+     * r579: the filtered XPAN capture (23:19 window) fired the WatermarkProcessor.b
+     * probes but NEVER reached WatermarkRenderer.composite, while the clean capture
+     * (23:15) armed and regraded every frame. y3.b has no early return that skips the
+     * composite call (verified against the 317 authoritative dump -- the only branch
+     * past the q() invoke is the exception handler), so these counters exist to catch
+     * the filtered branch wherever it actually goes.
+     */
+    private static volatile int watermarkProcessorDoneProbe;
+    private static volatile int watermarkCompositeCensus;
+    private static volatile int videoEffectWatermarkProbe;
     private static volatile boolean liveTransformBypassLogged;
     private static volatile boolean liveTransformCaptureProbeLogged;
     private static volatile boolean liveTransformDrawProbeLogged;
@@ -869,7 +936,7 @@ public final class XpanLiveFeature {
      */
     private static void hookXpanSupport(ClassLoader classLoader) {
         Class<?> presenter = cls(LIVE_PHOTO_PRESENTER);
-        XposedBridge.hookAllMethods(presenter, "P2", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(presenter, member("@LivePhotoPresenter.support"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!supportProbeLogged) {
                     supportProbeLogged = true;
@@ -1172,7 +1239,7 @@ public final class XpanLiveFeature {
             property(XPAN_LIVE_EV_PROPERTY, DEFAULT_XPAN_LIVE_EV_UNITS),
             -MAX_AE_EV_UNITS, MAX_AE_EV_UNITS);
 
-        XposedBridge.hookAllMethods(baseMode, "V7", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(baseMode, member("@BaseMode.beforePreview"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 updateActiveBaseMode(param.thisObject, "preview");
             }
@@ -1214,46 +1281,90 @@ public final class XpanLiveFeature {
         }
 
         Class<?> camera = cls(CAMERA_IMPLEMENTATION);
-        XposedBridge.hookAllMethods(camera, "v", new XC_MethodHook() {
-            @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args.length < 2
-                    || param.args[0] != CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION
-                    || !(param.args[1] instanceof Number)
-                    || !XPAN_MODE.equals(currentCameraMode)) {
-                    return;
-                }
-                int original = ((Number) param.args[1]).intValue();
-                // r492 diagnostic: the cover-only window (sCoverCaptureActive) never
-                // matched -- the cover request's EV is set OUTSIDE
-                // FilterPresenter.captureRequest. Capture the call stacks of every EV
-                // set in XPAN mode (deduped by thread+value) to find the cover path.
-                String probeKey = Thread.currentThread().getName() + "|" + original;
-                if (evScopeProbeSeen.add(probeKey)) {
-                    Log.i(TAG, "XPAN EV set probe, thread=" + Thread.currentThread().getName()
-                        + ", original=" + original
-                        + ", inCoverWindow=" + sCoverCaptureActive
-                        + evScopeStack());
-                }
-                if (fix == 0
-                    || !isLivePhotoStoredOn(presenter)) {
-                    return;
-                }
-
-                int effective = clamp(
-                    original + fix, -MAX_AE_EV_UNITS, MAX_AE_EV_UNITS);
-                param.args[1] = Integer.valueOf(effective);
-
-                String signature = fix + "|" + original + "|" + effective;
-                if (signature.equals(exposureFixLogSignature)) return;
-                exposureFixLogSignature = signature;
-                Log.i(TAG, "XPAN live exposure correction (global, video counteracted by table) mode="
-                    + currentCameraMode
-                    + " original=" + original
-                    + " fix=" + fix
-                    + " effective=" + effective
-                    + " ev=" + (fix / 330.0));
+        /*
+         * 317 renamed the two-argument CaptureRequest setter (123: v, 317: b) and reused the old
+         * name for an unrelated v(boolean). Hooking the literal "v" therefore matched nothing at
+         * all on 317 -- the +2EV never landed, while the video table's own mid/lift/gain
+         * compensation stayed active, which is exactly the "cover looks too dark" report.
+         */
+        final String evSetter;
+        try {
+            evSetter = Symbols.get().name("@CameraImplementation.ev");
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN AE setter symbol unavailable", error);
+            return;
+        }
+        Log.i(TAG, "XPAN live exposure setter = " + evSetter);
+        /*
+         * 317 declares three setters that take a CaptureRequest key plus a value:
+         *   b(Key, Object)      -- the 123-era entry
+         *   v(Key, Object, Z)   -- same, with a "reapply" flag
+         *   q(String, Key, Object)
+         * Only hooking b() left the +2EV unapplied on this build (no probe ever fired in XPAN),
+         * which is why the cover came out dark while the video table kept its own compensation.
+         * Hook every key-taking setter and apply the correction to whichever one the build uses.
+         */
+        final java.util.List<String> evSetters = new java.util.ArrayList<>();
+        for (java.lang.reflect.Method m : camera.getDeclaredMethods()) {
+            Class<?>[] types = m.getParameterTypes();
+            boolean takesKey = false;
+            boolean takesValue = false;
+            for (Class<?> type : types) {
+                if (type == CaptureRequest.Key.class) takesKey = true;
+                if (type == Object.class) takesValue = true;
             }
-        });
+            if (takesKey && takesValue) evSetters.add(m.getName());
+        }
+        if (!evSetters.contains(evSetter)) evSetters.add(evSetter);
+        Log.i(TAG, "XPAN AE setter candidates = " + evSetters);
+        for (String setter : new java.util.HashSet<>(evSetters)) {
+            XposedBridge.hookAllMethods(camera, setter, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    int keyIndex = -1;
+                    for (int i = 0; i < param.args.length; i++) {
+                        if (param.args[i] instanceof CaptureRequest.Key) {
+                            keyIndex = i;
+                            break;
+                        }
+                    }
+                    if (keyIndex < 0 || keyIndex + 1 >= param.args.length
+                        || param.args[keyIndex] != CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION
+                        || !(param.args[keyIndex + 1] instanceof Number)
+                        || !XPAN_MODE.equals(currentCameraMode)) {
+                        return;
+                    }
+                    int original = ((Number) param.args[keyIndex + 1]).intValue();
+                    // r492 diagnostic: the cover-only window (sCoverCaptureActive) never
+                    // matched -- the cover request's EV is set OUTSIDE
+                    // FilterPresenter.captureRequest. Capture the call stacks of every EV
+                    // set in XPAN mode (deduped by thread+value) to find the cover path.
+                    String probeKey = Thread.currentThread().getName() + "|" + original;
+                    if (evScopeProbeSeen.add(probeKey)) {
+                        Log.i(TAG, "XPAN EV set probe, thread=" + Thread.currentThread().getName()
+                            + ", setter=" + setter
+                            + ", original=" + original
+                            + ", inCoverWindow=" + sCoverCaptureActive
+                            + evScopeStack());
+                    }
+                    if (fix == 0 || !isLivePhotoStoredOn(presenter)) return;
+
+                    int effective = clamp(
+                        original + fix, -MAX_AE_EV_UNITS, MAX_AE_EV_UNITS);
+                    param.args[keyIndex + 1] = Integer.valueOf(effective);
+
+                    String signature = fix + "|" + original + "|" + effective;
+                    if (signature.equals(exposureFixLogSignature)) return;
+                    exposureFixLogSignature = signature;
+                    Log.i(TAG, "XPAN live exposure correction (global, video counteracted by"
+                        + " table) mode=" + currentCameraMode
+                        + " setter=" + setter
+                        + " original=" + original
+                        + " fix=" + fix
+                        + " effective=" + effective
+                        + " ev=" + (fix / 330.0));
+                }
+            });
+        }
         Log.i(TAG, "XPAN live exposure fix armed, units=" + fix
             + ", ev=" + (fix / 330.0));
     }
@@ -1493,8 +1604,21 @@ public final class XpanLiveFeature {
         final String hardwareBufferName = member("@Rgba2YuvConversion.hardwareBuffer");
         XC_MethodHook skipHook = new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (!XPAN_MODE.equals(currentCameraMode)
-                    || property(XPAN_NO_CONV_PROPERTY, 1) == 0) {
+                if (!XPAN_MODE.equals(currentCameraMode)) return;
+                /*
+                 * r568: with an XPAN filter active the stock converter cannot be let
+                 * through even when the operator asks for it. Measured on 352 (and
+                 * identical on 317 -- dh.e is byte-identical between the two builds):
+                 * every filtered preview frame makes dh.e.b raise GL_INVALID_OPERATION
+                 * (GL error 1282) on its glDrawArrays, so the encoder receives solid
+                 * colour frames. The routed path (skipz2 -> X2/b3) is the one that
+                 * keeps working, and the filter still reaches the video through the
+                 * module's task.d composition, so nothing is lost by forcing the skip.
+                 */
+                boolean filterActive = xpanFilterType != null;
+                boolean filterForced = filterActive
+                    && property(XPAN_FILTER_BYPASS_PROPERTY, 1) != 0;
+                if (!filterForced && property(XPAN_NO_CONV_PROPERTY, 1) == 0) {
                     return;
                 }
                 param.setResult(
@@ -1505,8 +1629,11 @@ public final class XpanLiveFeature {
                     Log.i(TAG, "XPAN YUV converter call skipped"
                         + ", method=" + param.method.getName()
                         + ", mode=" + currentCameraMode
+                        + ", filter=" + xpanFilterType
                         + ", skipCount=" + skips
-                        + " (set persist.omnicam.xpan.noconv=0 to restore stock)");
+                        + (filterForced
+                            ? " (forced: stock converter fails with GL 1282 under a filter)"
+                            : " (set persist.omnicam.xpan.noconv=0 to restore stock)"));
                 }
             }
         };
@@ -1549,9 +1676,19 @@ public final class XpanLiveFeature {
          */
         XC_MethodHook z2SkipHook = new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
+                /*
+                 * r569: same reasoning as the converter skip above -- with an XPAN filter
+                 * active the stock Z2 producer is never trustworthy (it feeds the encoder
+                 * through the converter that raises GL 1282), so the redirect is forced on
+                 * regardless of the debug property. Without a filter the property decides.
+                 */
                 if (!XPAN_MODE.equals(currentCameraMode)
-                    || property(XPAN_SKIP_Z2_PROPERTY, 1) == 0
                     || param.args.length != 7) {
+                    return;
+                }
+                boolean filterForced = xpanFilterType != null
+                    && property(XPAN_FILTER_BYPASS_PROPERTY, 1) != 0;
+                if (!filterForced && property(XPAN_SKIP_Z2_PROPERTY, 1) == 0) {
                     return;
                 }
                 Object event = param.args[0];
@@ -1667,7 +1804,78 @@ public final class XpanLiveFeature {
                 }
             });
         Log.i(TAG, "XPAN frame sink probe armed");
+
+        /*
+         * r518: 317 restructured the whole live-photo video path. The 123 anchors we relied on
+         * (LivePhotoFeatureFlags.e as the EIS-bypass predicate, LivePhotoEisProcessor.c as the
+         * warp stage) are either dead code or never reached in XPAN on this build: the flags
+         * predicate has ZERO call sites in 317's dex and no processor log ever appears in XPAN,
+         * while frames keep flowing into LivePhotoSession.frameSink with a null video handle.
+         * Trace every entry point of the session and of the EIS processor so the next capture
+         * shows exactly where the chain stops instead of guessing again.
+         */
+        hookLiveVideoChainTrace();
     }
+
+    /** One-shot, low-volume trace of the 317 live-photo video chain (r518 diagnosis). */
+    private static void hookLiveVideoChainTrace() {
+        if ("0".equals(propertyStr("persist.omnicam.xpan.chaintrace", "1"))) {
+            Log.i(TAG, "XPAN live video chain trace disabled");
+            return;
+        }
+        try {
+            final Class<?> session = cls(FRAME_SINK);
+            for (java.lang.reflect.Constructor<?> ctor : session.getDeclaredConstructors()) {
+                ctor.setAccessible(true);
+                XposedBridge.hookMethod(ctor, new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        Log.i(TAG, "live chain: session created mode=" + liveEisRouteMode()
+                            + " params=" + param.args.length);
+                    }
+                });
+            }
+            Log.i(TAG, "live chain: session ctors hooked");
+        } catch (Throwable error) {
+            Log.i(TAG, "live chain: session ctors unavailable " + error);
+        }
+        try {
+            final Class<?> processor = cls(EIS_PROCESSOR);
+            int hooked = 0;
+            for (Method method : processor.getDeclaredMethods()) {
+                if (method.isSynthetic()) continue;
+                method.setAccessible(true);
+                final String name = method.getName();
+                final String descriptor = java.util.Arrays.toString(method.getParameterTypes());
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        int n = eisTraceCalls.incrementAndGet();
+                        if (n > 60) return;
+                        Log.i(TAG, "live chain: eis " + name + descriptor
+                            + " mode=" + liveEisRouteMode() + " args=" + param.args.length);
+                    }
+                });
+                hooked++;
+            }
+            Log.i(TAG, "live chain: eis processor methods hooked " + hooked);
+        } catch (Throwable error) {
+            Log.i(TAG, "live chain: eis processor unavailable " + error);
+        }
+        try {
+            XposedBridge.hookAllMethods(
+                cls(LIVE_PHOTO_PRESENTER), member("@LivePhotoPresenter.enable"),
+                new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        Log.i(TAG, "live chain: presenter.enable mode=" + liveEisRouteMode());
+                    }
+                });
+            Log.i(TAG, "live chain: presenter enable hooked");
+        } catch (Throwable error) {
+            Log.i(TAG, "live chain: presenter enable unavailable " + error);
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger eisTraceCalls =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     /*
      * Mirror of Y1's dispatch (dex 0x0535-0x055d) plus X2's own internal gate: X2 only
@@ -1974,7 +2182,7 @@ public final class XpanLiveFeature {
                  * every ~1s so it never approaches the cap outside a capture.
                  */
                 if (!xpanLiveCaptureActive && calls % 30 == 0
-                    && pendingCount(param.thisObject, "h1") >= 200) {
+                    && pendingCount(param.thisObject) >= 200) {
                     resetLivePhotoFrameBudget(param.thisObject, "preview-idle");
                 }
                 if (calls <= 3 || calls % 120 == 0) {
@@ -2027,28 +2235,37 @@ public final class XpanLiveFeature {
         Log.i(TAG, "XPAN session lifecycle probes armed");
     }
 
-    /** Pending live-photo frame counts (gh.e2 h1/i1/j1) plus the intercept flag state. */
+    /** Pending live-photo frame counts (the @LivePhotoPresenter.pendingCounters set) plus the intercept flag. */
     private static String livePhotoFrameBudget(Object presenter) {
         if (presenter == null) return "no-presenter";
         try {
-            Object intercept = safeObjectField(presenter, "V1");
-            int h = pendingCount(presenter, "h1");
-            int i = pendingCount(presenter, "i1");
-            int j = pendingCount(presenter, "j1");
-            int high = XposedHelpers.getIntField(presenter, "Y1");
-            return "h1=" + h + ", i1=" + i + ", j1=" + j
-                + ", highWater=" + high
+            Object intercept = safeObjectField(presenter,
+                Symbols.get().name("@LivePhotoPresenter.interceptFlag"));
+            int sum = 0;
+            StringBuilder detail = new StringBuilder();
+            for (java.lang.reflect.Field counter : Symbols.get().<java.lang.reflect.Field>all("@LivePhotoPresenter.pendingCounters")) {
+                int value = ((Number) counter.get(presenter)).intValue();
+                sum += value;
+                if (detail.length() > 0) detail.append('+');
+                detail.append(value);
+            }
+            return "pending=" + detail + " (sum " + sum + ")"
                 + ", intercept=" + intercept;
         } catch (Throwable error) {
             return "unreadable(" + error.getClass().getSimpleName() + ")";
         }
     }
 
-    private static int pendingCount(Object presenter, String field) {
-        Object counter = safeObjectField(presenter, field);
-        if (counter == null) return -1;
-        Object value = XposedHelpers.callMethod(counter, "get");
-        return value instanceof Number ? ((Number) value).intValue() : -1;
+    private static int pendingCount(Object presenter) {
+        int sum = 0;
+        try {
+            for (java.lang.reflect.Field counter : Symbols.get().<java.lang.reflect.Field>all("@LivePhotoPresenter.pendingCounters")) {
+                sum += ((Number) counter.get(presenter)).intValue();
+            }
+        } catch (Throwable ignored) {
+            return -1;
+        }
+        return sum;
     }
 
     /*
@@ -2069,26 +2286,22 @@ public final class XpanLiveFeature {
     private static void resetLivePhotoFrameBudget(Object presenter, String phase) {
         if (presenter == null) return;
         try {
-            int h = pendingCount(presenter, "h1");
-            int i = pendingCount(presenter, "i1");
-            int j = pendingCount(presenter, "j1");
-            if (h == 0 && i == 0 && j == 0
-                && !XposedHelpers.getBooleanField(presenter, "V1")) {
+            String flagField = Symbols.get().name("@LivePhotoPresenter.interceptFlag");
+            int pending = pendingCount(presenter);
+            boolean intercept = XposedHelpers.getBooleanField(presenter, flagField);
+            if (pending == 0 && !intercept) {
                 return;
             }
-            for (String field : new String[]{"h1", "i1", "j1"}) {
-                Object counter = safeObjectField(presenter, field);
-                if (counter != null) {
-                    XposedHelpers.callMethod(counter, "set", 0);
-                }
+            /* r512: zero the pending counters (multi symbol) and the intercept flag. The other
+             * budget fields the 123 build reset (high-water mark, per-counter snapshots, the
+             * long timestamp) have no cross-version fingerprints and are not needed: the
+             * starvation comes from pending > cap flipping the intercept flag, which is reset. */
+            for (java.lang.reflect.Field counter : Symbols.get().<java.lang.reflect.Field>all("@LivePhotoPresenter.pendingCounters")) {
+                ((java.util.concurrent.atomic.AtomicInteger) counter.get(presenter)).set(0);
             }
-            XposedHelpers.setIntField(presenter, "Y1", 0);
-            XposedHelpers.setBooleanField(presenter, "V1", false);
-            XposedHelpers.setIntField(presenter, "l1", 0);
-            XposedHelpers.setIntField(presenter, "m1", 0);
-            XposedHelpers.setLongField(presenter, "W1", 0);
+            XposedHelpers.setBooleanField(presenter, flagField, false);
             Log.i(TAG, "XPAN live photo frame budget reset at " + phase
-                + " (was h1=" + h + ", i1=" + i + ", j1=" + j + ")");
+                + " (was pending=" + pending + ", intercept=" + intercept + ")");
         } catch (Throwable error) {
             Log.e(TAG, "XPAN live photo frame budget reset failed at " + phase, error);
         }
@@ -2374,6 +2587,10 @@ public final class XpanLiveFeature {
                 eisEnabledOn
             );
             XPAN_MAIN_FRAME.set(frame);
+            // r576: unconditional mirror -- the composite hook on the encoder thread has
+            // no ThreadLocal to read, and a stale true from the previous watermarked
+            // capture must not leak into a clean capture (freshness covers the rest).
+            lastMainWatermarkOpen = frame.watermarkOpen;
             param.setObjectExtra("xpanMainFrame", frame);
         } catch (Throwable error) {
             XPAN_MAIN_FRAME.remove();
@@ -2431,6 +2648,15 @@ public final class XpanLiveFeature {
         transformCaptureCallLogged = false;
         commonDrawSignatureLogged = false;
         warpDrawSignatureLogged = false;
+        // r576: watermark composite probes must be readable on every capture, not only
+        // the first one in the process.
+        watermarkCompositeGateLogged = false;
+        watermarkCompositeSkippedLogged = false;
+        watermarkGateForcedLogged = false;
+        watermarkProcessorProbe = 0;
+        watermarkProcessorDoneProbe = 0;
+        watermarkCompositeCensus = 0;
+        videoEffectWatermarkProbe = 0;
         Log.i(TAG, "XPAN live capture diagnostics reset, mode=" + liveEisRouteMode()
             + ", eisBypassActive=" + xpanEisBypassActive);
     }
@@ -2616,6 +2842,9 @@ public final class XpanLiveFeature {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!XPAN_MODE.equals(currentCameraMode)) return;
                     long calls = uniformProbeCalls.incrementAndGet();
+                    // r565: this is the only per-frame entry the 317/352 canvas exposes, so the
+                    // refactored-canvas repair rides on it (~40 frames at 3 draws each).
+                    if (calls % 120 == 0) repairModernCanvasIfWashed();
                     if (calls <= 30) {
                         Log.i(TAG, "XPAN gl draw probe, calls=" + calls
                             + ", fn=" + entry
@@ -2666,12 +2895,27 @@ public final class XpanLiveFeature {
          * draw target. Snapshot the manager BasicTone table beside each so a grey preview
          * can be tied to a stale upload.
          */
-        Method[] panelTargets;
+        Method[] panelTargets = new Method[0];
+        Method panelDraw = null;
         try {
+            panelDraw = XposedHelpers.findMethodExact(panelRenderer, "o0",
+                shaderClass, int.class, int.class,
+                float.class, float.class, float.class, float.class);
+        } catch (Throwable ignored) {
+            // Not an error by itself: newer builds refactored the canvas renderer away.
+        }
+        if (panelDraw == null) {
+            // 317/352 gutted gl.s (18 methods, no draw or float[] entries left), so the whole
+            // 123-only canvas tracker set below cannot resolve. r565: the refactored renderer
+            // (common.gl.n) is hooked instead so the preview self-heal keeps working -- without
+            // it a contaminated BasicTone table stayed on screen as a grey preview forever,
+            // because the only repair entry point was the missing o0 draw.
+            Log.i(TAG, "XPAN gl.s canvas layer unavailable on this build (renderer "
+                + "refactored; installing the gl.n layer instead)");
+            Log.guard(TAG, "XPAN gl.n canvas layer", () -> installModernCanvasLayer(classLoader));
+        } else {
             panelTargets = new Method[]{
-                XposedHelpers.findMethodExact(panelRenderer, "o0",
-                    shaderClass, int.class, int.class,
-                    float.class, float.class, float.class, float.class),
+                panelDraw,
                 XposedHelpers.findMethodExact(panelRenderer, "c0",
                     XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader),
                     int.class, int.class),
@@ -2681,9 +2925,6 @@ public final class XpanLiveFeature {
                 XposedHelpers.findMethodExact(panelRenderer, "o",
                     XposedHelpers.findClass("com.oplus.camera.common.gl.c", classLoader)),
             };
-        } catch (Throwable error) {
-            Log.e(TAG, "XPAN gl.s probe resolve failed", error);
-            panelTargets = new Method[0];
         }
         /*
          * r456: watch the canvas's own LUT data uploads. The r456 session measured ZERO
@@ -2693,7 +2934,8 @@ public final class XpanLiveFeature {
          * side feeds the preview LUT through Z/r, which the r454/r455 trackers never
          * watched. r457 logs ALL of them (any slot) with content hash + caller stack.
          */
-        try {
+        // The whole tracker below is 123-only (see the panelDraw note above).
+        if (panelDraw != null) try {
             XposedBridge.hookAllMethods(panelRenderer, "e0", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (param.args.length >= 3
@@ -3810,6 +4052,160 @@ public final class XpanLiveFeature {
         }
     }
 
+    /**
+     * r565: canvas layer for 7.006.317/352, where {@code common.gl.s} no longer declares a draw
+     * or a float[] entry. See the {@code modernCanvas} field comment for the name mapping. Only
+     * the XPAN BasicTone door ({@code w} -> field o) and the 17^3 slot door ({@code j0} -> map u)
+     * are installed; everything else stays stock.
+     *
+     * <p>No canvas override of the filter composite is taken here on purpose: on this build the
+     * {@code w} push is also how the native republishes its own palette, so capturing it for the
+     * video bridge without a field test would risk feeding the clip the wrong table. The task.d
+     * bridge keeps using the table captured on the 123 build.
+     */
+    private static void installModernCanvasLayer(ClassLoader classLoader) {
+        final Class<?> canvasClass;
+        try {
+            canvasClass = XposedHelpers.findClass(
+                "com.oplus.camera.common.gl.n", classLoader);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN gl.n canvas class unavailable", error);
+            return;
+        }
+        Method pushBasicTone = null;
+        Method pushSlot = null;
+        Method pushFieldN = null;
+        try {
+            pushBasicTone = XposedHelpers.findMethodExact(canvasClass, "w",
+                float[].class, int.class, boolean.class);
+        } catch (Throwable ignored) {
+        }
+        try {
+            pushSlot = XposedHelpers.findMethodExact(canvasClass, "j0",
+                float[].class, int.class, int.class);
+        } catch (Throwable ignored) {
+        }
+        try {
+            pushFieldN = XposedHelpers.findMethodExact(canvasClass, "e0",
+                float[].class, int.class, boolean.class);
+        } catch (Throwable ignored) {
+        }
+        if (pushBasicTone == null) {
+            Log.i(TAG, "XPAN gl.n layer: BasicTone door missing, preview self-heal stays off");
+            return;
+        }
+        XposedBridge.hookMethod(pushBasicTone, new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                modernCanvas = param.thisObject;
+                if (!(param.args[0] instanceof float[])) return;
+                if (!XPAN_MODE.equals(currentCameraMode)) return;
+                float[] data = (float[]) param.args[0];
+                int size = param.args[1] instanceof Number
+                    ? ((Number) param.args[1]).intValue() : -1;
+                boolean enabled = Boolean.TRUE.equals(param.args[2]);
+                if (!modernCanvasLogged) {
+                    modernCanvasLogged = true;
+                    Log.i(TAG, "XPAN gl.n canvas captured, size=" + size
+                        + ", enabled=" + enabled
+                        + ", floats=" + data.length
+                        + ", canvas=" + Integer.toHexString(
+                            System.identityHashCode(param.thisObject)));
+                }
+            }
+        });
+        if (pushSlot != null) {
+            XposedBridge.hookMethod(pushSlot, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!(param.args[0] instanceof float[])) return;
+                    modernCanvas = param.thisObject;
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    int slot = param.args[1] instanceof Number
+                        ? ((Number) param.args[1]).intValue() : -1;
+                    int size = param.args[2] instanceof Number
+                        ? ((Number) param.args[2]).intValue() : -1;
+                    if (slot > 0 && size == 17 && xpan17Captures.size() < 8) {
+                        float[] data = (float[]) param.args[0];
+                        xpan17Captures.put(slot,
+                            java.util.Arrays.copyOf(data, data.length));
+                    }
+                }
+            });
+        }
+        if (pushFieldN != null) {
+            XposedBridge.hookMethod(pushFieldN, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    modernCanvas = param.thisObject;
+                }
+            });
+        }
+        Log.i(TAG, "XPAN gl.n canvas layer armed, basicTone=" + (pushBasicTone != null)
+            + ", slot=" + (pushSlot != null) + ", fieldN=" + (pushFieldN != null));
+    }
+
+    /**
+     * r565: read-back repair for the refactored canvas. Mirrors the r464 logic: compare what the
+     * canvas actually holds in field o ({@code gl.r0.z}) with the clean XPAN table and re-push
+     * only a real mismatch, through the {@code w} door. Runs from the GL draw counter, because
+     * this build exposes no per-frame preview draw we could hook directly.
+     *
+     * <p>Guarded three ways: the clean table must exist (otherwise there is no authoritative
+     * answer to push), a stream that is currently flowing is never disturbed, and repairs are
+     * rate limited so a flap cannot turn into a per-frame re-upload storm.
+     */
+    private static void repairModernCanvasIfWashed() {
+        if (!XPAN_MODE.equals(currentCameraMode)) return;
+        Object canvas = modernCanvas;
+        if (canvas == null || installedManagerHolder == null) return;
+        if (isXpanLiveFrameFlowing()) return;
+        float[] clean = GrPreviewStreamRestore.cleanXpanTable;
+        if (clean == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - modernRepairAt < 1500L) return;
+        Object manager;
+        int size;
+        try {
+            manager = XposedHelpers.getStaticObjectField(installedManagerHolder, "a");
+            size = XposedHelpers.getIntField(manager, "t");
+        } catch (Throwable error) {
+            return;
+        }
+        if (size <= 0) return;
+        float[] table = chooseXpanBasicToneTable(manager, size);
+        if (table == null || table.length != size * size * size * 3) return;
+        float[] have = modernCanvasTable(canvas);
+        if (have == null) return;
+        long want = tableContentHash(table);
+        if (have.length == table.length && tableContentHash(have) == want) return;
+        modernRepairAt = now;
+        try {
+            XposedHelpers.callMethod(canvas, "w", table, size, true);
+            if (modernRepairCount < 16) {
+                modernRepairCount++;
+                Log.i(TAG, "XPAN preview BasicTone re-pushed via gl.n.w"
+                    + ", wash=" + GrPreviewStreamRestore.paletteWashes.get()
+                    + ", was=" + (have.length == table.length
+                        ? String.valueOf(tableContentHash(have)) : "len=" + have.length)
+                    + ", want=" + want
+                    + ", canvas=" + Integer.toHexString(
+                        System.identityHashCode(canvas)));
+            }
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN gl.n BasicTone re-push failed", error);
+        }
+    }
+
+    /** r565: field o of the refactored canvas is a {@code gl.r0}; its data lives in {@code z}. */
+    private static float[] modernCanvasTable(Object canvas) {
+        try {
+            Object slot = XposedHelpers.getObjectField(canvas, "o");
+            if (slot == null) return null;
+            Object raw = XposedHelpers.getObjectField(slot, "z");
+            if (raw instanceof float[]) return (float[]) raw;
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
     /** True when the s-channel override (renderer.s) is requested by the probe. */
     private static boolean redProbeWantsRenderer() {
         return propertyStr("persist.omnicam.xpan.videochannel", "").contains("s");
@@ -4071,7 +4467,10 @@ public final class XpanLiveFeature {
             Log.e(TAG, "XPAN filter probe: select hook unavailable", error);
         }
         try {
-            Class<?> callback = XposedHelpers.findClass("nn.l$a", classLoader);
+            /* The preview renderer class is symbol-resolved (@PreviewRenderer); its callback
+             * inner class keeps the positional "$a" name on both builds (fingerprint-verified). */
+            Class<?> callback = XposedHelpers.findClass(
+                    cls("@PreviewRenderer").getName() + "$a", classLoader);
             XposedBridge.hookAllMethods(callback, "b", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!XPAN_MODE.equals(currentCameraMode)) return;
@@ -4378,10 +4777,12 @@ public final class XpanLiveFeature {
                                     : XposedHelpers.getObjectField(renderer, "r") == null)
                                 + ", rendererSNull=" + (renderer == null ? "?"
                                     : XposedHelpers.getObjectField(renderer, "s") == null)
-                                + ", paramF=" + (parameters == null ? "?"
-                                    : XposedHelpers.getBooleanField(parameters, "f"))
-                                + ", paramG=" + (parameters == null ? "?"
-                                    : XposedHelpers.getBooleanField(parameters, "g"))
+                            + ", paramF=" + (parameters == null ? "?"
+                                : XposedHelpers.getBooleanField(parameters, "f"))
+                            + ", paramG=" + (parameters == null ? "?"
+                                : XposedHelpers.getBooleanField(parameters, "g"))
+                            + ", o0Hash=" + (parameters == null ? -1
+                                : System.identityHashCode(parameters))
                                 + ", basicSize=" + XposedHelpers.getIntField(
                                     lutManager, "t")
                                 + ", basicLength=" + (basicToneData == null
@@ -4476,6 +4877,10 @@ public final class XpanLiveFeature {
                                 + ", enabled=" + enabled
                                 + ", paramF=" + (parameters == null ? "?"
                                     : XposedHelpers.getBooleanField(parameters, "f"))
+                                + ", paramG=" + (parameters == null ? "?"
+                                    : XposedHelpers.getBooleanField(parameters, "g"))
+                                + ", o0Hash=" + (parameters == null ? -1
+                                    : System.identityHashCode(parameters))
                                 + ", rendererQ=" + XposedHelpers.getBooleanField(
                                     renderer, "q")
                                 + ", rendererRNull="
@@ -4555,6 +4960,14 @@ public final class XpanLiveFeature {
          * stock WarpShader BasicTone program. Its vertex shader divides texcoords by a reference
          * size; this common quad passes normalized coordinates, so use a neutral 1x1 reference.
          * The original common program is restored immediately after the draw.
+         *
+         * r525: this bridge IS the r199 "Log grey" fix. The fingerprint migration turned
+         * LIVE_WARP_RENDERER into the symbol id ("@WarpRenderer"), so the old
+         * id.equals(class.getName()) guards could never match and the bridge was dead on
+         * 7.006.317: the stock task.d table is a plain colour-space LUT (grey axis = identity,
+         * measured on the dumped table), so without this program swap the clip is never
+         * developed and plays back desaturated (~27% of the cover saturation). Compare the
+         * resolved class, never the raw id.
          */
         // The draw entry's first parameter IS the texture type; its short name drifts
         // between builds, so derive the class from the resolved symbol instead of a
@@ -4565,12 +4978,20 @@ public final class XpanLiveFeature {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 Object renderer = param.thisObject;
                 if (renderer == null
-                    || !LIVE_WARP_RENDERER.equals(renderer.getClass().getName())
+                    || !cls(LIVE_WARP_RENDERER).equals(renderer.getClass())
                     || !XPAN_MODE.equals(currentCameraMode)
                     || XPAN_MAIN_FRAME.get() == null) {
                     return;
                 }
                 try {
+                    // r565 A/B switch. On 7.006.317/352 the main frame reaches this draw as
+                    // "common" (warpDraws=0 in the frame log), unlike the 123 build this bridge
+                    // was written for. Swapping the common program for warp-basic there is the
+                    // prime suspect for the all-white XPAN cover, so it can be turned off
+                    // without a rebuild: setprop persist.omnicam.xpan.commonbridge 0.
+                    if ("0".equals(propertyStr("persist.omnicam.xpan.commonbridge", "1"))) {
+                        return;
+                    }
                     if (!XposedHelpers.getBooleanField(renderer, "p")) return;
                     if (!ensureXpanLiveBasicToneTexture(
                         renderer,
@@ -4674,7 +5095,7 @@ public final class XpanLiveFeature {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 Object renderer = param.thisObject;
                 if (renderer == null
-                    || !LIVE_WARP_RENDERER.equals(renderer.getClass().getName())
+                    || !cls(LIVE_WARP_RENDERER).equals(renderer.getClass())
                     || !XPAN_MODE.equals(currentCameraMode)) {
                     return;
                 }
@@ -4694,7 +5115,7 @@ public final class XpanLiveFeature {
                 Object renderer = param.thisObject;
                 if (param.hasThrowable()
                     || renderer == null
-                    || !LIVE_WARP_RENDERER.equals(renderer.getClass().getName())
+                    || !cls(LIVE_WARP_RENDERER).equals(renderer.getClass())
                     || !XPAN_MODE.equals(currentCameraMode)
                     || basicToneBindingLogged) {
                     return;
@@ -4742,53 +5163,152 @@ public final class XpanLiveFeature {
             cls(WATERMARK_COMPOSITE);
         final Class<?> lutParameters =
             cls(LUT_PARAMETERS);
+        /*
+         * r576: WatermarkProcessor.b is no longer the only arm source. The encoder calls
+         * it from OUTSIDE the gh.p3.r draw scope, so the XPAN_MAIN_FRAME ThreadLocal read
+         * here used to be null and the arm silently never fired (r575 field log: the
+         * watermarked XPAN live capture at 21:45:39-42 produced no "composite armed", no
+         * composite probes and no skip logs -- the hook was dead, and the clip came out
+         * Log / 2 stops dark). The hook now (a) probes every b() shape seen in XPAN so a
+         * signature drift is visible in the log, and (b) feeds the legacy thread-local
+         * signal that the composite hook still honours as one of its two arm paths.
+         */
         XposedBridge.hookAllMethods(processor, "b", new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args.length != 2
-                    || !XPAN_MODE.equals(currentCameraMode)
-                    || property(XPAN_LIVE_WATERMARK_PROPERTY, 1) == 0) {
-                    return;
-                }
-                XpanMainFrame frame = XPAN_MAIN_FRAME.get();
-                if (frame == null || !frame.watermarkOpen) return;
-                WATERMARK_COMPOSITE_ACTIVE.set(Boolean.TRUE);
-                if (!watermarkCopyLogged) {
-                    watermarkCopyLogged = true;
-                    Object renderer = null;
-                    try {
-                        renderer = XposedHelpers.getObjectField(
-                            param.thisObject, WATERMARK_PROCESSOR_RENDERER);
-                    } catch (Throwable ignored) {
-                        // Diagnostics only.
+                if (!XPAN_MODE.equals(currentCameraMode)) return;
+                if (watermarkProcessorProbe < 12) {
+                    watermarkProcessorProbe++;
+                    StringBuilder shape = new StringBuilder();
+                    for (int i = 0; i < Math.min(param.args.length, 3); i++) {
+                        shape.append(", arg").append(i).append('=')
+                            .append(param.args[i] == null ? "null"
+                                : param.args[i].getClass().getName());
                     }
-                    Log.i(TAG, "XPAN live watermark composite armed"
-                        + ", renderer=" + (renderer == null
-                            ? "null" : renderer.getClass().getName())
-                        + ", rendererLut=" + (renderer == null ? "?"
-                            : XposedHelpers.getBooleanField(renderer, "q"))
-                        + ", gradedParams=" + (activeLutParameters == null
-                            ? "null" : "present")
-                        + ", mode=" + currentCameraMode);
+                    XpanMainFrame frame = XPAN_MAIN_FRAME.get();
+                    Log.i(TAG, "XPAN watermark processor b probe #"
+                        + watermarkProcessorProbe
+                        + ", args=" + param.args.length + shape
+                        + ", threadFrame=" + (frame == null
+                            ? "none" : String.valueOf(frame.watermarkOpen))
+                        + ", lastMainWatermarkOpen=" + lastMainWatermarkOpen);
+                }
+                if (param.args.length == 2) {
+                    WATERMARK_COMPOSITE_ACTIVE.set(Boolean.TRUE);
                 }
             }
 
             @Override protected void afterHookedMethod(MethodHookParam param) {
-                WATERMARK_COMPOSITE_ACTIVE.remove();
+                if (param.args.length == 2) {
+                    WATERMARK_COMPOSITE_ACTIVE.remove();
+                    /*
+                     * r579: y3.b has no early return that skips the composite invoke
+                     * (verified on the 317 dump -- the only branch past it is the
+                     * exception handler), yet the filtered capture produced zero
+                     * composite logs. Record completion and the processor's u/r/s
+                     * state flags so a throw or a blocked shot-info wait shows up.
+                     */
+                    if (watermarkProcessorDoneProbe < 6) {
+                        watermarkProcessorDoneProbe++;
+                        Throwable thrown = param.getThrowable();
+                        Object self = param.thisObject;
+                        String flags;
+                        try {
+                            flags = "u=" + XposedHelpers.getBooleanField(self, "u")
+                                + ", r=" + XposedHelpers.getBooleanField(self, "r")
+                                + ", s=" + XposedHelpers.getBooleanField(self, "s");
+                        } catch (Throwable ignored) {
+                            flags = "u/r/s unreadable";
+                        }
+                        Log.i(TAG, "XPAN watermark processor b "
+                            + (thrown == null ? "done" : "threw")
+                            + " #" + watermarkProcessorDoneProbe
+                            + ", " + flags
+                            + ", filter=" + xpanFilterType
+                            + (thrown == null ? "" : ", throwable=" + thrown));
+                    }
+                }
             }
         });
         XposedBridge.hookAllMethods(composite,
             member("@WatermarkRenderer.composite"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args.length != 9
-                    || !Boolean.TRUE.equals(WATERMARK_COMPOSITE_ACTIVE.get())
                     || param.method == null
                     || !cls(WATERMARK_COMPOSITE).equals(
                         param.method.getDeclaringClass())) {
+                    /*
+                     * r579: never silent here again. The filtered capture fired b
+                     * probes yet produced zero composite logs -- either the composite
+                     * is reached with a different signature/declaring class, or it is
+                     * not reached at all. Census any shape that passes the hook.
+                     */
+                    if (param.method != null && watermarkCompositeCensus < 12) {
+                        watermarkCompositeCensus++;
+                        StringBuilder shape = new StringBuilder();
+                        for (int i = 0; i < Math.min(param.args.length, 4); i++) {
+                            shape.append(", arg").append(i).append('=')
+                                .append(param.args[i] == null ? "null"
+                                    : param.args[i].getClass().getName());
+                        }
+                        Log.i(TAG, "XPAN watermark composite census #"
+                            + watermarkCompositeCensus
+                            + ", method=" + param.method.getDeclaringClass()
+                                .getName() + "." + param.method.getName()
+                            + ", args=" + param.args.length + shape
+                            + ", filter=" + xpanFilterType);
+                    }
                     return;
+                }
+                if (!XPAN_MODE.equals(currentCameraMode)
+                    || property(XPAN_LIVE_WATERMARK_PROPERTY, 1) == 0) {
+                    return;
+                }
+                /*
+                 * r576: two independent arm paths. The legacy thread-local (set by the
+                 * WatermarkProcessor.b probe above) still works when the composite runs
+                 * nested in b(); the frame-freshness path covers the encoder-thread calls
+                 * where the thread-local is gone: while the attachment records, watermarked
+                 * main frames keep lastMainWatermarkOpen true and refresh lastMainFrameAt
+                 * every ~33 ms, so a composite within 500 ms of a watermarked frame belongs
+                 * to this clip's watermark pass (isXpanLiveFrameFlowing is the same 500 ms
+                 * window the env-wash guard already trusts).
+                 */
+                boolean inProcessor =
+                    Boolean.TRUE.equals(WATERMARK_COMPOSITE_ACTIVE.get());
+                boolean frameFresh = lastMainWatermarkOpen && isXpanLiveFrameFlowing();
+                if (!inProcessor && !frameFresh) {
+                    if (!watermarkCompositeGateLogged) {
+                        watermarkCompositeGateLogged = true;
+                        Log.i(TAG, "XPAN watermark composite gate closed"
+                            + ", inProcessor=" + inProcessor
+                            + ", lastMainWatermarkOpen=" + lastMainWatermarkOpen
+                            + ", frameFlowing=" + isXpanLiveFrameFlowing()
+                            + ", mode=" + currentCameraMode);
+                    }
+                    return;
+                }
+                if (!watermarkCopyLogged) {
+                    watermarkCopyLogged = true;
+                    Log.i(TAG, "XPAN live watermark composite armed"
+                        + ", arm=" + (inProcessor ? "processor-b" : "frame-freshness")
+                        + ", gradedParams=" + (activeLutParameters == null
+                            ? "null" : "present")
+                        + ", mode=" + currentCameraMode);
                 }
                 try {
                     Object graded = activeLutParameters;
-                    if (graded == null || !lutParameters.isInstance(graded)) return;
+                    if (graded == null || !lutParameters.isInstance(graded)) {
+                        if (!watermarkCompositeSkippedLogged) {
+                            watermarkCompositeSkippedLogged = true;
+                            Log.i(TAG, "XPAN watermark composite left stock, no graded"
+                                + " LutParameters, graded=" + (graded == null
+                                    ? "null" : graded.getClass().getName())
+                                + ", arm=" + (inProcessor
+                                    ? "processor-b" : "frame-freshness")
+                                + ", mode=" + currentCameraMode);
+                        }
+                        return;
+                    }
                     Object stock = param.args[7];
                     if (stock == graded) return;
                     /*
@@ -4815,10 +5335,15 @@ public final class XpanLiveFeature {
                     if (basicTexture == null) {
                         if (!watermarkCompositeSkippedLogged) {
                             watermarkCompositeSkippedLogged = true;
+                            Object cached = lastBasicToneTexture;
                             Log.i(TAG, "XPAN watermark composite left stock, no valid"
                                 + " BasicTone texture"
                                 + ", rendererValid=" + rendererTextureUsable
                                 + ", parameterValid=" + parameterTextureUsable
+                                + ", cached=" + (cached == null ? "null"
+                                    : "hash=" + System.identityHashCode(cached)
+                                        + ",data=" + basicToneDataShape(cached))
+                                + ", pipeline=" + (activePipeline == null ? "null" : "present")
                                 + ", mode=" + currentCameraMode);
                         }
                         return;
@@ -4860,6 +5385,35 @@ public final class XpanLiveFeature {
                             "xpanCompositeChangedBasicTone", Boolean.TRUE);
                     }
                     param.args[7] = graded;
+                    /*
+                     * r580: the BasicTone gate on the graded parameters is normally raised by
+                     * the WarpRenderer.draw hook during the stock preview pass. With a filter
+                     * selected the r568/r569 bypass redirects those frames, the hook never
+                     * runs, and the gate stays false -- the composite then repaints the frame
+                     * with uNeedBasicTone=0 and the clip plays back Log-dark (measured
+                     * 05:23:27 window: g=true without a filter, g=false with one, same chain,
+                     * same texture). Raise it here: the texture gate above already guarantees
+                     * graded.e carries a complete BasicTone table, so uNeedBasicTone=1 cannot
+                     * sample an unbound unit.
+                     */
+                    if (!XposedHelpers.getBooleanField(graded, "g")
+                        && "0".equals(propertyStr(
+                            "persist.omnicam.xpan.wmgforce", "1"))) {
+                        if (!watermarkGateForcedLogged) {
+                            watermarkGateForcedLogged = true;
+                            Log.i(TAG, "XPAN watermark composite left the BasicTone gate"
+                                + " off by property, filter=" + xpanFilterType
+                                + ", mode=" + currentCameraMode);
+                        }
+                    } else if (!XposedHelpers.getBooleanField(graded, "g")) {
+                        XposedHelpers.setBooleanField(graded, "g", true);
+                        if (!watermarkGateForcedLogged) {
+                            watermarkGateForcedLogged = true;
+                            Log.i(TAG, "XPAN watermark composite forced the BasicTone"
+                                + " gate on, filter=" + xpanFilterType
+                                + ", mode=" + currentCameraMode);
+                        }
+                    }
                     if (!watermarkCompositeLogged) {
                         watermarkCompositeLogged = true;
                         Log.i(TAG, "XPAN watermark composite regraded with the frame's"
@@ -4892,33 +5446,141 @@ public final class XpanLiveFeature {
                 }
             }
         });
+        /*
+         * r579: the VideoEffectPipeline owns a second watermark draw that also calls
+         * WatermarkRenderer.composite. Census it in XPAN so the filtered branch, which
+         * never reached the processor's composite, becomes visible in the log.
+         */
+        if (Symbols.get().has(VIDEO_EFFECT_PROCESSOR)) {
+            XposedBridge.hookAllMethods(cls(VIDEO_EFFECT_PROCESSOR), "w",
+                new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(currentCameraMode)) return;
+                    if (videoEffectWatermarkProbe < 8) {
+                        videoEffectWatermarkProbe++;
+                        StringBuilder shape = new StringBuilder();
+                        for (int i = 0; i < Math.min(param.args.length, 3); i++) {
+                            shape.append(", arg").append(i).append('=')
+                                .append(param.args[i] == null ? "null"
+                                    : param.args[i].getClass().getName());
+                        }
+                        Log.i(TAG, "XPAN video effect watermark probe #"
+                            + videoEffectWatermarkProbe
+                            + ", args=" + param.args.length + shape
+                            + ", filter=" + xpanFilterType
+                            + ", lastMainWatermarkOpen=" + lastMainWatermarkOpen);
+                    }
+                }
+            });
+            Log.i(TAG, "XPAN video effect watermark census armed");
+        }
         Log.i(TAG, "XPAN live watermark copy armed");
     }
 
-    /** The BasicTone texture the graded draw is using, or null while it is not built yet. */
+    /**
+     * The BasicTone texture the graded draw is using, or null while it is not built yet.
+     *
+     * <p>The last valid one is kept as a fallback. The watermark composite runs on the clip path,
+     * where the frame's pipeline can hold no renderer at all: the 352 log line is
+     * {@code "XPAN watermark composite left stock, no valid BasicTone texture, rendererValid=false,
+     * parameterValid=false"} and the still comes out white. The table is a 64^3 packed RGB LUT that
+     * this module uploads itself ({@code dataLength=786432}, hash -881252736), so a texture from an
+     * earlier frame carries the same table; {@link #hasBasicToneData} re-checks on every use that its
+     * backing float[] is still allocated, which is what the field-not-cleared trap needs.
+     */
     private static Object rendererBasicToneTexture() {
+        Object texture = null;
         Object pipeline = activePipeline;
-        if (pipeline == null) return null;
+        if (pipeline != null) {
+            try {
+                Object renderer = XposedHelpers.getObjectField(pipeline, "w");
+                texture = renderer == null ? null : XposedHelpers.getObjectField(renderer, "s");
+            } catch (Throwable error) {
+                texture = null;
+            }
+        }
+        if (hasBasicToneData(texture)) {
+            lastBasicToneTexture = texture;
+            return texture;
+        }
+        Object cached = lastBasicToneTexture;
+        return hasBasicToneData(cached) ? cached : texture;
+    }
+
+    /** Last BasicTone texture seen with a complete table; the clip-side composite has no renderer. */
+    private static volatile Object lastBasicToneTexture;
+
+    /** Diagnostic: "null" or "size/data/len" of a texture's packed table, without touching it. */
+    private static String basicToneDataShape(Object texture) {
+        if (texture == null) return "null";
         try {
-            Object renderer = XposedHelpers.getObjectField(pipeline, "w");
-            return renderer == null ? null : XposedHelpers.getObjectField(renderer, "s");
+            int size = -1;
+            try {
+                size = XposedHelpers.getIntField(texture, "z");
+            } catch (Throwable ignored) {
+                // Field names untrustworthy on 317/352; report what we can.
+            }
+            float[] data = largestFloatArrayField(texture);
+            return size + "/" + (data == null ? -1 : data.length);
         } catch (Throwable error) {
-            return null;
+            return "unreadable";
         }
     }
 
-    /** A Raw3dTexture is usable only while its complete packed RGB table is still allocated. */
+    /**
+     * r577: largest float[] field on the object, or null. The old checks trusted the
+     * {@code @Raw3dTexture} fingerprint class plus hardcoded field names ("A"/"z"/"a"/"b");
+     * on 317/352 at least one of those no longer matches, so EVERY texture -- including
+     * ones this module had just uploaded -- failed validation. Field evidence: the r577
+     * capture shows per-frame "BasicTone texture uploaded" yet the watermark composite
+     * always read "no valid BasicTone texture, cached=null", so the composite stayed stock
+     * and the clip remained Log / 2 stops dark.
+     */
+    private static float[] largestFloatArrayField(Object texture) {
+        float[] data = null;
+        for (Class<?> c = texture.getClass();
+            c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                if (f.getType() != float[].class) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(texture);
+                    if (v instanceof float[]) {
+                        float[] arr = (float[]) v;
+                        if (arr.length > 0 && (data == null || arr.length > data.length)) {
+                            data = arr;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // Try the next field.
+                }
+            }
+        }
+        return data;
+    }
+
+    /**
+     * r577: a texture is usable only while its complete packed RGB table is still
+     * allocated. Reflection-based so it survives the 317/352 obfuscation drift: find the
+     * largest float[] field (the packed table) and require its length to match
+     * {@code size^3 * 3}, or 786432 (64^3 x 3, the XPAN BasicTone table) when the size
+     * field is unreadable. Released-texture shells (data freed by t0.l()) still read as
+     * null/empty, so the FloatBuffer.wrap(null) crash protection is preserved.
+     */
     private static boolean hasBasicToneData(Object texture) {
         if (texture == null) return false;
         try {
-            if (!cls(RAW_3D_TEXTURE).isInstance(texture)) return false;
-            float[] data = (float[]) XposedHelpers.getObjectField(texture, "A");
-            int size = XposedHelpers.getIntField(texture, "z");
-            int width = XposedHelpers.getIntField(texture, "a");
-            int height = XposedHelpers.getIntField(texture, "b");
-            if (data == null || size <= 0 || width != size || height != size) return false;
-            long expected = (long) size * size * size * 3L;
-            return data.length == expected;
+            int size = -1;
+            try {
+                size = XposedHelpers.getIntField(texture, "z");
+            } catch (Throwable ignored) {
+                // Field names untrustworthy on this build; expected falls back below.
+            }
+            long expected = size > 0
+                ? (long) size * size * size * 3L
+                : 786432L;
+            float[] data = largestFloatArrayField(texture);
+            return data != null && data.length == expected;
         } catch (Throwable ignored) {
             return false;
         }
@@ -5031,11 +5693,19 @@ public final class XpanLiveFeature {
 
         Method applyOrdinaryLut = XposedHelpers.findMethodExact(
             glRenderer, "a", int.class, shader);
+        /*
+         * r524: the 123 code compared the HARDCODED class name ("ch.g") here; the
+         * fingerprint migration turned LIVE_WARP_RENDERER into the symbol id
+         * "@WarpRenderer", so these census guards silently never matched and
+         * basicBinds/ordinaryBinds read 0/0/0 on 317. Compare the resolved Class
+         * instead so the counters (and the verification signature) come back.
+         */
+        final Class<?> warpRendererClass = cls(LIVE_WARP_RENDERER);
         XposedBridge.hookMethod(applyOrdinaryLut, new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!XPAN_MODE.equals(currentCameraMode)
                     || param.thisObject == null
-                    || !LIVE_WARP_RENDERER.equals(param.thisObject.getClass().getName())) {
+                    || !warpRendererClass.equals(param.thisObject.getClass())) {
                     return;
                 }
                 XpanMainFrame frame = XPAN_MAIN_FRAME.get();
@@ -5066,7 +5736,7 @@ public final class XpanLiveFeature {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 if (!XPAN_MODE.equals(currentCameraMode)
                     || param.thisObject == null
-                    || !LIVE_WARP_RENDERER.equals(param.thisObject.getClass().getName())) {
+                    || !warpRendererClass.equals(param.thisObject.getClass())) {
                     return;
                 }
                 XpanMainFrame frame = XPAN_MAIN_FRAME.get();
@@ -5398,7 +6068,10 @@ public final class XpanLiveFeature {
         // toggle swaps the reference, forcing a re-upload of renderer.s.
         boolean staleByTable = uploaded == null || uploaded.length < 3
             || uploaded[2] != lutData;
-        if (existingValid && !staleByWash && !staleByForeign && !staleByTable) return true;
+        if (existingValid && !staleByWash && !staleByForeign && !staleByTable) {
+            rememberBasicToneTexture(existing);
+            return true;
+        }
         if (existingValid && staleByTable && !staleByWash && !staleByForeign
             && basicToneTextureUploadLogs < 8) {
             basicToneTextureUploadLogs++;
@@ -5468,8 +6141,23 @@ public final class XpanLiveFeature {
                 + ", renderer=" + rendererId
                 + ", wash=" + wash);
         }
+        rememberBasicToneTexture(texture);
         return true;
     }
+
+    /** Keeps the freshest uploaded texture for the clip-side watermark composite, which has no renderer. */
+    private static void rememberBasicToneTexture(Object texture) {
+        if (hasBasicToneData(texture)) {
+            lastBasicToneTexture = texture;
+            if (!basicToneCachedLogged) {
+                basicToneCachedLogged = true;
+                Log.i(TAG, "BasicTone texture cached for the watermark composite"
+                    + ", hash=" + System.identityHashCode(texture));
+            }
+        }
+    }
+
+    private static volatile boolean basicToneCachedLogged;
 
     /**
      * r424: the re-armed manager.c is natively recomputed in place and flips between the
@@ -5688,11 +6376,11 @@ public final class XpanLiveFeature {
      */
     private static void hookMenuVisibility(ClassLoader classLoader) throws Throwable {
         Class<?> containerClass = cls(MENU_CONTAINER_BASE);
-        Class<?> optionClass = XposedHelpers.findClass(MENU_OPTION_BASE, classLoader);
-        Class<?> topOptionClass = XposedHelpers.findClass(MENU_OPTION_TOP, classLoader);
-        Class<?> settingTopClass = XposedHelpers.findClass(CAMERA_SETTING_UI_TOP, classLoader);
+        Class<?> optionClass = cls(MENU_OPTION_BASE);
+        Class<?> topOptionClass = cls(MENU_OPTION_TOP);
+        Class<?> settingTopClass = cls(CAMERA_SETTING_UI_TOP);
 
-        XposedBridge.hookAllMethods(containerClass, "B", new XC_MethodHook() {
+        XposedBridge.hookAllMethods(containerClass, member("@MenuContainer.injectList"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) {
                 if (!isXpanMenuContainer(param.thisObject)
                     || param.args.length < 1
@@ -6222,7 +6910,8 @@ public final class XpanLiveFeature {
     private static boolean isXpanCameraContext(Object camera) {
         if (camera == null) return false;
         try {
-            Object cameraUnit = XposedHelpers.callMethod(camera, "c0");
+            Object cameraUnit = XposedHelpers.callMethod(
+                camera, member("@Camera.getCameraUnit"));
             if (cameraUnit == null) return false;
             Object modeConfig = XposedHelpers.getObjectField(cameraUnit, "a");
             if (modeConfig == null) return false;
@@ -6312,14 +7001,35 @@ public final class XpanLiveFeature {
     }
 
     private static boolean isLivePhotoStoredOn(Object presenter) {
+        Class<?> type = presenter instanceof Class
+            ? (Class<?>) presenter
+            : presenter == null ? null : presenter.getClass();
+        if (type == null) return false;
         try {
-            Class<?> type = presenter instanceof Class
-                ? (Class<?>) presenter
-                : presenter.getClass();
-            Object value =
-                XposedHelpers.callStaticMethod(type, "p3");
+            Object value = XposedHelpers.callStaticMethod(type, "p3");
+            if (value instanceof Boolean) return (Boolean) value;
             return Boolean.TRUE.equals(value);
-        } catch (Throwable ignored) {
+        } catch (Throwable missing) {
+            // 317 renamed the static getter (no p3()Z on hh.p1; the static ()Z methods are
+            // m3/n3/q3/u3), so the old lookup threw and this gate answered "off" for every
+            // caller: no live session, no EIS route, no +2EV -- a dark cover and no clip.
+            // Read the same switch through the shared data key the menu check already uses.
+            return livePhotoSwitchFromSharedKey(type.getClassLoader(), missing);
+        }
+    }
+
+    private static boolean livePhotoSwitchFromSharedKey(ClassLoader loader, Throwable reason) {
+        try {
+            Symbols symbols = Symbols.get();
+            Object key = livePhotoSharedDataKey;
+            if (key == null) {
+                key = livePhotoSharedKey(symbols);
+                livePhotoSharedDataKey = key;
+            }
+            Object value = DataStore.get(symbols, loader, key, "");
+            return "on".equals(value);
+        } catch (Throwable error) {
+            Log.e(TAG, "XPAN live photo switch unreadable (p3: " + reason + ")", error);
             return false;
         }
     }

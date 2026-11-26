@@ -16,6 +16,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import local.jiege.hook.common.Log;
 import local.jiege.hook.common.Settings;
+import local.jiege.hook.common.Symbols;
 import local.jiege.settings.ModuleSettings;
 
 /**
@@ -82,7 +83,7 @@ import local.jiege.settings.ModuleSettings;
  * {@code nn.p} output renderer with the selected LUT index on every frame. Orientation is also
  * correct at 2160x3840 with zero rotation.
  */
-final class LogLutDirect {
+public final class LogLutDirect {
     private static final String TAG = "LogLut";
 
     /** The name the analytics builder and the feature table use for "custom LUT". */
@@ -135,11 +136,30 @@ final class LogLutDirect {
     private static final int MAX_AE_EV_UNITS = 990;
 
     /** Pro video module. Declares its own final getSupportFunction, so BaseMode alone is not enough. */
-    private static final String MODE_PRO_VIDEO = "rm.e";
-    /** BaseMode.U0 written by rm.e's constructor. */
+    private static final String MODE_PRO_VIDEO = "@ProVideoMode";
+    /**
+     * BaseMode.U0 of the mode that owns the log LUT: {@code masterVideo}. On 317 that is
+     * {@code Lrm/e;} (MasterVideoMode): its Y7 hands the HAL {@code pro_video_mode} /
+     * {@code pro_video_log_mode} and KEY_CONFIGURE_MASTER_VIDEO_CUSTOM_LUT_NAME, and the class
+     * carries func_master_video_log / com.oplus.camera.feature.logvideo. In the UI this mode is
+     * 专业视频 (string camera_mode_master_video).
+     *
+     * <p>Do NOT swap this with "professional". U0 {@code professional} is {@code Lfm/u1;}
+     * (ProfessionalCapMode), i.e. Master (大师): the array
+     * camera_setting_mag_handle_change_mode_names [视频, 大师, 人像] maps to the values
+     * [common_video, "professional", "portrait"], and FilterScope / MasterColor / MasterPalette
+     * all key Master on that same string. "professionalVideo" is a string resource only; no mode
+     * reports it as U0.
+     *
+     * <p>The U0 name is the only identity used here. The @ProVideoMode fingerprint happens to
+     * resolve to the same rm.e on this build, but a class comparison is not what scopes the
+     * feature -- r520/r521 re-scoped it by class and pushed the whole log pipeline into Master.
+     */
     private static final String MODE_PRO_VIDEO_NAME = "masterVideo";
+    /** BaseMode.U0 of Master (大师) on 317; it owns its own palette and must stay stock. */
+    private static final String MODE_MASTER_NAME = "professional";
     /** Another module that overrides the same table. */
-    private static final String MODE_ALT = "dm.w2";
+    private static final String MODE_ALT = "@ProVideoModeAlt";
     /** The shared implementation every other module falls back to. */
     private static final String MODE_BASE = "com.oplus.camera.module.BaseMode";
     /** The configuration reader. */
@@ -149,41 +169,40 @@ final class LogLutDirect {
     /** The menu writes a display title, while the HAL needs the actual .cube file name. */
     private static final String MENU_VIEW = "com.oplus.camera.feature.logvideo.view.LogLutMenuView";
     /** Exact-name lookup for the imported LUT copies. */
-    private static final String LUT_PERSISTENCE = "jh.c";
+    private static final String LUT_PERSISTENCE = "@LutPersistence";
     /** Master-video preference keys h1 (current) and j1 (last selected). */
-    private static final String DATA_KEYS = "n9.d";
+    private static final String DATA_KEYS = "@DataKeys";
     /** Current selection is g1/h1; i1/j1 preserve the last applied selection. */
     private static final String DATA_CURRENT_POSITION = "g1";
     private static final String DATA_CURRENT_TITLE = "h1";
     private static final String DATA_LAST_POSITION = "i1";
     private static final String DATA_LAST_TITLE = "j1";
     /** Session parameter writer used by rm.e.Y7. */
-    private static final String SESSION_PARAMS = "mm.o";
+    private static final String SESSION_PARAMS = "@SessionParams";
     private static final String CAMERA_PARAMETER = "com.oplus.ocs.camera.CameraParameter";
     /** OneCameraImpl.v is the final parameter sink for both the UI and BaseMode.V7. */
-    private static final String CAMERA_IMPLEMENTATION = "bb.c1";
+    private static final String CAMERA_IMPLEMENTATION = "@CameraImplementation";
     /**
-     * Generic {@code Parameter} reader used by RecordProcessor.k(). It is intentionally shared by
-     * many subsystems, so the hooks below act only on the three exact recorder key names and only
-     * while Log direct-output with an explicit LUT is active.
+     * The generic {@code Parameter} reader and its key-holder inner class are derived at runtime
+     * from {@code @ModeRecorder}: on 317 the recorder key objects are opaque (the clinit no
+     * longer carries the key-name strings), so the keys class, the reader class and the identity
+     * mapping below are all resolved structurally instead of by short name.
      */
-    private static final String RECORDER_CONFIG = "om.c0";
-    /** RecordProcessor; its k() method creates the actual video recorder. */
-    private static final String MODE_RECORDER = "om.e0";
-    /** RecordProcessor.g supplies the exact recorder selector keys. */
-    private static final String RECORDER_KEYS = MODE_RECORDER + "$g";
+    /** RecordProcessor; its create method builds the actual video recorder. */
+    private static final String MODE_RECORDER = "@ModeRecorder";
     /** Recorder wrapper. Field v is its backend type: 1 native, 2 App MediaCodec. */
-    private static final String VIDEO_RECORDER = "om.n0";
-    /** App MediaCodec implementation whose s() creates the encoder surface. */
-    private static final String APP_CODEC = "om.l";
+    private static final String VIDEO_RECORDER = "@VideoRecorder";
+    /** App MediaCodec implementation whose startup() creates the encoder surface. */
+    private static final String APP_CODEC = "@AppCodec";
     /** HAL callback that hands the encoder Surface to the App. */
-    private static final String ENCODER_SURFACE_CALLBACK = "mm.i$d";
-    /** Preview/recording EGL processor. Field A is VideoOutputRenderer (nn.p). */
-    private static final String OUTPUT_PROCESSOR = "mn.t";
-    /** Effect callback that returns BaseMode.aa(), i.e. the current preview LUT type. */
-    private static final String PREVIEW_EFFECT_CALLBACK = "dm.u3b";
+    private static final String ENCODER_SURFACE_CALLBACK = "@EncoderSurfaceCallback";
+    /** Preview/recording EGL processor. Field A is VideoOutputRenderer. */
+    private static final String OUTPUT_PROCESSOR = "@OutputProcessor";
+    /** Effect callback that returns BaseMode.aa(), i.e. the current preview LUT type.
+     *  Resolved via the PreviewLutTypeImpl fingerprint (implOf the stable interface method);
+     *  the concrete class moves between builds (123: dm.u3b, 317: em.v3$b). */
     /** Effect graph implementation; its H flags select HDR-transform and preview-LUT passes. */
-    private static final String EFFECT_PROCESSOR = "uf.n";
+    private static final String EFFECT_PROCESSOR = "@EffectProcessor";
     /** Shared GL canvas that owns both ordinary and synthetic LUTs. */
     private static final String GL_CANVAS = "com.oplus.camera.common.gl.s";
     private static final String LUT_DIRECTORY = "/data/vendor/camera_process/customize_lut/";
@@ -196,8 +215,42 @@ final class LogLutDirect {
     private static final int FLAG_HDR_TRANSFORM_LUT = 65536;
     /** X0=1 is direct-output OFF; X0=2 is direct-output ON. */
     private static final int DIRECT_OUTPUT_ON = 2;
-    private static final String PREVIEW_RENDERER = "nn.l";
-    private static final String OUTPUT_RENDERER = "nn.p";
+    private static final String PREVIEW_RENDERER = "@PreviewRenderer";
+    private static final String OUTPUT_RENDERER = "@OutputRenderer";
+    /** The master-video format preference key holder (field K0). */
+    private static final String LOG_FORMAT_KEYS = "@LogFormatKeys";
+
+    /**
+     * The recorder selector keys this feature drives, by canonical name. The key objects are
+     * resolved build-agnostically at install (named fields on 123, clinit declaration order on
+     * 317) -- never by hardcoded R8 field names, which drift between builds.
+     */
+    private static final String[] RECORDER_SELECTOR_NAMES = {
+            "is_use_media_codec", "is_use_fast_video_recorder", "video_stream_media_codec"};
+
+    /** Resolved at install: the ModeRecorder keys inner class and its config superclass. */
+    private static volatile Class<?> recorderKeysClass;
+    private static volatile Class<?> recorderConfigClass;
+    /** Resolved at install: the one-argument reader method name on the config superclass. */
+    private static volatile String recorderReaderName;
+    /** Key object identity -> canonical key name (built from the static fields above). */
+    /**
+     * True from the entry of the stop request ({@code ModeRecorder.M}) until it returns. Stock
+     * builds a throwaway recorder config inside that request (the same key class and map the
+     * selector keys live in) and reads one entry back as "isNeedPostStopTask": false means a
+     * hyperlapse mode, whose {@code Ui()} override posts the real stop instead. Rewriting that
+     * entry (the override exists only to pick recorder type 2 at creation) therefore swallowed
+     * the stop, so every selector override is suspended while a stop is in flight.
+     */
+    private static volatile boolean stopRequestInFlight;
+
+    private static final java.util.Map<Object, String> recorderKeyNames =
+            java.util.Collections.synchronizedMap(
+                    new java.util.IdentityHashMap<>());
+    /** Canonical key name -> key object (e.g. is_use_media_codec -> the static singleton). */
+    private static final java.util.Map<String, Object> recorderKeysByName =
+            java.util.Collections.synchronizedMap(
+                    new java.util.LinkedHashMap<>());
 
     private static volatile boolean reportedQuery;
     private static volatile boolean reportedConfig;
@@ -229,9 +282,9 @@ final class LogLutDirect {
     private static volatile boolean appCodecArmed;
     private static volatile boolean appCodecTargetRecorder;
     /**
-     * RecordProcessor.k() constructs the recorder synchronously, but this camera build's stack
-     * frames are rewritten to short/native names. Keep an explicit thread-local scope instead of
-     * relying on matching "om.e0#k" in StackTraceElement.
+     * The recorder create method constructs the recorder synchronously, but this camera build's
+     * stack frames are rewritten to short/native names. Keep an explicit thread-local scope
+     * instead of relying on matching the recorder create frame in StackTraceElement.
      */
     private static final ThreadLocal<Integer> recorderCreationDepth =
             new ThreadLocal<Integer>() {
@@ -284,6 +337,61 @@ final class LogLutDirect {
 
     private LogLutDirect() {}
 
+    // --- symbol helpers ---------------------------------------------------------------------
+
+    /** Resolves a class symbol id ("@Name") or a literal class name against the app loader. */
+    private static Class<?> cls(String id) {
+        return id.startsWith("@") ? Symbols.get().cls(id.substring(1))
+                : XposedHelpers.findClass(id, Symbols.get().loader());
+    }
+
+    /** Resolved member name of a method or field symbol id. */
+    private static String member(String id) {
+        return Symbols.get().name(id.startsWith("@") ? id.substring(1) : id);
+    }
+
+    /** Runtime class name of a class symbol id (for stack-frame comparisons). */
+    private static String className(String id) {
+        return cls(id).getName();
+    }
+
+    /**
+     * Finds a declared inner class by its "$suffix" (verified stable across 123 and 317). The
+     * 317 build strips the dex InnerClasses attribute, so {@code getDeclaredClasses()} returns
+     * nothing there; fall back to the positional name the outer class resolved to.
+     */
+    private static Class<?> innerOf(Class<?> outer, String suffix) {
+        if (outer != null) {
+            try {
+                for (Class<?> candidate : outer.getDeclaredClasses()) {
+                    if (candidate.getName().endsWith(suffix)) return candidate;
+                }
+            } catch (Throwable ignored) {
+                /* fall through to name-based lookup */
+            }
+            String simple = suffix.startsWith("$") ? suffix.substring(1) : suffix;
+            try {
+                return XposedHelpers.findClass(
+                        outer.getName() + "$" + simple, outer.getClassLoader());
+            } catch (Throwable ignored) {
+                /* reported below */
+            }
+        }
+        throw new IllegalStateException("no inner class " + suffix
+                + " on " + (outer == null ? "null" : outer.getName()));
+    }
+
+    /** The unique instance field of an exact type on the object's class (e.g. the encoder Surface). */
+    private static String fieldOfTypeName(Object owner, Class<?> type) {
+        for (java.lang.reflect.Field f : owner.getClass().getDeclaredFields()) {
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())
+                    && f.getType() == type) {
+                return f.getName();
+            }
+        }
+        return null;
+    }
+
     private static final class PreviewPassLutState {
         final int index;
         final boolean synthetic;
@@ -295,27 +403,29 @@ final class LogLutDirect {
     }
 
     static void install(ClassLoader classLoader) {
-        relabelUnsupportedHint();
-        keepLutBadgeVisibleWhileRecording();
-        observeActiveCameraMode(classLoader);
-        installExposureCompensationFix(classLoader);
-        enableHalDirectStrategy(classLoader);
-        repairPreviewLutType(classLoader);
-        repairSelectedLut(classLoader);
-        observeSessionParameters(classLoader);
-        installLutRendererHooks(classLoader);
-        observeLutRendererState(classLoader);
-        observePreviewEffectPipeline(classLoader);
-        observeOutputPipeline(classLoader);
-        observeEncoderSurface(classLoader);
-        installDirectAppCodec(classLoader);
-        observeVideoRecorder(classLoader);
-        observeRecorderCodec(classLoader);
-        answerGetSupportFunction(classLoader, MODE_PRO_VIDEO);
-        answerGetSupportFunction(classLoader, MODE_ALT);
-        answerGetSupportFunction(classLoader, MODE_BASE);
-        observeConfig(classLoader);
-        observeLutLoader(classLoader);
+        /* Each step is isolated: a symbol drifting on one build must not abort the rest
+         * (r512 regression - the renderer inner-class lookup killed the recorder hooks too). */
+        Log.guard(TAG, "badge relabel", () -> relabelUnsupportedHint());
+        Log.guard(TAG, "lut badge", () -> keepLutBadgeVisibleWhileRecording());
+        Log.guard(TAG, "mode scope", () -> observeActiveCameraMode(classLoader));
+        Log.guard(TAG, "exposure fix", () -> installExposureCompensationFix(classLoader));
+        Log.guard(TAG, "hal strategy", () -> enableHalDirectStrategy(classLoader));
+        Log.guard(TAG, "preview lut type", () -> repairPreviewLutType(classLoader));
+        Log.guard(TAG, "selected lut", () -> repairSelectedLut(classLoader));
+        Log.guard(TAG, "session params", () -> observeSessionParameters(classLoader));
+        Log.guard(TAG, "lut renderers", () -> installLutRendererHooks(classLoader));
+        Log.guard(TAG, "renderer state", () -> observeLutRendererState(classLoader));
+        Log.guard(TAG, "preview pipeline", () -> observePreviewEffectPipeline(classLoader));
+        Log.guard(TAG, "output pipeline", () -> observeOutputPipeline(classLoader));
+        Log.guard(TAG, "encoder surface", () -> observeEncoderSurface(classLoader));
+        Log.guard(TAG, "app codec", () -> installDirectAppCodec(classLoader));
+        Log.guard(TAG, "video recorder", () -> observeVideoRecorder(classLoader));
+        Log.guard(TAG, "recorder codec", () -> observeRecorderCodec(classLoader));
+        Log.guard(TAG, "support fn pro", () -> answerGetSupportFunction(classLoader, MODE_PRO_VIDEO));
+        Log.guard(TAG, "support fn alt", () -> answerGetSupportFunction(classLoader, MODE_ALT));
+        Log.guard(TAG, "support fn base", () -> answerGetSupportFunction(classLoader, MODE_BASE));
+        Log.guard(TAG, "config", () -> observeConfig(classLoader));
+        Log.guard(TAG, "lut loader", () -> observeLutLoader(classLoader));
     }
 
     /** The stock label still names 120fps even though Vj now enables it below. */
@@ -325,8 +435,14 @@ final class LogLutDirect {
             XposedBridge.hookAllMethods(android.widget.TextView.class, "setText",
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            // Every label in the camera goes through setText, several times per
+                            // screen. The copy this wants only ever exists in video mode, and the
+                            // mode flag is a field read -- much cheaper than stringifying the text.
+                            if (!proVideoModeActive) return;
                             if (param.args.length == 0 || !(param.args[0] instanceof CharSequence)) return;
-                            String text = param.args[0].toString();
+                            CharSequence value = (CharSequence) param.args[0];
+                            if (value.length() < 8 || value.length() > 64) return;
+                            String text = value.toString();
                             if (!text.contains("120fps") || !text.contains("8K")) return;
                             param.args[0] = text.replaceAll("(?i)\\s*120fps\\s*(or|或|/)\\s*", "");
                         }
@@ -357,8 +473,12 @@ final class LogLutDirect {
         try {
             XposedBridge.hookAllMethods(View.class, "setVisibility", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if (!enabled() || !proVideoModeActive || !hasExplicitLutSelection()) return;
+                    // This hook sees every visibility change in the camera process, so the argument
+                    // checks come first and the two settings-style tests last: only a view being
+                    // hidden can be interesting, and that is a handful of calls per second instead
+                    // of a few thousand.
                     if (param.args.length != 1 || !(param.args[0] instanceof Integer)) return;
+                    if (!proVideoModeActive || !enabled() || !hasExplicitLutSelection()) return;
                     int requested = (Integer) param.args[0];
                     if (requested != View.GONE && requested != View.INVISIBLE) return;
                     if (!(param.thisObject instanceof View)) return;
@@ -415,7 +535,8 @@ final class LogLutDirect {
     private static void observeActiveCameraMode(ClassLoader classLoader) {
         try {
             Class<?> baseMode = XposedHelpers.findClass(MODE_BASE, classLoader);
-            XposedBridge.hookAllMethods(baseMode, "Y7", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(
+                    baseMode, member("@BaseMode.buildSession"), new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled()) return;
                     activateCameraMode(
@@ -431,7 +552,7 @@ final class LogLutDirect {
                 }
             };
             XposedBridge.hookAllMethods(baseMode, "c", inactiveHook);
-            XposedBridge.hookAllMethods(baseMode, "l0", inactiveHook);
+            XposedBridge.hookAllMethods(baseMode, member("@BaseMode.destroy"), inactiveHook);
         } catch (Throwable error) {
             Log.e(TAG, "active camera mode scope unavailable", error);
         }
@@ -439,7 +560,21 @@ final class LogLutDirect {
 
     private static synchronized void activateCameraMode(
             ClassLoader classLoader, Object mode, String name, String reason) {
-        boolean active = MODE_PRO_VIDEO_NAME.equals(name);
+        /*
+         * Scope is decided by the mode's own U0 name alone. U0 "masterVideo" (rm.e, MasterVideoMode)
+         * is Pro Video (专业视频) and owns the log LUT; U0 "professional" (fm.u1,
+         * ProfessionalCapMode) is Master (大师) and must stay stock.
+         *
+         * r520/r521 had the two names swapped. That put the whole log pipeline (persisted LUT
+         * index 15, the "preview render LUT" support answer for BaseMode, the custom .cube path,
+         * the app-codec recorder) into Master: its viewfinder turned oversaturated, its live-photo
+         * clip played back flat/grey, while Pro Video got proVideoActive=false and lost LUT
+         * direct output altogether.
+         *
+         * Keep the class name in the log so a future build that renames a mode shows up
+         * immediately instead of silently re-scoping the feature.
+         */
+        boolean active = isProVideoMode(mode);
         String previousName = activeCameraMode;
         boolean previouslyActive = proVideoModeActive;
         int previousLutIndex = selectedLutIndex;
@@ -459,6 +594,7 @@ final class LogLutDirect {
         Log.i(TAG, "camera mode scope reason=" + reason
                 + " previous=" + displayValue(previousName)
                 + " current=" + displayValue(name)
+                + " class=" + (mode == null ? "null" : mode.getClass().getName())
                 + " proVideoActive=" + active
                 + " lutBefore=" + previousLutIndex
                 + " lutAfter=" + selectedLutIndex
@@ -517,6 +653,31 @@ final class LogLutDirect {
     }
 
     /**
+     * True only for the mode that owns the log LUT on this build, judged by the mode's own U0
+     * name ("masterVideo" = Pro Video / 专业视频). Master (大师) is U0 "professional" and is a
+     * different class, but no class comparison is involved; see {@link #activateCameraMode}.
+     * Master mode therefore stays stock: no log-video HAL mode, no persisted LUT index, no
+     * app-codec recorder.
+     */
+    private static boolean isProVideoMode(Object mode) {
+        if (mode == null) return false;
+        return MODE_PRO_VIDEO_NAME.equals(modeName(mode));
+    }
+
+    /** True while the Pro Video scope owns the log LUT (see {@link #isProVideoMode}). */
+    public static boolean proVideoScopeActive() {
+        return proVideoModeActive && enabled();
+    }
+
+    /**
+     * True while Master (大师, U0 "professional") is the active mode. Master owns its own colour
+     * dial and LUT menu on 317, so every log-video feature answer has to stay stock there.
+     */
+    public static boolean masterModeActive() {
+        return MODE_MASTER_NAME.equals(activeCameraMode);
+    }
+
+    /**
      * Correct the AE request at the same final sink used by both EV controls.
      *
      * <p>BaseMode.V7 writes {@code CONTROL_AE_EXPOSURE_COMPENSATION=0} while assembling every
@@ -528,8 +689,9 @@ final class LogLutDirect {
      */
     private static void installExposureCompensationFix(ClassLoader classLoader) {
         try {
-            Class<?> camera = XposedHelpers.findClass(CAMERA_IMPLEMENTATION, classLoader);
-            XposedBridge.hookAllMethods(camera, "v", new XC_MethodHook() {
+            Class<?> camera = cls(CAMERA_IMPLEMENTATION);
+            XposedBridge.hookAllMethods(
+                    camera, member("@CameraImplementation.sink"), new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled() || property(EV_FIX_PROPERTY, 1) == 0
                             || param.args.length < 2
@@ -596,7 +758,7 @@ final class LogLutDirect {
                             "com.oplus.camera.data.DataManager", classLoader),
                     "getInstance");
             Object key = XposedHelpers.getStaticObjectField(
-                    XposedHelpers.findClass("jd.a", classLoader), "d");
+                    cls("@CodecKeys"), "d");
             return intValue(XposedHelpers.callMethod(manager, "b", key, "30"), -1);
         } catch (Throwable error) {
             return -1;
@@ -637,7 +799,7 @@ final class LogLutDirect {
      */
     private static void enableHalDirectStrategy(final ClassLoader classLoader) {
         try {
-            Class<?> decision = XposedHelpers.findClass("o9.h", classLoader);
+            Class<?> decision = cls("@MasterVideoDecision");
             XposedBridge.hookAllMethods(decision, "c", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 1
@@ -660,12 +822,12 @@ final class LogLutDirect {
              * only after the Pro Video mode object exists: doing this during ModuleEntry install
              * forces too much camera initialization early and leaves the app on a black screen.
              */
-            Class<?> proVideo = XposedHelpers.findClass(MODE_PRO_VIDEO, classLoader);
+            Class<?> proVideo = cls(MODE_PRO_VIDEO);
             XposedBridge.hookAllMethods(proVideo, "Vj", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     int mode = intValue(param.getResult(), -1);
                     if (mode >= 0) lastDirectMode = mode;
-                    if (!enabled() || property(FORCE_120, 1) == 0) return;
+                    if (!enabled() || !proVideoModeActive || property(FORCE_120, 1) == 0) return;
                     if (!(param.getResult() instanceof Integer) || (Integer) param.getResult() != 1) return;
                     try {
                         Object is120 = XposedHelpers.callMethod(param.thisObject, "y");
@@ -688,12 +850,16 @@ final class LogLutDirect {
             });
             XposedBridge.hookAllMethods(proVideo, "vk", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
-                    if (!enabled()) return;
+                    // rm.e is Pro Video itself (U0 "masterVideo"), so the stock answer is
+                    // already right there; the hook only has to make sure the answer stays
+                    // confined to the Pro Video scope.
+                    if (!enabled() || !proVideoModeActive) return;
                     String format = logFormat(classLoader);
                     if ("log".equals(format)) param.setResult(Boolean.TRUE);
                 }
             });
-            XposedBridge.hookAllMethods(proVideo, "Y7", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(
+                    proVideo, member("@ProVideoMode.session"), new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (enabled()) {
                         activateCameraMode(
@@ -722,10 +888,12 @@ final class LogLutDirect {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || !strategyInstalled) return;
                     try {
-                        Object decision = XposedHelpers.callMethod(param.thisObject, "Il");
+                        Object decision = XposedHelpers.callMethod(
+                                param.thisObject, member("@ProVideoMode.decision"));
                         Object strategy = XposedHelpers.getObjectField(
                                 XposedHelpers.getStaticObjectField(
-                                        XposedHelpers.findClass("o9.h$a", classLoader), "a"), "c");
+                                        innerOf(cls("@MasterVideoDecision"), "$a"), "a"),
+                                "c");
                         int mode = (Integer) XposedHelpers.callMethod(strategy, "b", decision);
                         Log.i(TAG, "HAL decision inputs: lut="
                                 + XposedHelpers.getBooleanField(decision, "a")
@@ -743,7 +911,7 @@ final class LogLutDirect {
                 }
             });
 
-            XposedBridge.hookAllMethods(XposedHelpers.findClass("o9.f", classLoader), "b",
+            XposedBridge.hookAllMethods(cls("@DecisionCallback"), "b",
                     new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 1 || !(param.getResult() instanceof Integer)) return;
@@ -767,22 +935,26 @@ final class LogLutDirect {
      */
     private static void repairPreviewLutType(final ClassLoader classLoader) {
         try {
-            Class<?> proVideo = XposedHelpers.findClass(MODE_PRO_VIDEO, classLoader);
-            XposedBridge.hookAllMethods(proVideo, "d7", new XC_MethodHook() {
+            Class<?> proVideo = cls(MODE_PRO_VIDEO);
+            XposedBridge.hookAllMethods(
+                    proVideo, member("@ProVideoMode.previewLut"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 1
                             || !(param.args[0] instanceof Integer)
                             || (Integer) param.args[0] != 0) {
                         return;
                     }
+                    // The persisted LUT selection belongs to Pro Video only; never re-arm it
+                    // outside the Pro Video scope (Master shares the process-wide Lut3dDataManager).
+                    if (!proVideoModeActive) return;
                     try {
                         restorePersistedLutSelection(classLoader, "preview LUT decision");
                         int original = intValue(param.getResult(), NO_LUT_INDEX);
                         int desired = requestedPreviewLutIndex(classLoader, param.thisObject);
                         if (desired == NO_LUT_INDEX) return;
                         if (original != desired) param.setResult(desired);
-                        int hl = intValue(
-                                XposedHelpers.callMethod(param.thisObject, "Hl"), -1);
+                        int hl = intValue(XposedHelpers.callMethod(
+                                param.thisObject, member("@ProVideoMode.logKind")), -1);
                         logPreviewLutContract(
                                 "d7(0) original=" + original
                                         + " effective=" + intValue(param.getResult(), -1)
@@ -838,31 +1010,42 @@ final class LogLutDirect {
         }
 
         try {
-            Class<?> callback = XposedHelpers.findClass(
-                    PREVIEW_EFFECT_CALLBACK, classLoader);
-            XposedBridge.hookAllMethods(callback, "getPreviewRenderLutType",
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            if (!enabled()) return;
-                            try {
-                                int original = intValue(param.getResult(), NO_LUT_INDEX);
-                                int desired = requestedPreviewLutIndex(
-                                        classLoader, null);
-                                if (desired != NO_LUT_INDEX && original != desired) {
-                                    param.setResult(desired);
-                                }
-                                if (desired != NO_LUT_INDEX) {
-                                    logPreviewLutContract(
-                                            "preview LUT type original=" + original
-                                                    + " effective="
-                                                    + intValue(param.getResult(), -1),
-                                            classLoader);
-                                }
-                            } catch (Throwable error) {
-                                Log.e(TAG, "preview LUT type repair failed", error);
-                            }
+            // The concrete callback class behind IEffectProcessor$EffectProcessCallback moves
+            // between builds (123: dm.u3b, 317: em.v3$b); the PreviewLutTypeImpl fingerprint
+            // resolves every implementation of the (unobfuscated) interface method, so hook
+            // each resolved Method instead of a hardcoded class name.
+            java.util.List<java.lang.reflect.Method> impls =
+                    Symbols.get().<java.lang.reflect.Method>all("PreviewLutTypeImpl");
+            if (impls.isEmpty()) {
+                throw new IllegalStateException("no getPreviewRenderLutType implementation");
+            }
+            XC_MethodHook lutTypeHook = new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!enabled()) return;
+                    try {
+                        int original = intValue(param.getResult(), NO_LUT_INDEX);
+                        int desired = requestedPreviewLutIndex(
+                                classLoader, null);
+                        if (desired != NO_LUT_INDEX && original != desired) {
+                            param.setResult(desired);
                         }
-                    });
+                        if (desired != NO_LUT_INDEX) {
+                            logPreviewLutContract(
+                                    "preview LUT type original=" + original
+                                            + " effective="
+                                            + intValue(param.getResult(), -1),
+                                    classLoader);
+                        }
+                    } catch (Throwable error) {
+                        Log.e(TAG, "preview LUT type repair failed", error);
+                    }
+                }
+            };
+            for (java.lang.reflect.Method impl : impls) {
+                XposedBridge.hookMethod(impl, lutTypeHook);
+                Log.i(TAG, "preview LUT type callback hooked on " + impl.getDeclaringClass()
+                        .getName());
+            }
         } catch (Throwable error) {
             Log.i(TAG, "preview LUT type callback unavailable: " + error);
         }
@@ -888,7 +1071,8 @@ final class LogLutDirect {
         int direct = currentDirectMode(classLoader);
         if (direct == DIRECT_OUTPUT_ON || mode == null) return direct;
         try {
-            Object decision = XposedHelpers.callMethod(mode, "Il");
+            Object decision = XposedHelpers.callMethod(
+                    mode, member("@ProVideoMode.decision"));
             int decisionDirect = XposedHelpers.getIntField(decision, "e");
             if (decisionDirect == DIRECT_OUTPUT_ON) return decisionDirect;
         } catch (Throwable ignored) {
@@ -1007,7 +1191,7 @@ final class LogLutDirect {
      */
     private static void installLutRendererHooks(ClassLoader classLoader) {
         try {
-            Class<?> preview = XposedHelpers.findClass(PREVIEW_RENDERER, classLoader);
+            Class<?> preview = cls(PREVIEW_RENDERER);
             XposedBridge.hookAllMethods(preview, "y0", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled() || !proVideoModeActive) return;
@@ -1031,7 +1215,8 @@ final class LogLutDirect {
                             + " synthetic=" + describeSyntheticLut(param.thisObject));
                 }
             });
-            XposedBridge.hookAllMethods(preview, "A0", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(
+                    preview, member("@PreviewRenderer.lutSetup"), new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled() || !proVideoModeActive || param.args.length < 1
                             || !(param.args[0] instanceof Integer)) {
@@ -1053,7 +1238,8 @@ final class LogLutDirect {
                     }
                     int sourceIndex = (Integer) param.args[0];
                     try {
-                        Object callback = XposedHelpers.getObjectField(param.thisObject, "K");
+                        Object callback = XposedHelpers.getObjectField(
+                                param.thisObject, member("@PreviewRenderer.callback"));
                         previewCallback = new java.lang.ref.WeakReference<>(callback);
                         Log.i(TAG, "preview renderer ready, sourceIndex=" + sourceIndex
                                 + " selectedLutIndex=" + selectedLutIndex
@@ -1079,14 +1265,15 @@ final class LogLutDirect {
         }
 
         try {
-            Class<?> output = XposedHelpers.findClass(OUTPUT_RENDERER, classLoader);
-            XposedBridge.hookAllMethods(output, "d0", new XC_MethodHook() {
+            Class<?> output = cls(OUTPUT_RENDERER);
+            XposedBridge.hookAllMethods(
+                    output, member("@OutputRenderer.surfaceReady"), new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled() || !proVideoModeActive) return;
                     try {
                         restorePersistedLutSelection(classLoader, "output surface");
-                        XposedHelpers.setIntField(
-                                param.thisObject, "e", selectedLutIndex);
+                        XposedHelpers.setIntField(param.thisObject,
+                                member("@OutputRenderer.lutIndex"), selectedLutIndex);
                     } catch (Throwable error) {
                         Log.e(TAG, "output renderer LUT index unavailable", error);
                     }
@@ -1097,9 +1284,11 @@ final class LogLutDirect {
                     try {
                         outputRenderer =
                                 new java.lang.ref.WeakReference<>(param.thisObject);
-                        Object callback = XposedHelpers.getObjectField(param.thisObject, "f");
+                        Object callback = XposedHelpers.getObjectField(
+                                param.thisObject, member("@OutputRenderer.callback"));
                         Log.i(TAG, "output renderer ready, index="
-                                + XposedHelpers.getIntField(param.thisObject, "e")
+                                + XposedHelpers.getIntField(param.thisObject,
+                                        member("@OutputRenderer.lutIndex"))
                                 + " selectedLutIndex=" + selectedLutIndex
                                 + " customLut=" + customLutActive
                                 + " selected=" + displayValue(selectedLutFileName));
@@ -1118,11 +1307,11 @@ final class LogLutDirect {
                     int count = ++outputFrameCount;
                     if (shouldUseOrdinaryLutDraw(classLoader)) {
                         try {
-                            int previousIndex = XposedHelpers.getIntField(
-                                    param.thisObject, "e");
+                            int previousIndex = XposedHelpers.getIntField(param.thisObject,
+                                    member("@OutputRenderer.lutIndex"));
                             if (previousIndex != selectedLutIndex) {
-                                XposedHelpers.setIntField(
-                                        param.thisObject, "e", selectedLutIndex);
+                                XposedHelpers.setIntField(param.thisObject,
+                                        member("@OutputRenderer.lutIndex"), selectedLutIndex);
                             }
                         } catch (Throwable error) {
                             if (count == 1) {
@@ -1134,8 +1323,8 @@ final class LogLutDirect {
                     if (count == 1 || count % 300 == 0) {
                         try {
                             Log.i(TAG, "output renderer drew frame=" + count
-                                    + " lutIndex=" + XposedHelpers.getIntField(
-                                            param.thisObject, "e")
+                                    + " lutIndex=" + XposedHelpers.getIntField(param.thisObject,
+                                            member("@OutputRenderer.lutIndex"))
                                     + " selectedLutIndex=" + selectedLutIndex
                                     + " customLut=" + customLutActive);
                         } catch (Throwable error) {
@@ -1149,8 +1338,8 @@ final class LogLutDirect {
             Log.e(TAG, "output renderer hook unavailable", error);
         }
 
-        observeLutCallbacks(classLoader, PREVIEW_RENDERER + "$a", "preview");
-        observeLutCallbacks(classLoader, OUTPUT_RENDERER + "$a", "output");
+        observeLutCallbacks(classLoader, innerOf(cls(PREVIEW_RENDERER), "$a"), "preview");
+        observeLutCallbacks(classLoader, innerOf(cls(OUTPUT_RENDERER), "$a"), "output");
     }
 
     /**
@@ -1235,10 +1424,9 @@ final class LogLutDirect {
     }
 
     private static void observeLutCallbacks(
-            ClassLoader classLoader, String className, String renderer) {
+            ClassLoader classLoader, Class<?> callbackClass, String renderer) {
         try {
-            Class<?> callback = XposedHelpers.findClass(className, classLoader);
-            XposedBridge.hookAllMethods(callback, "a", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(callbackClass, "a", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 2) return;
                     Log.i(TAG, "LUT callback " + renderer + " error"
@@ -1247,7 +1435,7 @@ final class LogLutDirect {
                             + " selectedLutIndex=" + selectedLutIndex);
                 }
             });
-            XposedBridge.hookAllMethods(callback, "b", new XC_MethodHook() {
+            XposedBridge.hookAllMethods(callbackClass, "b", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 3) return;
                     Object table = param.args[0];
@@ -1273,9 +1461,8 @@ final class LogLutDirect {
         if (!shouldUseOrdinaryLutDraw(classLoader)) return;
         if (loadedIndex != selectedLutIndex) return;
         try {
-            String ownerName = "preview".equals(rendererName)
-                    ? PREVIEW_RENDERER : OUTPUT_RENDERER;
-            Class<?> ownerClass = XposedHelpers.findClass(ownerName, classLoader);
+            Class<?> ownerClass = "preview".equals(rendererName)
+                    ? cls(PREVIEW_RENDERER) : cls(OUTPUT_RENDERER);
             Object owner = getFieldByValue(callback, ownerClass);
             Object canvas = findCanvas(owner);
             if (canvas == null) return;
@@ -1526,7 +1713,7 @@ final class LogLutDirect {
      */
     private static void observePreviewEffectPipeline(ClassLoader classLoader) {
         try {
-            Class<?> processor = XposedHelpers.findClass(EFFECT_PROCESSOR, classLoader);
+            Class<?> processor = cls(EFFECT_PROCESSOR);
             XposedBridge.hookAllMethods(processor, "getSupportEffectFlags",
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -1851,8 +2038,9 @@ final class LogLutDirect {
      */
     private static void observeOutputPipeline(ClassLoader classLoader) {
         try {
-            Class<?> processor = XposedHelpers.findClass(OUTPUT_PROCESSOR, classLoader);
-            XposedBridge.hookAllMethods(processor, "M0", new XC_MethodHook() {
+            Class<?> processor = cls(OUTPUT_PROCESSOR);
+            XposedBridge.hookAllMethods(
+                    processor, member("@OutputProcessor.surfaceChanged"), new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 1) return;
                     Surface surface = asType(param.args[0], Surface.class);
@@ -1870,7 +2058,9 @@ final class LogLutDirect {
             });
             XposedBridge.hookAllMethods(processor, "D", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
-                    if (!enabled() || param.args.length == 0) return;
+                    // On 317 this name also covers an unrelated 4-arg method; the single-arg
+                    // (target) overload is the EGL surface callback both builds share.
+                    if (!enabled() || param.args.length != 1) return;
                     TraceState state = traceState(param.thisObject);
                     Log.i(TAG, "output EGL surface created target="
                             + targetName(param.thisObject, param.args[0])
@@ -2126,15 +2316,16 @@ final class LogLutDirect {
      */
     private static void installDirectAppCodec(ClassLoader classLoader) {
         try {
-            Class<?> keys = XposedHelpers.findClass(RECORDER_KEYS, classLoader);
-            for (String field : new String[]{"b", "c", "V"}) {
-                Object key = XposedHelpers.getStaticObjectField(keys, field);
-                Log.i(TAG, "recorder selector key " + field + "="
-                        + recorderKeyName(key));
-            }
-            XposedBridge.hookAllMethods(
-                    XposedHelpers.findClass(RECORDER_CONFIG, classLoader), "a",
-                    new XC_MethodHook() {
+            resolveRecorderStructure();
+            Class<?> keys = recorderKeysClass;
+            Class<?> config = recorderConfigClass;
+            if (keys == null || config == null) throw new IllegalStateException(
+                    "recorder keys/config structure not found on " + cls(MODE_RECORDER));
+            bindRecorderSelectorKeys(keys);
+            String reader = recorderReaderName;
+            if (reader == null) throw new IllegalStateException(
+                    "recorder reader method not found on " + config.getName());
+            XposedBridge.hookAllMethods(config, reader, new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam param) {
                             if (!enabled() || param.args.length != 1) return;
                             String key = recorderKeyName(param.args[0]);
@@ -2143,18 +2334,18 @@ final class LogLutDirect {
                                     || "is_use_fast_video_recorder".equals(key)
                                     || "video_stream_media_codec".equals(key);
                             if (!relevant) return;
+                            if (stopRequestInFlight) return;
 
                             boolean wanted = wantsDirectAppCodec(
                                     classLoader, param.getResult());
                             Object stock = param.getResult();
                             if (wanted) {
-                                if ("is_use_fast_video_recorder".equals(key)
-                                        || "video_stream_media_codec".equals(key)) {
-                                    param.setResult(Boolean.FALSE);
-                                } else if ("is_use_media_codec".equals(key)) {
-                                    param.setResult(Boolean.TRUE);
+                                boolean truth = "is_use_media_codec".equals(key);
+                                Object replacement = coerceConfigValue(stock, truth);
+                                if (replacement != null) {
+                                    param.setResult(replacement);
+                                    appCodecArmed = true;
                                 }
-                                appCodecArmed = true;
                             }
 
                             String signature = sessionSerial + "|" + key
@@ -2174,6 +2365,7 @@ final class LogLutDirect {
                             }
                         }
                     });
+            hookStopRequest(classLoader);
             Log.i(TAG, "Log LUT App encoder override installed by runtime key inspection"
                     + " (property " + APP_CODEC_PROPERTY + ")");
         } catch (Throwable error) {
@@ -2181,7 +2373,7 @@ final class LogLutDirect {
         }
 
         try {
-            Class<?> builder = XposedHelpers.findClass(RECORDER_CONFIG + "$a", classLoader);
+            Class<?> builder = innerOf(recorderConfigClass, "$a");
             XposedBridge.hookAllMethods(builder, "b", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 2) return;
@@ -2191,10 +2383,17 @@ final class LogLutDirect {
                             && !"video_stream_media_codec".equals(key)) {
                         return;
                     }
+                    if (stopRequestInFlight) {
+                        Log.i(TAG, "recorder builder keeps stock stop value key=" + key
+                                + " stock=" + displayValue(param.args[1]));
+                        return;
+                    }
                     if (!wantsDirectAppCodec(classLoader, param.args[1])) return;
                     Object stock = param.args[1];
-                    param.args[1] = "is_use_media_codec".equals(key)
-                            ? Boolean.TRUE : Boolean.FALSE;
+                    Object replacement = coerceConfigValue(
+                            stock, "is_use_media_codec".equals(key));
+                    if (replacement == null) return;
+                    param.args[1] = replacement;
                     appCodecArmed = true;
                     Log.i(TAG, "recorder builder forced key=" + key
                             + " stock=" + displayValue(stock)
@@ -2206,13 +2405,201 @@ final class LogLutDirect {
         }
     }
 
+    /**
+     * Marks the stop request ({@code @ModeRecorder.stop}: om.e0.J on 123, pm.b0.M on 317, resolved
+     * by its "stopRecord, end!" string rather than the short name). The stop hangs outright if
+     * this is missed, so fall back to the unique {@code (int, boolean) -> boolean} instance method
+     * when the symbol is absent, and say so loudly if there is none.
+     */
+    private static void hookStopRequest(ClassLoader classLoader) {
+        Class<?> recorder = cls(MODE_RECORDER);
+        String stopName = null;
+        try {
+            stopName = member("@ModeRecorder.stop");
+        } catch (Throwable missing) {
+            Log.e(TAG, "stop request symbol unavailable, falling back to shape", missing);
+            for (java.lang.reflect.Method method : recorder.getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
+                if (java.lang.reflect.Modifier.isStatic(method.getModifiers())
+                        || types.length != 2 || types[0] != int.class
+                        || types[1] != boolean.class || method.getReturnType() != boolean.class) {
+                    continue;
+                }
+                if (stopName != null) {
+                    Log.e(TAG, "stop request shape is ambiguous, leaving the stop gate unguarded", null);
+                    return;
+                }
+                stopName = method.getName();
+            }
+        }
+        if (stopName == null) {
+            Log.e(TAG, "stop request method not found, leaving the stop gate unguarded", null);
+            return;
+        }
+        final String resolved = stopName;
+        XposedBridge.hookAllMethods(recorder, resolved, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                stopRequestInFlight = true;
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                stopRequestInFlight = false;
+            }
+        });
+        Log.i(TAG, "stop request hooked on " + recorder.getName() + "." + resolved);
+    }
+
     private static String recorderKeyName(Object key) {
         if (key == null) return null;
+        String mapped = recorderKeyNames.get(key);
+        if (mapped != null) return mapped;
+        // 123 keys carry the name in a field; 317 keys are opaque, so only the identity
+        // map above can name them.
         Object name = getField(key, "a");
         if (name == null) name = getField(key, "f40896a");
         if (name == null) name = getField(key, "name");
         if (name == null) name = getField(key, "key");
         return name == null ? null : String.valueOf(name);
+    }
+
+    /**
+     * Derives the recorder key holder and the generic config reader from the
+     * {@code @ModeRecorder} structure instead of R8 short names: the keys class is the inner
+     * class whose superclass declares the one-argument reader taking that inner class's static
+     * key type (123: om.e0$g/om.c0, 317: pm.b0$i/pm.y).
+     */
+    private static synchronized void resolveRecorderStructure() {
+        if (recorderKeysClass != null) return;
+        Class<?> modeRecorder = cls(MODE_RECORDER);
+        for (Class<?> inner : modeRecorder.getDeclaredClasses()) {
+            Class<?> sup = inner.getSuperclass();
+            if (sup == null || sup == Object.class) continue;
+            Class<?> keyType = null;
+            for (java.lang.reflect.Field f : inner.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                    keyType = f.getType();
+                    break;
+                }
+            }
+            if (keyType == null) continue;
+            String readerName = null;
+            for (java.lang.reflect.Method m : sup.getDeclaredMethods()) {
+                Class<?>[] params = m.getParameterTypes();
+                if (params.length == 1 && params[0] == keyType
+                        && m.getReturnType() == Object.class) {
+                    readerName = m.getName();
+                    break;
+                }
+            }
+            if (readerName != null) {
+                recorderKeysClass = inner;
+                recorderConfigClass = sup;
+                recorderReaderName = readerName;
+                Log.i(TAG, "recorder structure keys=" + inner.getName()
+                        + " config=" + sup.getName()
+                        + " reader=" + readerName);
+                return;
+            }
+        }
+        Log.i(TAG, "recorder structure resolution failed on " + modeRecorder.getName());
+    }
+
+    /**
+     * Binds the recorder selector key objects to their canonical names build-agnostically.
+     * On 123 the key objects carry the name in a field, so the identity follows the value;
+     * on 317 the keys are opaque but declared in the clinit order both builds share, so
+     * order pairing applies once the static field count lines up.
+     */
+    private static void bindRecorderSelectorKeys(Class<?> keys) throws Throwable {
+        java.util.List<java.lang.reflect.Field> statics = new java.util.ArrayList<>();
+        for (java.lang.reflect.Field f : keys.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) statics.add(f);
+        }
+        java.util.Map<String, Object> named = new java.util.LinkedHashMap<>();
+        for (java.lang.reflect.Field f : statics) {
+            Object value;
+            try {
+                value = f.get(null);
+            } catch (Throwable ignored) {
+                continue;
+            }
+            String canonical = recorderKeyName(value);
+            if (canonical != null && isRecorderSelectorName(canonical)) {
+                named.put(canonical, value);
+            }
+        }
+        if (named.size() == RECORDER_SELECTOR_NAMES.length) {
+            for (java.util.Map.Entry<String, Object> e : named.entrySet()) {
+                bindRecorderKey(e.getKey(), e.getValue());
+            }
+        } else if (statics.size() == RECORDER_SELECTOR_NAMES.length) {
+            for (int i = 0; i < statics.size(); i++) {
+                Object value = statics.get(i).get(null);
+                if (value != null) bindRecorderKey(RECORDER_SELECTOR_NAMES[i], value);
+            }
+        } else {
+            throw new IllegalStateException("recorder selector keys unresolvable on "
+                    + keys.getName() + " (statics=" + statics.size()
+                    + ", named=" + named.size() + ")");
+        }
+        for (String name : RECORDER_SELECTOR_NAMES) {
+            Log.i(TAG, "recorder selector key " + name
+                    + (recorderKeysByName.containsKey(name)
+                    ? " (identity " + Integer.toHexString(
+                    System.identityHashCode(recorderKeysByName.get(name))) + ")"
+                    : " MISSING"));
+        }
+    }
+
+    private static boolean isRecorderSelectorName(String name) {
+        for (String candidate : RECORDER_SELECTOR_NAMES) {
+            if (candidate.equals(name)) return true;
+        }
+        return false;
+    }
+
+    private static void bindRecorderKey(String canonical, Object key) {
+        if (key == null || canonical == null) return;
+        recorderKeyNames.put(key, canonical);
+        Object previous = recorderKeysByName.put(canonical, key);
+        if (previous != null && previous != key) {
+            // Never let a second object steal a canonical name; identity stays first-fit.
+            recorderKeysByName.put(canonical, previous);
+            recorderKeyNames.remove(key);
+        }
+    }
+
+    /** Build-agnostic recorder structure accessors shared by MasterPalette/VideoFilterHighSpec. */
+
+    /** The ModeRecorder keys inner class (static selector key singletons), or null. */
+    public static Class<?> recorderKeysClass() {
+        resolveRecorderStructure();
+        return recorderKeysClass;
+    }
+
+    /** The config superclass carrying the generic one-argument reader, or null. */
+    public static Class<?> recorderConfigClass() {
+        resolveRecorderStructure();
+        return recorderConfigClass;
+    }
+
+    /** The reader method name on the config superclass (123 "a", 317 "a"), or null. */
+    public static String recorderReaderName() {
+        resolveRecorderStructure();
+        return recorderReaderName;
+    }
+
+    /** The recorder selector key singleton bound to a canonical name, or null. */
+    public static Object recorderKey(String canonical) {
+        resolveRecorderStructure();
+        if (recorderKeysClass != null && recorderKeysByName.isEmpty()) {
+            try {
+                bindRecorderSelectorKeys(recorderKeysClass);
+            } catch (Throwable error) {
+                Log.i(TAG, "recorder key binding deferred: " + error);
+            }
+        }
+        return canonical == null ? null : recorderKeysByName.get(canonical);
     }
 
     private static boolean wantsDirectAppCodec(ClassLoader classLoader, Object stockValue) {
@@ -2260,7 +2647,7 @@ final class LogLutDirect {
                             "com.oplus.camera.data.DataManager", classLoader),
                     "getInstance");
             Object key = XposedHelpers.getStaticObjectField(
-                    XposedHelpers.findClass("n9.e", classLoader), "X0");
+                    cls(LOG_FORMAT_KEYS), "X0");
             int mode = intValue(
                     XposedHelpers.callMethod(manager, "b", key, 0), -1);
             return mode >= 0 ? mode : lastDirectMode;
@@ -2276,14 +2663,16 @@ final class LogLutDirect {
      */
     private static void observeVideoRecorder(ClassLoader classLoader) {
         try {
-            Class<?> processor = XposedHelpers.findClass(MODE_RECORDER, classLoader);
-            XposedBridge.hookAllMethods(processor, "k", new XC_MethodHook() {
+            String createName = member("@ModeRecorder.create");
+            Class<?> processor = cls(MODE_RECORDER);
+            XposedBridge.hookAllMethods(processor, createName, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled()) return;
                     recorderCreationDepth.set(recorderCreationDepth.get() + 1);
                     boolean wanted = wantsDirectAppCodec(classLoader, null);
                     if (wanted) appCodecArmed = true;
-                    Log.i(TAG, "recorder creation entered caller=" + MODE_RECORDER + ".k"
+                    Log.i(TAG, "recorder creation entered caller="
+                            + MODE_RECORDER + "." + createName
                             + " wantedAppCodec=" + wanted
                             + " armed=" + appCodecArmed
                             + " direct=" + currentDirectMode(classLoader)
@@ -2314,7 +2703,7 @@ final class LogLutDirect {
         }
 
         try {
-            Class<?> recorder = XposedHelpers.findClass(VIDEO_RECORDER, classLoader);
+            Class<?> recorder = cls(VIDEO_RECORDER);
             XposedBridge.hookAllConstructors(recorder, new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 1) return;
@@ -2332,9 +2721,17 @@ final class LogLutDirect {
                      * unsupported backend. It makes high-frame-rate and hot-switched recordings
                      * consistently use the same App MediaCodec path accepted for 4K30.
                      */
+                    /*
+                     * r519 experiment: forcing the App MediaCodec backend for every recorder in
+                     * Pro Video froze the whole camera (black viewfinder, no touch response,
+                     * no MP4) -- the app codec pipeline is not wired the way the config keys
+                     * suggest on 317, so the frames it awaits never arrive. Back to the call
+                     * stack probe; the recorder backend needs a different route on this build.
+                     */
                     boolean targetRecorder = wanted
                             && (recorderCreationDepth.get() > 0
-                                    || calledFrom(MODE_RECORDER, "k"));
+                                    || calledFrom(className(MODE_RECORDER),
+                                            member("@ModeRecorder.create")));
                     int requested = intValue(param.args[0], -1);
                     if (targetRecorder && requested != 2) {
                         param.args[0] = 2;
@@ -2365,7 +2762,8 @@ final class LogLutDirect {
                                 + " armed=" + appCodecArmed);
                         if (actual == 2) {
                             boolean target = recorderCreationDepth.get() > 0
-                                    || calledFrom(MODE_RECORDER, "k");
+                                    || calledFrom(className(MODE_RECORDER),
+                                            member("@ModeRecorder.create"));
                             if (target) {
                                 Object appCodec = getField(param.thisObject, "o");
                                 targetAppCodec = new java.lang.ref.WeakReference<>(appCodec);
@@ -2436,11 +2834,12 @@ final class LogLutDirect {
      */
     private static void observeRecorderCodec(ClassLoader classLoader) {
         try {
-            Class<?> codec = XposedHelpers.findClass(APP_CODEC, classLoader);
-            XposedBridge.hookAllMethods(codec, "s", new XC_MethodHook() {
+            Class<?> codec = cls(APP_CODEC);
+            XposedBridge.hookAllMethods(codec, member("@AppCodec.startup"),
+                    new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!enabled()) return;
-                    Object callback = getField(param.thisObject, "l0");
+                    Object callback = rendererCallbackOf(param.thisObject);
                     boolean w0 = getBooleanField(param.thisObject, "W0", true);
                     boolean p0 = getBooleanField(param.thisObject, "P0", true);
                     Object targetCodec = targetAppCodec.get();
@@ -2453,7 +2852,7 @@ final class LogLutDirect {
                     }
                     boolean effectiveP0 = getBooleanField(param.thisObject, "P0", p0);
                     Surface encoderSurface = asType(
-                            getField(param.thisObject, "e0"), Surface.class);
+                            encoderSurfaceOf(param.thisObject), Surface.class);
                     String signature = sessionSerial
                             + "|W0=" + w0
                             + "|P0=" + effectiveP0
@@ -2473,7 +2872,7 @@ final class LogLutDirect {
                             + " targetCodec=" + targetMatched
                             + " fallbackMatch=" + fallbackMatch
                             + " protected=" + protect
-                            + " branch=" + (effectiveP0 ? "l0.c/renderer" : "M0/input"));
+                            + " branch=" + (effectiveP0 ? "callback/renderer" : "input"));
                     }
                     if (protect) {
                         appCodecArmed = false;
@@ -2485,18 +2884,18 @@ final class LogLutDirect {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled()) return;
                     Surface encoderSurface = asType(
-                            getField(param.thisObject, "e0"), Surface.class);
+                            encoderSurfaceOf(param.thisObject), Surface.class);
                     Log.i(TAG, "app encoder initialized W0="
                             + getBooleanField(param.thisObject, "W0", true)
                             + " P0=" + getBooleanField(param.thisObject, "P0", true)
                             + " encoderSurface=" + describeSurface(encoderSurface)
                             + " rendererCallback="
-                            + (getField(param.thisObject, "l0") != null)
+                            + (rendererCallbackOf(param.thisObject) != null)
                             + " inputThread="
                             + (getField(param.thisObject, "M0") != null)
                             + " branch="
                             + (getBooleanField(param.thisObject, "P0", true)
-                                    ? "l0.c/renderer" : "M0/input"));
+                                    ? "callback/renderer" : "input"));
                 }
             });
         } catch (Throwable error) {
@@ -2504,10 +2903,36 @@ final class LogLutDirect {
         }
     }
 
+    /**
+     * The encoder Surface field moved between builds (123: e0:Surface, 317: c0:Surface while the
+     * MediaFormat fields took the old names), so resolve it by shape: the class's unique instance
+     * Surface field.
+     */
+    private static Object encoderSurfaceOf(Object codec) {
+        String name = fieldOfTypeName(codec, Surface.class);
+        return name == null ? null : getField(codec, name);
+    }
+
+    /**
+     * The renderer callback field also moved (123: l0, 317: j0) and its type holder class has no
+     * stable fingerprint, so resolve it by shape: the unique instance field whose type name ends
+     * in "$a" without being a nested class of the codec itself.
+     */
+    private static Object rendererCallbackOf(Object codec) {
+        String self = codec.getClass().getName();
+        for (java.lang.reflect.Field f : codec.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            String typeName = f.getType().getName();
+            if (!typeName.endsWith("$a") || typeName.startsWith(self + "$")) continue;
+            return getField(codec, f.getName());
+        }
+        return null;
+    }
+
     /** Observe the moment the HAL gives the encoder Surface back to the App pipeline. */
     private static void observeEncoderSurface(ClassLoader classLoader) {
         try {
-            Class<?> callback = XposedHelpers.findClass(ENCODER_SURFACE_CALLBACK, classLoader);
+            Class<?> callback = cls(ENCODER_SURFACE_CALLBACK);
             XposedBridge.hookAllMethods(callback, "c", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled() || param.args.length < 2) return;
@@ -2608,9 +3033,7 @@ final class LogLutDirect {
         try {
             Object context = XposedHelpers.callMethod(menu, "getContext");
             Object persistence = XposedHelpers.callStaticMethod(
-                    XposedHelpers.findClass(
-                            LUT_PERSISTENCE, menu.getClass().getClassLoader()),
-                    "c", context);
+                    cls(LUT_PERSISTENCE), "c", context);
             String vendorPath = (String) XposedHelpers.callMethod(
                     persistence, "b", fileName);
             if (vendorPath != null && !vendorPath.isEmpty()) return vendorPath;
@@ -2636,8 +3059,7 @@ final class LogLutDirect {
                     parameter, "KEY_CONFIGURE_MASTER_VIDEO_CUSTOM_LUT_NAME");
             Object modeKey = XposedHelpers.getStaticObjectField(
                     parameter, "KEY_CONFIGURE_LOG_VIDEO_MODE");
-            XposedBridge.hookAllMethods(
-                    XposedHelpers.findClass(SESSION_PARAMS, classLoader), "a",
+            XposedBridge.hookAllMethods(cls(SESSION_PARAMS), "a",
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam param) {
                             if (!enabled() || param.args.length < 2) return;
@@ -2719,6 +3141,28 @@ final class LogLutDirect {
         return value == null ? "null" : value.getClass().getName();
     }
 
+    /**
+     * Replaces a recorder config value while preserving its <b>runtime type</b>.
+     *
+     * <p>The 317 recorder reads the same three selector keys back with a hard cast:
+     * {@code (Boolean) config.a(keyB)}, {@code (Integer) config.a(keyC)},
+     * {@code (Boolean) config.a(keyD)} in {@code pm.b0.M} (stopVideoRecording). Writing a plain
+     * {@code Boolean} over the integer slot throws {@code ClassCastException: Boolean cannot be
+     * cast to Integer} on every shutter release, which kills both the recording and the live
+     * photo. A null stock result means the config map carries no entry for that key; the camera
+     * tolerates the missing value but not a badly typed one, so leave it alone.
+     */
+    public static Object coerceConfigValue(Object stock, boolean truth) {
+        if (stock == null) return null;
+        if (stock instanceof Boolean) return Boolean.valueOf(truth);
+        if (stock instanceof Integer) return Integer.valueOf(truth ? 1 : 0);
+        if (stock instanceof Long) return Long.valueOf(truth ? 1L : 0L);
+        if (stock instanceof Short) return Short.valueOf((short) (truth ? 1 : 0));
+        if (stock instanceof String) return truth ? "1" : "0";
+        // Unknown runtime type: never guess, a wrong class is fatal at the original cast site.
+        return null;
+    }
+
     private static String displayValue(Object value) {
         if (value == null) return "null";
         if (value instanceof byte[]) {
@@ -2750,8 +3194,7 @@ final class LogLutDirect {
                     XposedHelpers.findClass(
                             "com.oplus.camera.data.DataManager", classLoader),
                     "getInstance");
-            Object key = XposedHelpers.getStaticObjectField(
-                    XposedHelpers.findClass(DATA_KEYS, classLoader), field);
+            Object key = XposedHelpers.getStaticObjectField(cls(DATA_KEYS), field);
             Object value = XposedHelpers.callMethod(manager, "b", key, fallback);
             return value == null ? fallback : String.valueOf(value);
         } catch (Throwable error) {
@@ -2766,8 +3209,7 @@ final class LogLutDirect {
                     XposedHelpers.findClass(
                             "com.oplus.camera.data.DataManager", classLoader),
                     "getInstance");
-            Object key = XposedHelpers.getStaticObjectField(
-                    XposedHelpers.findClass(DATA_KEYS, classLoader), field);
+            Object key = XposedHelpers.getStaticObjectField(cls(DATA_KEYS), field);
             return intValue(
                     XposedHelpers.callMethod(manager, "b", key, fallback), fallback);
         } catch (Throwable error) {
@@ -2817,13 +3259,9 @@ final class LogLutDirect {
     }
 
     private static int property(String name, int fallback) {
-        try {
-            Class<?> type = Class.forName("android.os.SystemProperties");
-            String value = (String) type.getMethod("get", String.class).invoke(null, name);
-            return value == null || value.isEmpty() ? fallback : Integer.parseInt(value.trim());
-        } catch (Throwable error) {
-            return fallback;
-        }
+        // Shared, cached lookup: this is read from hooks that run on every rendered frame, and the
+        // per-call Class.forName was the expensive part, not the property read itself.
+        return local.jiege.hook.common.Props.getInt(name, fallback);
     }
 
     private static String logFormat(ClassLoader classLoader) {
@@ -2832,7 +3270,7 @@ final class LogLutDirect {
                     XposedHelpers.findClass("com.oplus.camera.data.DataManager", classLoader),
                     "getInstance");
             Object key = XposedHelpers.getStaticObjectField(
-                    XposedHelpers.findClass("n9.e", classLoader), "K0");
+                    cls(LOG_FORMAT_KEYS), "K0");
             return String.valueOf(XposedHelpers.callMethod(manager, "b", key, "sdr"));
         } catch (Throwable error) {
             return "unknown";
@@ -2843,7 +3281,7 @@ final class LogLutDirect {
         if (strategyInstalled) return;
         try {
             Object singleton = XposedHelpers.getStaticObjectField(
-                    XposedHelpers.findClass("o9.h$a", classLoader), "a");
+                    innerOf(cls("@MasterVideoDecision"), "$a"), "a");
             Object current = XposedHelpers.getObjectField(singleton, "c");
             // R8 removes the stateless strategy's constructor and the stock clinit allocates the
             // object directly. allocateInstance matches that shape and does not need a ctor.
@@ -2852,7 +3290,7 @@ final class LogLutDirect {
             unsafeField.setAccessible(true);
             Object unsafe = unsafeField.get(null);
             Object hal = unsafeType.getMethod("allocateInstance", Class.class)
-                    .invoke(unsafe, XposedHelpers.findClass("o9.f", classLoader));
+                    .invoke(unsafe, cls("@DecisionCallback"));
             XposedHelpers.setObjectField(singleton, "c", hal);
             strategyInstalled = true;
             Log.i(TAG, "Log LUT decision strategy: "
@@ -2906,7 +3344,7 @@ final class LogLutDirect {
      */
     private static void answerGetSupportFunction(ClassLoader classLoader, String className) {
         try {
-            Class<?> type = XposedHelpers.findClass(className, classLoader);
+            Class<?> type = cls(className);
             XposedBridge.hookAllMethods(type, "getSupportFunction", new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (!enabled()) return;

@@ -1620,12 +1620,6 @@
     "@Lut3d.release"
    ]
   },
-  "Lut3d.index": {
-   "kind": "field",
-   "in": "com.oplus.camera.common.utils.Lut3dDataManager",
-   "name": "M",
-   "type": "int"
-  },
   "DeviceProcessor": {
    "kind": "class",
    "strings": [
@@ -2189,6 +2183,584 @@
     "updateBasicToneData, palette branch skip process, capModeName: "
    ]
   },
+  "MenuOptionBase": {
+   "kind": "class",
+   "strings": [
+    "MenuOptionInfo {optionKey: ",
+    "setOptionValue fail! index: "
+   ]
+  },
+  "MenuOptionTop": {
+   "kind": "class",
+   "strings": [
+    "outFlashScale",
+    "not VectorDrawable"
+   ]
+  },
+  "CameraSettingUiTop": {
+   "kind": "class",
+   "strings": [
+    "start_view",
+    "expand_top_group"
+   ]
+  },
+  "CameraUnit": {
+   "kind": "class",
+   "strings": [
+    "ModeManager E ",
+    ", isSwitchCamera: "
+   ]
+  },
+  "MenuContainer.injectList": {
+   "kind": "method",
+   "in": "@MenuContainer",
+   "params": [
+    "java.util.List",
+    "boolean",
+    "java.util.concurrent.CopyOnWriteArrayList"
+   ],
+   "ret": "void",
+   "strings": [
+    "CameraMenuContainer"
+   ]
+  },
+  "MenuContainer.optionAdded": {
+   "kind": "method",
+   "in": "@MenuContainer",
+   "params": [
+    "@MenuOptionBase"
+   ],
+   "ret": "void",
+   "strings": [
+    "onMenuOptionAdded, menuOption not found in mMenuList: ",
+    "calculateInsertIndex, menuListIndex: "
+   ]
+  },
+  "Camera.getCameraUnit": {
+   "kind": "method",
+   "in": "com.oplus.camera.w6",
+   "params": [],
+   "ret": "@CameraUnit"
+  },
+  "LivePhotoPresenter.support": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [],
+   "ret": "boolean",
+   "invokes": [
+    "Ljava/util/Optional;->ofNullable(Ljava/lang/Object;)Ljava/util/Optional;",
+    "Ljava/util/Optional;->orElse(Ljava/lang/Object;)Ljava/lang/Object;"
+   ],
+   "notInvokes": [
+    "Ljava/util/Optional;->map(Ljava/util/function/Function;)Ljava/util/Optional;"
+   ]
+  },
+  "LivePhotoPresenter.captureCheck": {
+   "kind": "method",
+   "in": "@LivePhotoPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessageCaptureRequestStage"
+   ],
+   "ret": "boolean",
+   "strings": [
+    "onCheckForCapture, wait for 1s cache."
+   ]
+  },
+  "LivePhotoPresenter.interceptFlag": {
+   "kind": "field",
+   "in": "@LivePhotoPresenter",
+   "type": "boolean",
+   "readBy": [
+    "@LivePhotoPresenter.onPreviewDrawn",
+    "@LivePhotoPresenter.captureCheck"
+   ]
+  },
+  "LivePhotoPresenter.pendingCounters": {
+   "kind": "field",
+   "in": "@LivePhotoPresenter",
+   "type": "java.util.concurrent.atomic.AtomicInteger",
+   "notWrittenBy": [
+    "@LivePhotoPresenter.enable"
+   ],
+   "multi": true
+  },
+  "BaseMode.buildSession": {
+   "kind": "method",
+   "in": "com.oplus.camera.module.BaseMode",
+   "params": [
+    null
+   ],
+   "ret": "void",
+   "strings": [
+    "buildSession, set KEY_CAPTURE_WITH_SPRUCE"
+   ]
+  },
+  "BaseMode.beforePreview": {
+   "kind": "method",
+   "in": "com.oplus.camera.module.BaseMode",
+   "params": [
+    null
+   ],
+   "ret": "void",
+   "strings": [
+    "onBeforePreview, capMode: "
+   ]
+  },
+  "CompPresenter": {
+   "kind": "class",
+   "strings": [
+    "可用",
+    "不可用",
+    "p010",
+    "time3",
+    "time4"
+   ]
+  },
+  "CompStateMachine": {
+   "kind": "class",
+   "strings": [
+    "onImageReviewFailed, errCode: 0, errMsg: null"
+   ]
+  },
+  "CompWorker": {
+   "kind": "class",
+   "strings": [
+    "runComposition unexpected error: "
+   ]
+  },
+  "CompManager": {
+   "kind": "class",
+   "strings": [
+    "AICompositionThread",
+    "persist.camera.composition.sat"
+   ]
+  },
+  "CompStreamHelper": {
+   "kind": "class",
+   "strings": [
+    "updateCompositionResult, skip crop, mZoom: ",
+    "applyDescToCropInfo, matched point not found, srcCrop: "
+   ]
+  },
+  "CompSubject": {
+   "kind": "class",
+   "strings": [
+    "desc1",
+    "srcCrop",
+    "crops"
+   ]
+  },
+  "CompPoint": {
+   "kind": "class",
+   "strings": [
+    "Point{x=",
+    ", trackStatus="
+   ]
+  },
+  "CompResults": {
+   "kind": "class",
+   "strings": [
+    "CompositionResults{mOutputNum=",
+    "compositionDesc"
+   ]
+  },
+  "CompFramePoint": {
+   "kind": "class",
+   "strings": [
+    "{frameId=",
+    ", point="
+   ]
+  },
+  "CompPresenter.frameScheduler": {
+   "kind": "method",
+   "in": "@CompPresenter",
+   "params": [
+    null,
+    null,
+    null,
+    "int",
+    "int"
+   ],
+   "ret": "void",
+   "strings": [
+    "CompositionProcessor"
+   ]
+  },
+  "CompPresenter.effectTexture": {
+   "kind": "method",
+   "in": "@CompPresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.previewProtocol.EventMessagePreviewPostDraw"
+   ],
+   "ret": "void"
+  },
+  "CompPresenter.failure": {
+   "kind": "method",
+   "in": "@CompPresenter",
+   "ret": "void",
+   "strings": [
+    "no person detected",
+    "invalid zoom result"
+   ]
+  },
+  "CompPresenter.answerLanding": {
+   "kind": "method",
+   "in": "@CompPresenter",
+   "params": [
+    "int"
+   ],
+   "ret": "void",
+   "strings": [
+    "startSwitchButtonBusinessAfterLoginIfAlive, skip, presenter destroyed"
+   ]
+  },
+  "ProVideoMode": {
+   "kind": "class",
+   "strings": [
+    "master_video_",
+    "pro_video_mode",
+    "histogram"
+   ]
+  },
+  "ProVideoModeAlt": {
+   "kind": "class",
+   "strings": [
+    "aps_algo_pf",
+    "aps_algo_yuvnight",
+    "onCaptureCanceled"
+   ]
+  },
+  "CameraImplementation": {
+   "kind": "class",
+   "strings": [
+    "CameraUnitCallback",
+    "ApsCaptureYuvThread",
+    "closeCameraDevice X"
+   ]
+  },
+  "CameraImplementation.ev": {
+   "kind": "method",
+   "in": "@CameraImplementation",
+   "params": [
+    "android.hardware.camera2.CaptureRequest$Key",
+    "java.lang.Object"
+   ],
+   "ret": "void"
+  },
+  "LutPersistence": {
+   "kind": "class",
+   "strings": [
+    "lut_list.json",
+    "LutFileCopyThread",
+    "ProVideo_CloudyAmber"
+   ]
+  },
+  "DataKeys": {
+   "kind": "class",
+   "strings": [
+    "key_zoom_speed",
+    "preview_switch",
+    "pref_ai_hd_switch"
+   ]
+  },
+  "SessionParams.put": {
+   "kind": "method",
+   "name": "a",
+   "params": [
+    "com.oplus.ocs.camera.CameraParameter$ConfigureKey",
+    "java.lang.Object"
+   ],
+   "ret": "void"
+  },
+  "SessionParams": {
+   "kind": "class",
+   "ownerOf": "@SessionParams.put"
+  },
+  "ModeRecorder": {
+   "kind": "class",
+   "strings": [
+    "stopRecord, end!",
+    "onDestroy, block"
+   ]
+  },
+  "VideoRecorder": {
+   "kind": "class",
+   "strings": [
+    "EncodeYuv",
+    " is wrong"
+   ]
+  },
+  "AppCodec": {
+   "kind": "class",
+   "strings": [
+    "ozoaudio",
+    "max-bframes",
+    "request-sync"
+   ]
+  },
+  "SessionHolder": {
+   "kind": "class",
+   "strings": [
+    "beforeSession",
+    ", mTargetRect: "
+   ]
+  },
+  "EncoderSurfaceCallback": {
+   "kind": "class",
+   "strings": [
+    "OutputRenderer",
+    "PreviewEffectProcessor"
+   ]
+  },
+  "OutputProcessor.surfaceChanged": {
+   "kind": "method",
+   "in": "@OutputProcessor",
+   "params": [
+    "android.view.Surface"
+   ],
+   "ret": "void",
+   "strings": [
+    "surfaceCreated"
+   ]
+  },
+  "OutputProcessor": {
+   "kind": "class",
+   "strings": [
+    "onSurfaceCreated mFinsh = false",
+    "removePreviewSurface"
+   ]
+  },
+  "EffectProcessor": {
+   "kind": "class",
+   "strings": [
+    ", glReady: ",
+    ", needDelayReCreateEngine: "
+   ]
+  },
+  "PreviewRenderer": {
+   "kind": "class",
+   "strings": [
+    "resetFirstFrameFlag",
+    "notifyThumbnailBitmap",
+    "queueEventForDrawFrame"
+   ]
+  },
+  "OutputRenderer": {
+   "kind": "class",
+   "strings": [
+    "onEglSurfaceDestroy",
+    "onEglSurfaceCreated",
+    "onDrawFrame, GL env is error"
+   ]
+  },
+  "OutputRenderer.lutIndex": {
+   "kind": "field",
+   "in": "@OutputRenderer",
+   "type": "int"
+  },
+  "OutputRenderer.surfaceReady": {
+   "kind": "method",
+   "in": "@OutputRenderer",
+   "params": [],
+   "ret": "void",
+   "fields": [
+    "@OutputRenderer.lutIndex"
+   ],
+   "strings": [
+    "onEglSurfaceCreated"
+   ]
+  },
+  "ProVideoMode.valueIndex": {
+   "kind": "method",
+   "in": "@ProVideoMode",
+   "params": [],
+   "ret": "int",
+   "numbers": [
+    0,
+    2,
+    1,
+    -1
+   ]
+  },
+  "ProVideoMode.logFormat": {
+   "kind": "method",
+   "in": "@ProVideoMode",
+   "params": [],
+   "ret": "boolean",
+   "strings": [
+    "off",
+    "on"
+   ],
+   "notInvokes": [
+    "Lcom/oplus/camera/configure/CameraConfig;->d(Ljava/lang/String;ZZ)Z"
+   ]
+  },
+  "ProVideoMode.decision": {
+   "kind": "method",
+   "in": "@ProVideoMode",
+   "params": [],
+   "invokes": [
+    "@ProVideoMode.valueIndex",
+    "@ProVideoMode.logFormat"
+   ],
+   "calledBy": [
+    "@ProVideoMode.session"
+   ]
+  },
+  "ProVideoMode.logKind": {
+   "kind": "method",
+   "in": "@ProVideoMode",
+   "params": [],
+   "ret": "int",
+   "strings": [
+    "MasterVideoDecision"
+   ]
+  },
+  "ProVideoMode.previewLut": {
+   "kind": "method",
+   "in": "@ProVideoMode",
+   "params": [
+    "int"
+   ],
+   "ret": "int",
+   "numbers": [
+    9,
+    10
+   ]
+  },
+  "ProVideoMode.session": {
+   "kind": "method",
+   "in": "@ProVideoMode",
+   "params": [
+    null
+   ],
+   "ret": "void",
+   "invokes": [
+    "@SessionParams.put"
+   ]
+  },
+  "CodecKeys": {
+   "kind": "class",
+   "strings": [
+    "com.oplus.tunning.720p.hfr.fps",
+    "com.oplus.tunning.1080p.hfr.second.fps"
+   ]
+  },
+  "DecisionCallback": {
+   "kind": "class",
+   "strings": [
+    "MasterToneLutByHal"
+   ]
+  },
+  "MasterVideoDecision": {
+   "kind": "class",
+   "strings": [
+    "com.oplus.camera.master.video.feature.list",
+    "MasterVideoDecision"
+   ]
+  },
+  "LogFormatKeys": {
+   "kind": "class",
+   "super": "androidx.preference.e",
+   "clinitStrings": [
+    "pref_scale_focus_key",
+    "pref_is_auto_night_detected",
+    "pref_setting_key",
+    "pref_camera_mode_key"
+   ]
+  },
+  "ModeRecorder.create": {
+   "kind": "method",
+   "in": "@ModeRecorder",
+   "ret": "void",
+   "strings": [
+    "createVideoRecorder, start!"
+   ]
+  },
+  "ModeRecorder.stop": {
+   "kind": "method",
+   "in": "@ModeRecorder",
+   "params": [
+    "int",
+    "boolean"
+   ],
+   "ret": "boolean",
+   "strings": [
+    "stopRecord, end!"
+   ]
+  },
+  "CameraImplementation.sink": {
+   "kind": "method",
+   "in": "@CameraImplementation",
+   "params": [
+    "android.hardware.camera2.CaptureRequest$Key",
+    "java.lang.Object",
+    "boolean"
+   ],
+   "ret": "void",
+   "strings": [
+    "OneCameraImpl"
+   ]
+  },
+  "PreviewRenderer.lutSetup": {
+   "kind": "method",
+   "in": "@PreviewRenderer",
+   "params": [
+    "int"
+   ],
+   "ret": "void",
+   "strings": [
+    "com.oplus.camera.preview.hdr.support"
+   ]
+  },
+  "PreviewRenderer.callback": {
+   "kind": "field",
+   "in": "@PreviewRenderer",
+   "name": "K",
+   "readBy": [
+    "@PreviewRenderer.lutSetup"
+   ]
+  },
+  "OutputRenderer.callback": {
+   "kind": "field",
+   "in": "@OutputRenderer",
+   "name": "f",
+   "readBy": [
+    "@OutputRenderer.surfaceReady"
+   ]
+  },
+  "BaseMode.destroy": {
+   "kind": "method",
+   "in": "com.oplus.camera.module.BaseMode",
+   "params": [
+    "boolean"
+   ],
+   "ret": "void",
+   "strings": [
+    "onDestroy"
+   ]
+  },
+  "AppCodec.startup": {
+   "kind": "method",
+   "in": "@AppCodec",
+   "ret": "void",
+   "strings": [
+    "initVideoCodec",
+    "VideoCodecInputThread",
+    "Encode YUV Thread"
+   ]
+  },
+  "PreviewLutType.decl": {
+   "kind": "method",
+   "in": "com.oplus.camera.filter.IEffectProcessor$EffectProcessCallback",
+   "name": "getPreviewRenderLutType",
+   "params": [],
+   "ret": "int"
+  },
+  "PreviewLutTypeImpl": {
+   "kind": "method",
+   "implOf": "@PreviewLutType.decl"
+  },
   "CaptureParams.effectCaller": {
    "kind": "method",
    "strings": [
@@ -2277,10 +2849,34 @@
     ", mVerticesCount: "
    ]
   },
+  "VideoEffectPipeline": {
+   "kind": "class",
+   "strings": [
+    "LivePhoto.VideoEffectPipeline",
+    "drawWatermark, null == hardwareBuffer"
+   ]
+  },
   "WatermarkProcessor": {
    "kind": "class",
    "strings": [
     "WatermarkProcessor create."
+   ]
+  },
+  "XpanCapturePresenter": {
+   "kind": "class",
+   "strings": [
+    "onPrepareCaptureRequest, cropRegion:"
+   ]
+  },
+  "XpanCapturePresenter.prepareRequest": {
+   "kind": "method",
+   "in": "@XpanCapturePresenter",
+   "params": [
+    "com.oplus.camera.protocal.event.message.deviceProtocol.deviceControlRequest.EventMessageCaptureRequestStage"
+   ],
+   "ret": "boolean",
+   "strings": [
+    ", XPAN add height:"
    ]
   },
   "LiveVideoSizeChooser": {
@@ -2363,13 +2959,6 @@
    "strings": [
     "PortraitCapMode",
     "com.oplus.portrait.capture.delay"
-   ]
-  },
-  "CameraImplementation": {
-   "kind": "class",
-   "strings": [
-    "50pv_setRepeatingRequest",
-    "CameraStartupPerformance.openCamera"
    ]
   },
   "LiveVideoEncoder": {
@@ -2859,17 +3448,13 @@
    "in": "com.oplus.camera.common.utils.Lut3dDataManager",
    "type": "com.oplus.ocs.camera.CombineLutHelper"
   },
-  "MasterVideoDecision": {
-   "kind": "class",
-   "strings": [
-    "com.oplus.camera.master.video.feature.list",
-    "MasterVideoDecision"
-   ]
-  },
   "LogVideoModel": {
    "kind": "class",
    "clinitStrings": [
     "pref_log_video_key"
+   ],
+   "fieldTypes": [
+    "com.oplus.ocs.camera.config.FeatureKey"
    ]
   },
   "LogVideoPresenter.visibilityProbe": {

@@ -208,6 +208,138 @@ public final class XpanWatermarkIsolation {
         Log.i(TAG, "entered XPAN, " + (restored ? "restored XPAN watermark" : "no saved XPAN watermark") + (style.isEmpty() ? "" : ", set aside " + style));
     }
 
+    /**
+     * The photo-watermark slot must be closed in XPAN on this port, and it is also the wrong switch
+     * for an XPAN watermark. files/photo_watermark ships only {@code lumo_style_2}, a 4:3 *border*
+     * style (size margins 10/10/10/111dp). With it open the capture drops the 65:24 crop and APS
+     * then rejects the composition, and the JPEG photo layer comes out pure white. Field log
+     * 2026-11-26:
+     * <pre>
+     *   watermarkOpen=false -> crop 1920x710, pipelineAB 1920x710 -> 2912x7872, normal
+     *   watermarkOpen=true  -> crop 1920x864, pipelineAB 1920x864 -> 1504x3328, all 255
+     *   APS_CORE: camApsProcessImages() watermark size not valid!
+     *   IPU_WM: processBitmapSize bitmap 864x266, pictureSize 864x1920, isXpanImage:false
+     * </pre>
+     * The XPAN watermark proper is the HAL footer strip driven by {@code CameraRequestTag.n1}, see
+     * {@link local.jiege.hook.xpan.XpanHsWatermark}; it needs the slot closed. Escape hatch:
+     * {@code setprop persist.omnicam.xpan.wmallow 1}.
+     */
+    public static void installForceClosed(ClassLoader classLoader) {
+        Log.guard(TAG, "XPAN watermark closed on entry", () -> {
+            final Symbols symbols = Symbols.get();
+            XposedBridge.hookMethod(symbols.method("ModeSwitch.switch"), new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    // Everything that touches the preference layer is resolved here, at runtime.
+                    // DataStore.key reads a static PrefKeyGlobal field whose class init parks on the
+                    // SharedPreferences -> MMKV migration thread; at install time that thread does
+                    // not exist yet and the viewfinder stays black (the r554 deadlock).
+                    Keys keys;
+                    try {
+                        keys = keys(symbols);
+                    } catch (Throwable error) {
+                        Log.e(TAG, "XPAN watermark keys unavailable", error);
+                        return;
+                    }
+                    if (!writersInstalled) {
+                        writersInstalled = true;
+                        hookWriter(symbols, keys, "DataManager.putSync");
+                        hookWriter(symbols, keys, "DataManager.put");
+                    }
+                    String to = (String) param.args[1];
+                    if (to != null) activeMode = to;
+                    if (!XPAN_MODE.equals(to)) return;
+                    if (watermarkAllowed()) return;
+                    if (forceOpen()) {
+                        // Debug only: the tile in XPAN is a preview toggle, so open the slot here to
+                        // make "watermark on with/without the injected live photo" measurable.
+                        try {
+                            DataStore.put(symbols, classLoader, keys.open, Boolean.TRUE);
+                            setCapture(symbols, classLoader, keys, "on");
+                            Log.i(TAG, "XPAN watermark forced open (debug)");
+                        } catch (Throwable error) {
+                            Log.e(TAG, "XPAN watermark force open failed", error);
+                        }
+                        return;
+                    }
+                    try {
+                        DataStore.put(symbols, classLoader, keys.open, Boolean.FALSE);
+                        setCapture(symbols, classLoader, keys, "off");
+                        Log.i(TAG, "XPAN watermark forced closed, no 65:24 style on this port");
+                    } catch (Throwable error) {
+                        Log.e(TAG, "XPAN watermark force close failed", error);
+                    }
+                }
+            });
+        });
+    }
+
+    private static volatile Keys live;
+
+    private static Keys keys(Symbols symbols) throws Throwable {
+        Keys keys = live;
+        if (keys != null) return keys;
+        synchronized (XpanWatermarkIsolation.class) {
+            if (live == null) {
+                Keys fresh = new Keys();
+                fresh.style = DataStore.key(symbols, "Keys.styleId", STYLE);
+                fresh.open = DataStore.key(symbols, "Keys.styleId", OPEN);
+                fresh.capture = DataStore.key(symbols, "Keys.styleId", SWITCH);
+                live = fresh;
+            }
+            return live;
+        }
+    }
+
+    /** Active camera mode, tracked from the mode switch; only XPAN is interesting here. */
+    private static volatile String activeMode = "";
+    private static volatile boolean writersInstalled;
+
+    private static void hookWriter(final Symbols symbols, final Keys live, String symbol) {
+        try {
+            XposedBridge.hookMethod(symbols.method(symbol), new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!XPAN_MODE.equals(activeMode) || watermarkAllowed() || forceOpen()) return;
+                    Object key = param.args[0];
+                    Object value = param.args.length > 1 ? param.args[1] : null;
+                    if (key == null || value == null) return;
+                    if (key != live.open && !String.valueOf(key).equals(String.valueOf(live.open))) {
+                        return;
+                    }
+                    if (!Boolean.TRUE.equals(value)) return;
+                    param.args[1] = Boolean.FALSE;
+                    if (!writeRefusedLogged) {
+                        writeRefusedLogged = true;
+                        Log.i(TAG, "XPAN watermark on refused while in XPAN");
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "watermark write guard failed " + symbol, error);
+        }
+    }
+
+    private static volatile boolean writeRefusedLogged;
+
+    /** Escape hatch: allow the unclamped 4:3 canvas in XPAN, i.e. the old blank-cover behaviour. */
+    private static boolean watermarkAllowed() {
+        return "1".equals(property("persist.omnicam.xpan.wmallow", "0"));
+    }
+
+    /** Debug: open the photo-watermark slot on XPAN entry instead of closing it. */
+    private static boolean forceOpen() {
+        return "1".equals(property("persist.omnicam.xpan.wmforce", "0"));
+    }
+
+    private static String property(String name, String fallback) {
+        try {
+            Class<?> type = Class.forName("android.os.SystemProperties");
+            Object value = type.getMethod("get", String.class, String.class).invoke(null, name, fallback);
+            return value == null ? fallback : String.valueOf(value);
+        } catch (Throwable error) {
+            return fallback;
+        }
+    }
+
     private static File styleJson(String dir, String style) {
         return new File(dir + "/" + style + "/" + style + ".json");
     }

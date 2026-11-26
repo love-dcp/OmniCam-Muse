@@ -36,8 +36,6 @@ import local.jiege.hook.common.Log;
  */
 final class CompositionFrameProbe {
     private static final String TAG = "CompFrame";
-    /** Camera-side class that owns captureInspirationPreviewFrame and its upload step. */
-    private static final String TARGET = "vb.c3";
     private static final String PROP_SWITCH = "persist.omnicam.compdump";
     /** The composition panel retries on its own; a handful of frames is plenty to read. */
     private static final int LIMIT = 40;
@@ -62,9 +60,11 @@ final class CompositionFrameProbe {
         }
         Class<?> target;
         try {
-            target = XposedHelpers.findClass(TARGET, classLoader);
+            /* vb.c3 (123) / wb.h3 (317) via the CompPresenter fingerprint. */
+            target = local.jiege.hook.common.Symbols.get().cls("CompPresenter");
         } catch (Throwable error) {
-            Log.i(TAG, TARGET + " not in this build, probe skipped");
+            Log.i(TAG, "composition presenter not in this build, probe skipped ("
+                    + error.getMessage() + ")");
             return;
         }
 
@@ -78,7 +78,8 @@ final class CompositionFrameProbe {
             if (uploadMethod == null) uploadMethod = method;
             hooked++;
         }
-        Log.i(TAG, hooked > 0 ? "frame probe armed on " + hooked + " bitmap method(s)" : "no upload method in " + TARGET);
+        Log.i(TAG, hooked > 0 ? "frame probe armed on " + hooked + " bitmap method(s)"
+                : "no upload method in " + target.getName());
 
         // Snapshot the capture entry once: its arguments are the real preview texture and the
         // renderer, i.e. everything a later "draw the live frame instead" fix would need.

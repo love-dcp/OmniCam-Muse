@@ -65,6 +65,18 @@ constexpr SettingIntLayout kSettingIntLayouts[] = {
      {0x3f, 0x23, 0x03, 0xd5, 0xff, 0x43, 0x02, 0xd1,
       0xfd, 0x7b, 0x06, 0xa9, 0xf6, 0x57, 0x07, 0xa9},
      0x13f46d4},
+    // Find X8 Ultra, ColorOS 17 / Camera 7.006.317. Same accessor, new place: it moved from the
+    // head of .text into the AlgoInterface body, so the 7.006.94 offset no longer lands on a
+    // function at all (the prologue check rejected it and the whole GR frame detection went dead:
+    // every GR capture was then graded with the master-colour LMT while the viewfinder showed the
+    // GR tree). Found by disassembling getLmtParamsV1: the accessor is the call that reads
+    // [frame + 0x8110] and is handed a stack key plus a zero fallback.
+    //   paciasp; sub sp, sp, #0x80; stp x29, x30, [sp, #0x50]; str x21, [sp, #0x60]
+    {// Find X8 Ultra (PKJ110)
+     "PKJ110/7.006.317",
+     {0x3f, 0x23, 0x03, 0xd5, 0xff, 0x03, 0x02, 0xd1,
+      0xfd, 0x7b, 0x05, 0xa9, 0xf5, 0x33, 0x00, 0xf9},
+     0x1420188},
 };
 
 int (*getSettingInt)(void *settings, const void *key, int fallback);
@@ -147,6 +159,36 @@ int64_t nowMs() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
+// The Java half writes the camera's own GrSupport.isGrMode() verdict to this file whenever it
+// changes (GrEffectTransport). Reading it costs one fopen per 400 ms at most.
+constexpr char kGrModeFlag[] = "/data/user/0/com.oplus.camera/files/jiege/gr_mode";
+constexpr int64_t kGrFlagCheckMs = 400;
+std::mutex grFlagMutex;
+bool grFlagValue = false;
+std::atomic<int64_t> grFlagCheckedAt{0};
+
+bool grFlagActive() {
+    const int64_t now = nowMs();
+    if (now - grFlagCheckedAt.load(std::memory_order_relaxed) < kGrFlagCheckMs) {
+        std::lock_guard<std::mutex> lock(grFlagMutex);
+        return grFlagValue;
+    }
+    grFlagCheckedAt.store(now, std::memory_order_relaxed);
+    bool on = false;
+    if (FILE *file = std::fopen(kGrModeFlag, "r")) {
+        char text[8] = {0};
+        size_t read = std::fread(text, 1, sizeof(text) - 1, file);
+        std::fclose(file);
+        on = read > 0 && text[0] == '1';
+    }
+    std::lock_guard<std::mutex> lock(grFlagMutex);
+    if (on != grFlagValue) {
+        grFlagValue = on;
+        __android_log_print(ANDROID_LOG_INFO, kTag, "GR mode flag -> %d", on ? 1 : 0);
+    }
+    return on;
+}
+
 // The preview table the Java half currently has on screen (MasterColor writes the directory there
 // while a master look is active and deletes it otherwise). A stream frame with no profile is given
 // this tree, because that is the look the user is looking at and the one the cover will carry.
@@ -215,6 +257,15 @@ std::string freshMasterDir() {
 }
 
 bool isGrFrame(void *frame) {
+    // The Java half publishes the camera's own GrSupport.isGrMode() verdict. It is checked first:
+    // gr_effect_size is the precise signal, but it is only present on a firmware whose APS really
+    // carries GR (7.006.317 answers 0 for it even while the GR screen is up), and on such a build
+    // the accessor answer alone sent every GR capture down the master-colour path -- the viewfinder
+    // showed the GR tree while the file came out with the 大师色彩 look.
+    if (grFlagActive()) {
+        lastGrFrameMs.store(nowMs(), std::memory_order_relaxed);
+        return true;
+    }
     // A build whose getSettingInt fingerprint did not match has no accessor: there is no way to
     // tell a GR frame apart, so none is claimed (the GR LUT tree is not swapped).
     if (!getSettingInt) return false;
@@ -297,24 +348,17 @@ void getVigParams(void *parameters, void *frame, void *planes) {
     if (isGrFrame(frame)) static_cast<uint8_t *>(parameters)[0x1a] = 0;
 }
 
-int withGrCaptureMode(int (*operation)(void *, int), void *frame, int stage) {
-    auto *mode = reinterpret_cast<uint32_t *>(static_cast<char *>(frame) + 0x18);
-    uint32_t previous = *mode;
-    *mode = kGrCaptureMode;
-    int result = operation(frame, stage);
-    *mode = previous;
-    return result;
-}
-
 int filterProcessV2(void *frame, int stage) {
     if (!isGrFrame(frame)) return originalFilterProcessV2(frame, stage);
-    // Registration happens before gr_effect_size is attached, so the V1 node's whole lifecycle
-    // is scoped to this call, where the frame is known to be GR. The per-image object is
-    // consumed after capture; session and request modes are untouched.
-    int registration = withGrCaptureMode(filterRegisterV1, frame, stage);
+    // Registration happens before gr_effect_size (or the Java-side GR flag) is attached, so the V1
+    // node's whole lifecycle is scoped to this call. The frame keeps the capture mode it already
+    // has: a firmware with a real GR mode already reports 37, and on this port GR runs on the
+    // professional pipeline (mode 33) -- forcing 37 there hands the vendor filter a mode it does
+    // not know, which is the same mismatch that left gr_effect_size unavailable in the first place.
+    int registration = filterRegisterV1(frame, stage);
     if (registration != 0) return registration;
-    int result = withGrCaptureMode(filterProcessV1, frame, stage);
-    withGrCaptureMode(filterUnregisterV1, frame, stage);
+    int result = filterProcessV1(frame, stage);
+    filterUnregisterV1(frame, stage);
     return result;
 }
 
@@ -382,7 +426,7 @@ void applyLmtPath(void *object) {
         // the master tree that is actually in use; fall back to the host tree once no master tree
         // has been handed out for a while, and to nothing at all while GR is still running.
         uint32_t mode = lastModeSeen.load(std::memory_order_relaxed);
-        bool grMode = mode == kGrCaptureMode;
+        bool grMode = mode == kGrCaptureMode || grFlagActive();
         // While the camera is still feeding GR frames (or nothing has been seen yet and a GR frame
         // has just gone by) the tree is left alone: it belongs to that capture.
         bool leaveAlone = grMode ||

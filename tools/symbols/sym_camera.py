@@ -218,7 +218,8 @@ add(
  # stable fields of non-obfuscated classes (name + type checked)
  Lut3d__load=M(**{"in": "com.oplus.camera.common.utils.Lut3dDataManager"}, params=["int", "int", S], ret="boolean", strings=["initializeBasicToneEnv, init result "]),
  Lut3d__mode=F(**{"in": "com.oplus.camera.common.utils.Lut3dDataManager"}, name="P", type=S),
- Lut3d__index=F(**{"in": "com.oplus.camera.common.utils.Lut3dDataManager"}, name="M", type="int"),
+ # Lut3d.index (field M) removed: unused by module code and indistinguishable from O by
+ # fingerprint (identical writer/reader sets); the diagnostic reader probes names at runtime.
  # Session-teardown owner (log tag OCAM_DeviceProcessor, real class lm.f on 7.006.123): closeCamera
  # (obfuscated k(ZZ)V) runs on every camera close - gallery hand-over, recording stop (session
  # re-create) and activity teardown. The video izoom guard hooks it as the most reliable "session

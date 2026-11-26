@@ -484,15 +484,18 @@ final class GrMasterLiveLutDiagnostic {
     private static String describeManager(Object manager) {
         if (manager == null) return "manager=null";
         try {
+            /* 317 deleted one String field, shifting the middle block: combine M->N,
+             * cap O->P, name P->Q, initialized N->O, palette W->X, hdr X->Y.
+             * t (size), c (basic table) and l (holder) are unchanged. */
             float[] basic = (float[]) XposedHelpers.getObjectField(manager, "c");
             int[] holder = (int[]) XposedHelpers.getObjectField(manager, "l");
             return "inst=" + Integer.toHexString(System.identityHashCode(manager))
-                + ",combine=" + XposedHelpers.getIntField(manager, "M")
-                + ",cap=" + XposedHelpers.getIntField(manager, "O")
-                + ",name=" + XposedHelpers.getObjectField(manager, "P")
-                + ",initialized=" + XposedHelpers.getBooleanField(manager, "N")
-                + ",palette=" + XposedHelpers.getBooleanField(manager, "W")
-                + ",hdr=" + XposedHelpers.getBooleanField(manager, "X")
+                + ",combine=" + intFieldAny(manager, "M", "N")
+                + ",cap=" + intFieldAny(manager, "O", "P")
+                + ",name=" + objectFieldAny(manager, "P", "Q")
+                + ",initialized=" + boolFieldAny(manager, "N", "O")
+                + ",palette=" + boolFieldAny(manager, "W", "X")
+                + ",hdr=" + boolFieldAny(manager, "X", "Y")
                 + ",size=" + XposedHelpers.getIntField(manager, "t")
                 + ",holder=" + (holder != null && holder.length != 0 ? holder[0] : -1)
                 + "," + describeTable(basic);
@@ -648,6 +651,41 @@ final class GrMasterLiveLutDiagnostic {
             + "{size=" + intField(texture, "b")
             + ",depth=" + intField(texture, "z")
             + "," + describeTable(raw) + "}";
+    }
+
+    /** First readable int instance field among the candidate names ("?" when none). */
+    private static String intFieldAny(Object owner, String... names) {
+        for (String name : names) {
+            try {
+                return String.valueOf(XposedHelpers.getIntField(owner, name));
+            } catch (Throwable ignored) {
+                /* try the next candidate */
+            }
+        }
+        return "?";
+    }
+
+    private static String boolFieldAny(Object owner, String... names) {
+        for (String name : names) {
+            try {
+                return String.valueOf(XposedHelpers.getBooleanField(owner, name));
+            } catch (Throwable ignored) {
+                /* try the next candidate */
+            }
+        }
+        return "?";
+    }
+
+    private static String objectFieldAny(Object owner, String... names) {
+        for (String name : names) {
+            try {
+                Object value = XposedHelpers.getObjectField(owner, name);
+                if (value instanceof String) return (String) value;
+            } catch (Throwable ignored) {
+                /* try the next candidate */
+            }
+        }
+        return "?";
     }
 
     private static String describeTable(Object value) {

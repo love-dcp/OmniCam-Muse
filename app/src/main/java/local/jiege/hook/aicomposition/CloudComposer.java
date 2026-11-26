@@ -53,7 +53,7 @@ final class CloudComposer {
      */
     private static final int MAX_CANDIDATES = 2;
     private static final String TIGHT_DESC =
-        "视觉美学模型建议拉近取景，突出主体细节，弱化背景干扰。";
+        "云端识别 · 再靠近一档，主体收进三分线，画面更紧凑。";
 
     interface Listener {
         /** @param json camera-ready composition JSON, or null when the model had nothing to say. */
@@ -322,28 +322,42 @@ final class CloudComposer {
         return new Crop(x, y, w, h, zoom, ratio, false);
     }
 
-    /** Card copy for one crop: the model's ratio label plus where in the frame its box sits. */
+    /**
+     * The advice line for one crop, written from the box the model actually returned.
+     *
+     * <p>It used to be a canned sentence per ratio label, which read the same for every scene --
+     * "提示也不应该是固定的". Everything here is measured off the crop: how tight it is, which side of
+     * the frame it puts the subject on, and the ratio the model asked for. Two different scenes
+     * therefore get two different lines, and the "云端识别" prefix is the only fixed part, so the
+     * channel is still readable at a glance.
+     */
     private static String describe(Crop crop) {
-        // The model labels each box with an output ratio, not with a judgement; "origin" means it
-        // kept the frame's own ratio, which is what this camera already shoots. Rewriting that as
-        // "suggests origin composition" reads like a bug.
-        String lead;
+        String tension;
+        if (crop.zoom <= 1.15) {
+            tension = "给主体所处的环境留足空间";
+        } else if (crop.zoom < 2.2) {
+            tension = "主体与环境各占一半";
+        } else {
+            tension = "把画面收到主体身上";
+        }
+        int cx = crop.x + crop.w / 2;
+        String place = cx < REF_W * 2 / 5 ? "主体偏左，前方留出空间"
+            : cx > REF_W * 3 / 5 ? "主体偏右，视线方向有空间"
+            : "主体居中，两侧留白均匀";
+        String framing;
         switch (crop.ratio) {
-            case "origin":
-                lead = "视觉美学模型建议保持当前比例，主体落在三分线上";
-                break;
             case "1:1":
-                lead = "视觉美学模型建议方形取景，主体居中偏三分线";
+                framing = "方形取景，";
                 break;
             case "4:3":
             case "16:9":
-                lead = "视觉美学模型建议更宽的取景，容纳更多环境";
+                framing = "取景放得更宽，";
                 break;
             default:
-                lead = "视觉美学模型给出的取景建议：主体落在三分线附近";
+                framing = "";
                 break;
         }
-        return lead + "。";
+        return "云端识别 · " + framing + tension + "，" + place + "。";
     }
 
     /** "取景中心偏左、居中高度" -- the second line of the card, read straight off the box. */
@@ -485,24 +499,21 @@ final class CloudComposer {
      * the smallest tightening that still counts as a composition.
      */
     private static double zoomFloor() {
+        // 1.0 means "do not tighten": the model's own box is the suggestion, and rewriting it was
+        // the reported "只是按主体比例放大，不是按云端建议构图". The floor stays as an escape hatch
+        // (persist.omnicam.comp.zoom) for a box that only shaves the frame, which the camera reads
+        // as "no suggestion" -- but the default now leaves the answer alone.
         try {
-            double value = Double.parseDouble(prop("persist.omnicam.comp.zoom", "3.0"));
+            double value = Double.parseDouble(prop("persist.omnicam.comp.zoom", "1.0"));
             if (value >= 1.0 && value <= MAX_ZOOM) return value;
         } catch (Throwable ignored) {
             // fall through to the default
         }
-        return 3.0;
+        return 1.0;
     }
 
     private static String prop(String key, String fallback) {
-        try {
-            Class<?> system = Class.forName("android.os.SystemProperties");
-            Method get = system.getMethod("get", String.class, String.class);
-            Object value = get.invoke(null, key, fallback);
-            return value == null ? fallback : String.valueOf(value).trim();
-        } catch (Throwable error) {
-            return fallback;
-        }
+        return local.jiege.hook.common.Props.get(key, fallback);
     }
 
     /** Unused placeholder to keep Rect import meaningful for future cropping. */

@@ -35,6 +35,36 @@ public final class RealsceneProbe {
     private static final String PROP = "persist.omnicam.realprobe";
     private static final int LIMIT = 12;
 
+    /* Composition-engine classes are R8-renamed per build (123 vb.c3/wb.m/wb.r/ub.d/ub.e ->
+     * 317 wb.h3/xb.p/xb.t/vb.d/vb.e); they resolve through the fingerprint symbols instead. */
+    private static Class<?> presenter(ClassLoader loader) {
+        return Symbols.get().cls("CompPresenter");
+    }
+
+    private static Class<?> worker(ClassLoader loader) {
+        return Symbols.get().cls("CompWorker");
+    }
+
+    private static Class<?> manager(ClassLoader loader) {
+        return Symbols.get().cls("CompManager");
+    }
+
+    private static Class<?> results(ClassLoader loader) {
+        return Symbols.get().cls("CompResults");
+    }
+
+    /** ub.e$a -> vb.e$a: positional inner class of the frame-point holder. */
+    private static Class<?> trackItem(ClassLoader loader) {
+        Class<?> outer = Symbols.get().cls("CompFramePoint");
+        return XposedHelpers.findClass(outer.getName() + "$a", loader);
+    }
+
+    /** vb.c3$c -> wb.h3$c: positional inner class of the presenter. */
+    private static Class<?> cropConsumer(ClassLoader loader) {
+        return XposedHelpers.findClass(
+                Symbols.get().cls("CompPresenter").getName() + "$c", loader);
+    }
+
     private static volatile boolean reportedMissing;
     private static int frames;
     private static int streams;
@@ -64,6 +94,7 @@ public final class RealsceneProbe {
         Log.guard(TAG, "queue", () -> hookQueue(classLoader));
         Log.guard(TAG, "mode", () -> hookMode(classLoader));
         Log.guard(TAG, "gates", () -> hookGates(classLoader));
+        Log.guard(TAG, "cards", () -> hookSuggestionCards(classLoader));
         Log.guard(TAG, "button", () -> hookButton(classLoader));
         Log.guard(TAG, "rearm", RealsceneProbe::startRearm);
         Log.guard(TAG, "shutter", RealsceneProbe::hookShutter);
@@ -73,9 +104,11 @@ public final class RealsceneProbe {
         Log.guard(TAG, "antispam", () -> hookAntiSpam(classLoader));
         Log.guard(TAG, "aiunit", () -> hookAiunitAvailability(classLoader));
         Log.guard(TAG, "trackstatus", () -> hookTrackStatus(classLoader));
+        Log.guard(TAG, "trackgate", () -> hookTrackGate(classLoader));
         Log.guard(TAG, "zoomskip", () -> hookZoomSkip(classLoader));
         Log.guard(TAG, "croptrace", () -> hookCropTrace(classLoader));
         Log.guard(TAG, "touch", RealsceneProbe::hookTouch);
+        Log.guard(TAG, "overlay", RealsceneProbe::hookOverlayPassThrough);
         Log.guard(TAG, "pause", RealsceneProbe::hookPause);
         Log.i(TAG, "subject following " + (following() ? "on" : "off"));
         Log.i(TAG, "vision model " + (CloudComposer.enabled() ? "on" : "off")
@@ -177,21 +210,16 @@ public final class RealsceneProbe {
         }
     }
 
-    /** vb.c3.F2 decides, per preview frame, whether the composition worker is scheduled. */
+    /** vb.c3.F2 (123) / wb.h3.L2 (317) decides, per preview frame, whether the worker is scheduled. */
     private static void hookFrame(ClassLoader classLoader) {
-        Class<?> owner = XposedHelpers.findClassIfExists("vb.c3", classLoader);
-        if (owner == null) {
-            Log.i(TAG, "vb.c3 not in this build");
-            return;
-        }
-        for (Method method : owner.getDeclaredMethods()) {
-            if (!"F2".equals(method.getName()) || method.getParameterCount() != 5) continue;
+        try {
+            Method method = Symbols.get().method("CompPresenter.frameScheduler");
             method.setAccessible(true);
             XposedBridge.hookMethod(method, FRAME);
-            Log.i(TAG, "F2 observed");
-            return;
+            Log.i(TAG, "frame scheduler hooked (" + method.getName() + ")");
+        } catch (Throwable error) {
+            Log.i(TAG, "frame scheduler unavailable (" + error.getMessage() + ")");
         }
-        Log.i(TAG, "F2 not found");
     }
 
     private static final XC_MethodHook FRAME = new XC_MethodHook() {
@@ -220,6 +248,11 @@ public final class RealsceneProbe {
             // No pinning and no re-arming: both made the camera compose on its own at launch and
             // again after every shutter. The camera decides when to ask; answering is enough.
             if (index % 60 != 1) return;
+            sweepCards(host);
+            // The per-frame trace is only worth its log traffic while a composition is running;
+            // outside one every line said the same thing (phase=IDLE) and the camera writes
+            // thousands of frames a minute.
+            if (sessionAt == 0) return;
             Object state = field(host, "M");
             Log.i(TAG, "F2 #" + index
                 + " W1=" + bool(host, "W1") + " t2=" + bool(host, "t2")
@@ -233,7 +266,7 @@ public final class RealsceneProbe {
 
     /** wb.m is the runnable that carries the buffers into wb.r.f. */
     private static void hookQueue(ClassLoader classLoader) {
-        Class<?> worker = XposedHelpers.findClassIfExists("wb.m", classLoader);
+        Class<?> worker = worker(classLoader);
         if (worker != null) {
             for (Method method : worker.getDeclaredMethods()) {
                 if (!"run".equals(method.getName()) || method.getParameterCount() != 0) continue;
@@ -245,7 +278,7 @@ public final class RealsceneProbe {
                 });
             }
         }
-        Class<?> manager = XposedHelpers.findClassIfExists("wb.r", classLoader);
+        Class<?> manager = manager(classLoader);
         if (manager != null) {
             for (Method method : manager.getDeclaredMethods()) {
                 if (!"b".equals(method.getName()) || method.getParameterCount() != 1) continue;
@@ -259,6 +292,410 @@ public final class RealsceneProbe {
             }
         }
         Log.i(TAG, "queue hooks done");
+    }
+
+    /**
+     * Removes the two suggestion thumbnails ("灵感构图 / 灵感推荐") from the composition panel.
+     *
+     * <p>The framing is applied to the preview outright now, so the cards only repeat what the
+     * viewfinder already shows. On 7.006.317 the panel is a {@code RecyclerView} whose id is
+     * {@code inspiration_image_selector_recycler_view} and whose items are plain
+     * {@code inspiration_image_selector_*} views: the 123 build's {@code ai_composition_guide_*}
+     * ids still exist in the R class but no view on screen carries them, which is why the earlier
+     * id list matched nothing. Ids are therefore resolved from the running app's resources (both
+     * naming schemes, by name) instead of from a reflective R class, and the container itself is
+     * hidden rather than the cards.
+     */
+    private static final String[] CARD_ID_NAMES = {
+        // 7.006.317
+        "inspiration_image_selector_recycler_view",
+        "inspiration_image_selector_content",
+        "inspiration_image_selector_thumb",
+        "inspiration_image_selector_selected_border",
+        // 7.0.0 (123) layout, kept for the older build
+        "ai_composition_guide_selection_container",
+        "ai_composition_guide_media_container",
+        "ai_composition_guide_real_scene_card",
+        "ai_composition_guide_inspiration_card",
+        "ai_composition_guide_real_scene_image",
+        "ai_composition_guide_inspiration_image",
+    };
+
+    /** Ids of the suggestion cards; resolved lazily, read by the periodic sweep as well. */
+    private static volatile java.util.Set<Integer> cardIds;
+
+    /**
+     * Which channel produced the answer on screen, "云端" or "端侧".
+     *
+     * <p>The stock panel says 灵感构图 and nothing else, so a cloud answer and a device answer look
+     * identical even though only one of them uploaded a frame. The card copy carries the channel
+     * ("端侧识别 · ..." on the device path), but the cards are hidden on this build, so the only
+     * place left to say it is the panel's own title.
+     */
+    private static volatile String compositionSource;
+
+    private static void noteSource(String json) {
+        if (json == null) return;
+        if (json.indexOf("omnicam-cloud") >= 0) compositionSource = "云端";
+        else if (json.indexOf("omnicam-follow") >= 0) compositionSource = "端侧";
+        hintText = hintOf(json);
+    }
+
+    /**
+     * The suggestion the answer carries, e.g. "端侧识别 · 保留主体所处环境，主体落在三分线上…".
+     *
+     * <p>Only the description goes into the panel's hint line, not the composition title: the panel
+     * already carries its own "灵感构图" label above it, and prefixing the title again pushed the
+     * line long enough to wrap ("环境构图 · 端侧识别 · …"), while the original hint was one sentence
+     * that starts with the channel word.
+     */
+    private static String hintOf(String json) {
+        if (json == null || json.indexOf("compositionDesc") < 0) return null;
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(json);
+            org.json.JSONArray crops = root.optJSONArray("crops");
+            if (crops == null || crops.length() == 0) return null;
+            org.json.JSONObject desc = crops.getJSONObject(0).optJSONObject("compositionDesc");
+            if (desc == null) return null;
+            String title = desc.optString("title", "").trim();
+            String line = desc.optString("desc1", "").trim();
+            if (line.isEmpty()) return title.isEmpty() ? null : title;
+            // The answer carries a wider framing plus a tighter alternative, and the cards that used
+            // to show the second one are hidden on this build, so the hint would stop at "留白更
+            // 自然" and never say what the other option is. The original line ended with that
+            // suggestion ("…，拉近一档更突出主体。"), so it is carried here instead.
+            if (crops.length() > 1 && !line.contains("拉近一档")) {
+                line = line.endsWith("。")
+                    ? line.substring(0, line.length() - 1) + "，拉近一档更突出主体。"
+                    : line + "，拉近一档更突出主体。";
+            }
+            return line;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** The suggestion currently in force, or null when nothing has been answered yet. */
+    private static volatile String hintText;
+
+    /** Our own suggestion bar; see {@link #applyHint}. */
+    private static volatile android.widget.TextView hintBar;
+
+    /**
+     * Puts the answer's suggestion on screen, in a bar the module owns.
+     *
+     * <p>Reusing the stock status line was a dead end. On this build the composition panel puts the
+     * two card titles ("灵感构图 / 灵感推荐") in {@code camera_indicator_hint_panel} and the TextView
+     * that still holds "请保持手机稳定" is detached from the hierarchy, so {@code setText} succeeded,
+     * the log said {@code panel hint -> ...}, and the screen stayed empty -- exactly the "提示没有
+     * 出来" report. The bar is therefore ours: a black rounded line laid over the preview, the same
+     * shape the stock panel used to show a suggestion in.
+     */
+    private static void applyHint(android.view.View root, String text) {
+        if (root == null || text == null) return;
+        android.widget.TextView bar = hintBar;
+        if (bar == null || !bar.isAttachedToWindow()) {
+            bar = buildHintBar(root);
+            if (bar == null) return;
+            hintBar = bar;
+            hintShown = null;
+        }
+        // The sweep runs every ~2s while the panel is open, so an unconditional show would undo the
+        // five-second timeout. Only a *new* suggestion is allowed back on screen; the same one stays
+        // down once its time is up.
+        if (text.equals(hintShown)) return;
+        hintShown = text;
+        bar.setText(text);
+        bar.setVisibility(android.view.View.VISIBLE);
+        bar.removeCallbacks(hintTimeout);
+        bar.postDelayed(hintTimeout, HINT_LINGER);
+        Log.i(TAG, "panel hint -> " + text);
+    }
+
+    /** How long a suggestion stays on screen before it gets out of the way of the composition. */
+    private static final long HINT_LINGER = 5000L;
+
+    /** The suggestion currently displayed, so a repeated sweep does not bring it back. */
+    private static volatile String hintShown;
+
+    private static final Runnable hintTimeout = () -> {
+        android.widget.TextView bar = hintBar;
+        if (bar != null) bar.setVisibility(android.view.View.GONE);
+        Log.i(TAG, "panel hint timed out");
+    };
+
+    /** Pixel size of the panel's own titles; 13sp is what this panel uses if they are not up yet. */
+    private static float tabTextSize(android.view.View view) {
+        android.widget.TextView title = findTabTitle(view);
+        if (title != null && title.getTextSize() > 0f) return title.getTextSize();
+        return android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,
+            13f, view.getResources().getDisplayMetrics());
+    }
+
+    private static android.widget.TextView findTabTitle(android.view.View view) {
+        if (view instanceof android.widget.TextView) {
+            CharSequence current = ((android.widget.TextView) view).getText();
+            String now = current == null ? "" : current.toString().trim();
+            if ("灵感构图".equals(now) || "灵感推荐".equals(now)) {
+                return (android.widget.TextView) view;
+            }
+        }
+        if (!(view instanceof android.view.ViewGroup)) return null;
+        android.view.ViewGroup group = (android.view.ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            android.widget.TextView found = findTabTitle(group.getChildAt(i));
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /** Builds and attaches the bar. Called on the main thread only. */
+    private static android.widget.TextView buildHintBar(android.view.View root) {
+        try {
+            android.view.ViewGroup parent = null;
+            if (root instanceof android.view.ViewGroup) {
+                android.view.View content = root.findViewById(android.R.id.content);
+                parent = content instanceof android.view.ViewGroup
+                    ? (android.view.ViewGroup) content
+                    : (android.view.ViewGroup) root;
+            }
+            if (parent == null) return null;
+            android.content.Context context = parent.getContext();
+            float density = context.getResources().getDisplayMetrics().density;
+            android.widget.TextView bar = new android.widget.TextView(context);
+            bar.setTextColor(0xFFFFFFFF);
+            // Same size as the "灵感构图 / 灵感推荐" titles right above it -- read off one of them,
+            // because a hard-coded size always ends up either shouting or squinting.
+            bar.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tabTextSize(parent.getRootView()));
+            bar.setGravity(android.view.Gravity.CENTER);
+            bar.setLineSpacing(0f, 1.15f);
+            int padH = Math.round(18f * density);
+            int padV = Math.round(9f * density);
+            bar.setPadding(padH, padV, padH, padV);
+            android.graphics.drawable.GradientDrawable background =
+                new android.graphics.drawable.GradientDrawable();
+            background.setColor(0xB3000000);
+            background.setCornerRadius(Math.round(14f * density));
+            bar.setBackground(background);
+            // Just under the card titles, clear of the viewfinder's own controls. 148dp is where
+            // the stock suggestion line sat on this 1080x2376 panel.
+            android.widget.FrameLayout.LayoutParams params = new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.topMargin = Math.round(148f * density);
+            int side = Math.round(20f * density);
+            params.leftMargin = side;
+            params.rightMargin = side;
+            parent.addView(bar, params);
+            Log.i(TAG, "hint bar attached under content (" + parent.getClass().getSimpleName()
+                + ", text " + bar.getTextSize() + "px)");
+            return bar;
+        } catch (Throwable error) {
+            Log.e(TAG, "hint bar unavailable", error);
+            return null;
+        }
+    }
+
+    /** Takes the suggestion off the screen when the framing it described is gone. */
+    private static void hideHintBar() {
+        final android.widget.TextView bar = hintBar;
+        if (bar == null) return;
+        bar.post(() -> bar.setVisibility(android.view.View.GONE));
+    }
+
+    private static void hookSuggestionCards(ClassLoader classLoader) {
+        if (!"1".equals(prop("persist.omnicam.comp.hidecards", "1"))) return;
+        try {
+            XposedBridge.hookAllMethods(android.view.View.class, "setVisibility", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    android.view.View view = (android.view.View) param.thisObject;
+                    java.util.Set<Integer> ids = resolveCardIds(view.getContext());
+                    if (ids.isEmpty() || !ids.contains(view.getId())) return;
+                    if (param.args[0] instanceof Integer
+                        && (Integer) param.args[0] != android.view.View.GONE) {
+                        param.args[0] = android.view.View.GONE;
+                    }
+                }
+            });
+            XposedBridge.hookAllMethods(android.view.ViewGroup.class, "addView", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    // Inflating one screen adds hundreds of views, and recursing into each subtree
+                    // made that quadratic on every screen build. Outside a composition there is
+                    // nothing to hide, so this bails out before touching anything.
+                    if (sessionAt == 0) return;
+                    for (Object arg : param.args) {
+                        if (!(arg instanceof android.view.View)) continue;
+                        android.view.View view = (android.view.View) arg;
+                        java.util.Set<Integer> ids = resolveCardIds(view.getContext());
+                        // Only the added view itself is checked; its children are reached by the
+                        // sweep if they matter, which is once per two seconds instead of once per
+                        // inflated view.
+                        if (!ids.isEmpty() && ids.contains(view.getId())
+                            && view.getVisibility() != android.view.View.GONE) {
+                            view.setVisibility(android.view.View.GONE);
+                            continue;
+                        }
+                        if (holdsImage(view)) armPreviewCardHide(view);
+                    }
+                }
+            });
+            Log.i(TAG, "suggestion card hooks armed (" + CARD_ID_NAMES.length + " names)");
+        } catch (Throwable error) {
+            Log.i(TAG, "suggestion cards unavailable: " + error);
+        }
+    }
+
+    /**
+     * Resolves the card ids from the running camera's resources, once.
+     *
+     * <p>By name and through {@code Resources} on purpose: the ids live in the app's own package
+     * ({@code com.oplus.camera:id/...}) and a reflective R class would tie this to one module's
+     * non-transitive R.
+     */
+    private static java.util.Set<Integer> resolveCardIds(android.content.Context context) {
+        java.util.Set<Integer> cached = cardIds;
+        if (cached != null) return cached;
+        if (context == null) return java.util.Collections.emptySet();
+        java.util.Set<Integer> ids = new java.util.HashSet<>();
+        try {
+            android.content.res.Resources res = context.getResources();
+            for (String name : CARD_ID_NAMES) {
+                int id = res.getIdentifier(name, "id", "com.oplus.camera");
+                if (id != 0) ids.add(id);
+            }
+        } catch (Throwable error) {
+            Log.i(TAG, "suggestion card ids unavailable: " + error);
+            return java.util.Collections.emptySet();
+        }
+        if (ids.isEmpty()) return java.util.Collections.emptySet();
+        cardIds = ids;
+        Log.i(TAG, "suggestion card ids resolved: " + ids.size() + "/" + CARD_ID_NAMES.length);
+        return ids;
+    }
+
+    /**
+     * Sweeps the activity's view tree for the suggestion cards.
+     *
+     * <p>The hooks catch visibility changes and additions, but the cards are animated into a
+     * {@code RecyclerView} that is often already attached, so nothing guarantees a
+     * {@code setVisibility} call we can answer. This runs every 60 preview frames (~2s) while the
+     * panel is open and puts the container away directly.
+     */
+    private static void sweepCards(Object presenter) {
+        // Nothing to sweep outside a composition: no panel, no cards, and no hint that could have
+        // been decided. This ran on every preview pass regardless, walking the whole decor tree
+        // (and every child of it) twice a second for an empty result -- pure jank on the main
+        // thread while the viewfinder was trying to draw.
+        if (sessionAt == 0) return;
+        Object activity = field(presenter, "f");
+        if (!(activity instanceof android.app.Activity)) return;
+        android.app.Activity host = (android.app.Activity) activity;
+        final android.view.View root = host.getWindow().getDecorView();
+        final String hint = hintText;
+        if (hint != null) {
+            // The frame hook runs off the main thread; touching a TextView from there is not safe.
+            root.post(() -> applyHint(root, hint));
+        }
+        java.util.Set<Integer> ids = resolveCardIds(host);
+        if (!ids.isEmpty()) hideCards(root, ids);
+        hideFloatingPreviews(root);
+    }
+
+    /**
+     * Puts away the small preview cards the stock panel floats over the viewfinder.
+     *
+     * <p>Two of them sit at the left edge (51,1229 .. 216,1449 on this 1080x2376 panel), each an
+     * anonymous {@code FrameLayout} holding an image of the framing it suggests. They have no
+     * resource id and no class of their own -- the stock code simply calls {@code addView} on the
+     * camera's full-screen overlay container -- so they are matched by shape instead: a portrait
+     * card of at most a third of the screen's width, inside a full-screen container, holding an
+     * image. Square icons (flash, gallery thumbnail, composition switch) and the label rows are
+     * excluded by the same test, and it only runs while a composition session is live.
+     */
+    private static void hideFloatingPreviews(android.view.View root) {
+        if (!"1".equals(prop("persist.omnicam.comp.hidecards", "1"))) return;
+        if (sessionAt == 0) return;
+        int screenW = root.getWidth();
+        int screenH = root.getHeight();
+        if (screenW <= 0 || screenH <= 0) return;
+        hideSmallCards(root, screenW, screenH);
+    }
+
+    private static void hideSmallCards(android.view.View view, int screenW, int screenH) {
+        if (!(view instanceof android.view.ViewGroup)) return;
+        android.view.ViewGroup group = (android.view.ViewGroup) view;
+        boolean fullScreen = group.getWidth() >= screenW - 2 && group.getHeight() >= screenH - 2;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            android.view.View child = group.getChildAt(i);
+            if (fullScreen && isPreviewCard(child, screenW)) {
+                if (child.getVisibility() != android.view.View.GONE) {
+                    child.setVisibility(android.view.View.GONE);
+                    Log.i(TAG, "preview card hidden: " + child.getWidth() + "x" + child.getHeight()
+                        + " @" + child.getLeft() + "," + child.getTop());
+                }
+                continue;
+            }
+            hideSmallCards(child, screenW, screenH);
+        }
+    }
+
+    /**
+     * Puts a preview card away the moment it is measured.
+     *
+     * <p>The periodic sweep hides it two seconds later, which still let the first card of a session
+     * flash on screen ("第一次拍时还出现过一次"). A new child has no size yet when {@code addView}
+     * returns, so the size test has to wait for its first layout -- which is exactly when it would
+     * become visible.
+     */
+    private static void armPreviewCardHide(final android.view.View view) {
+        if (!"1".equals(prop("persist.omnicam.comp.hidecards", "1"))) return;
+        view.addOnLayoutChangeListener((v, left, top, right, bottom,
+                                        oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (sessionAt == 0) return;
+            android.view.View root = v.getRootView();
+            if (root == null || root.getWidth() <= 0) return;
+            if (!isPreviewCard(v, root.getWidth())) return;
+            v.setVisibility(android.view.View.GONE);
+            Log.i(TAG, "preview card hidden on layout: " + v.getWidth() + "x" + v.getHeight()
+                + " @" + left + "," + top);
+        });
+    }
+
+    /** A portrait card of at most a third of the screen's width that holds an image. */
+    private static boolean isPreviewCard(android.view.View view, int screenW) {
+        int w = view.getWidth();
+        int h = view.getHeight();
+        if (w < 80 || w > screenW / 3 || h <= w || h > screenW / 2) return false;
+        android.view.ViewParent parent = view.getParent();
+        android.view.View root = view.getRootView();
+        if (!(parent instanceof android.view.View) || root == null) return false;
+        android.view.View container = (android.view.View) parent;
+        if (container.getWidth() < root.getWidth() - 2
+            || container.getHeight() < root.getHeight() - 2) {
+            return false;
+        }
+        return holdsImage(view);
+    }
+
+    private static boolean holdsImage(android.view.View view) {
+        if (view instanceof android.widget.ImageView) return true;
+        if (!(view instanceof android.view.ViewGroup)) return false;
+        android.view.ViewGroup group = (android.view.ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            if (holdsImage(group.getChildAt(i))) return true;
+        }
+        return false;
+    }
+
+    /** Hides the matched ids in this subtree, if any of them is there. */
+    private static void hideCards(android.view.View view, java.util.Set<Integer> ids) {
+        if (ids.contains(view.getId())) {
+            if (view.getVisibility() != android.view.View.GONE) view.setVisibility(android.view.View.GONE);
+            return;
+        }
+        if (!(view instanceof android.view.ViewGroup)) return;
+        android.view.ViewGroup group = (android.view.ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) hideCards(group.getChildAt(i), ids);
     }
 
     /**
@@ -313,6 +750,7 @@ public final class RealsceneProbe {
                 // the photo is dropped with no message and the preview stays stuck on "saving".
                 // Answering no to the apply and zoom gates keeps the shutter on the ordinary path.
                 // b() is idle detection, not an action, so it is left alone.
+                if (value && "c()".equals(label)) promoteAlign(param.thisObject, "gate");
                 if (value && !label.startsWith("b") && compositionBlocked(label)) {
                     param.setResult(Boolean.FALSE);
                 }
@@ -367,13 +805,18 @@ public final class RealsceneProbe {
     private static boolean compositionMode() {
         String mode = modeName;
         if (mode == null || mode.isEmpty() || COMPOSITION_MODES.contains(mode)) return true;
-        // 大师 (professional) runs the same stills pipeline as 照片 -- one capture, one JPEG, no
-        // video encode -- so composition has a fair chance of working there. It is opened on
-        // request (persist.omnicam.comp.master defaults to 1) and can be closed again with
-        // persist.omnicam.comp.master=0 if its shutter turns out to reject the zoom result.
+        // Only a name that came from the live BaseMode may close the gate. Names recorded off a
+        // feature presenter are the *wrong* presenter half the time on 7.006.317 (its re-point
+        // method does not exist), which is what hid the entry and answered "灵感构图在 portrait
+        // 模式下不可用" in 照片 -- a gate that guesses is worse than no gate: composition on a
+        // mode that cannot run it merely does nothing, while a wrong no takes the icon away.
+        if (!modeAuthoritative) return true;
         return "professional".equals(mode)
             && !"0".equals(prop("persist.omnicam.comp.master", "1"));
     }
+
+    /** True once a mode name came from the live {@code BaseMode}, not from a presenter's field. */
+    private static volatile boolean modeAuthoritative;
 
     private static boolean compositionBlocked(String label) {
         if ("1".equals(prop("persist.omnicam.comp.gr", "0"))) return false;
@@ -445,6 +888,35 @@ public final class RealsceneProbe {
             repointed++;
         }
         Log.i(TAG, "mode tracker installed (repoint " + repointed + ")");
+        installBaseModeTracker(classLoader);
+    }
+
+    /**
+     * Tracks the mode through the active {@code BaseMode} instead of the feature presenter.
+     *
+     * <p>7.006.317's {@code FeaturePresenter} has no {@code R(int, String)} re-point method at all
+     * -- the log said {@code repoint 0} -- so the presenter hook never fires again after start-up
+     * and the mode name stayed whatever a constructor happened to record, which can be a presenter
+     * built for a mode the user is not in (that is how the panel ended up answering "灵感构图在
+     * portrait 模式下不可用" while the camera was in 照片). {@code BaseMode.beforePreview} runs for
+     * the mode being entered, and {@link local.jiege.hook.common.ModeName} already records each
+     * instance's name at construction, so this reads the live mode instead of guessing.
+     */
+    private static void installBaseModeTracker(ClassLoader classLoader) {
+        try {
+            local.jiege.hook.common.ModeName.install(classLoader);
+            java.lang.reflect.Method before = local.jiege.hook.common.Symbols.get()
+                .method("BaseMode.beforePreview");
+            XposedBridge.hookMethod(before, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    String name = local.jiege.hook.common.ModeName.of(param.thisObject);
+                    if (name != null && !name.isEmpty()) setMode(name, true);
+                }
+            });
+            Log.i(TAG, "mode tracker (base mode) installed");
+        } catch (Throwable error) {
+            Log.i(TAG, "base mode tracker unavailable: " + error);
+        }
     }
 
     private static void adoptMode(Object instance) {
@@ -457,7 +929,13 @@ public final class RealsceneProbe {
     }
 
     private static void setMode(String name) {
-        if (name == null || name.isEmpty() || name.equals(modeName)) return;
+        setMode(name, false);
+    }
+
+    private static void setMode(String name, boolean authoritative) {
+        if (name == null || name.isEmpty()) return;
+        if (authoritative) modeAuthoritative = true;
+        if (name.equals(modeName)) return;
         modeName = name;
         // A mode switch rebuilds the composition presenter and its view tree. Everything this
         // module latched about the old mode -- a capped session, a panel that the probe still
@@ -555,13 +1033,16 @@ public final class RealsceneProbe {
                     Object event = param.args[0];
                     if (!(event instanceof android.view.MotionEvent)) return;
                     android.view.MotionEvent motion = (android.view.MotionEvent) event;
-                    // Master and GR have no working composition capture path on this build; a tap
-                    // here starts an inference the shutter cannot finish. Swallow it so the entry
-                    // is inert instead of silently eating the next photo.
+                    // Master, GR and XPAN have no working composition capture path on this build;
+                    // a tap here starts an inference the shutter cannot finish. Swallow it so the
+                    // entry is inert instead of silently eating the next photo -- but say so on
+                    // screen, otherwise the entry looks broken ("构图按了没有反应").
                     if (!compositionBlocked("entry")) return;
-                    if (motion.getActionMasked() == android.view.MotionEvent.ACTION_UP
-                        && buttonBlocked.compareAndSet(false, true)) {
-                        Log.i(TAG, "composition entry ignored in " + modeName + " mode");
+                    if (motion.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+                        if (buttonBlocked.compareAndSet(false, true)) {
+                            Log.i(TAG, "composition entry ignored in " + modeName + " mode");
+                        }
+                        showBlockedToast(param.thisObject);
                     }
                     param.setResult(Boolean.TRUE);
                 }
@@ -621,6 +1102,30 @@ public final class RealsceneProbe {
 
     /** When the composition entry last went down; the activity hook reads it to skip the pin. */
     private static volatile long entryDownAt;
+
+    /** Last time the blocked-entry hint was shown, so repeated taps do not stack toasts. */
+    private static volatile long blockedToastAt;
+
+    /**
+     * Tell the user why the entry did nothing. The stock entry lives in modes the module keeps
+     * away from composition, and a silent swallow reads as a broken button on 317.
+     */
+    private static void showBlockedToast(Object view) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - blockedToastAt < 4000L) return;
+        blockedToastAt = now;
+        if (!(view instanceof android.view.View)) return;
+        try {
+            android.content.Context context = ((android.view.View) view).getContext();
+            String mode = modeName == null || modeName.isEmpty() ? "当前" : modeName;
+            android.widget.Toast.makeText(
+                context,
+                "OmniCam: 灵感构图在 " + mode + " 模式下不可用",
+                android.widget.Toast.LENGTH_SHORT).show();
+        } catch (Throwable ignored) {
+            // Toast is a courtesy; never let it break the touch path.
+        }
+    }
 
     /**
      * Last finger-down anywhere in the camera window.
@@ -717,6 +1222,8 @@ public final class RealsceneProbe {
             // make every later tap on the entry do nothing until the camera was restarted.
             if (sessionPasses >= PASS_MAX) blockReopen = true;
             local.jiege.hook.mastercolor.MasterColor.compositionStop();
+            hintText = null;
+            hideHintBar();
             Log.i(TAG, "composition session closed after " + sessionPasses + " passes"
                 + (blockReopen ? ", waiting for a fresh tap" : ", idle"));
             return false;
@@ -774,6 +1281,7 @@ public final class RealsceneProbe {
         boolean lifted = blockReopen;
         blockReopen = false;
         sessionAt = android.os.SystemClock.uptimeMillis();
+        zoomAppliedFor = -1L;
         // Only a gesture gets here, so this is the moment the user asked. {@link #armed()} reads it
         // to let the request through the start-up grace.
         askedAt = sessionAt;
@@ -1011,9 +1519,24 @@ public final class RealsceneProbe {
                     private long downAt;
 
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!following()) return;
                         if (!(param.args[0] instanceof android.view.MotionEvent)) return;
-                        android.view.MotionEvent motion = (android.view.MotionEvent) param.args[0];
+                        android.view.MotionEvent first = (android.view.MotionEvent) param.args[0];
+                        if (first.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                            // The window root, kept for the overlay pass-through: the composition
+                            // layer's own rootView is not the camera's window (the delegate lives
+                            // in its own container), so the shutter cannot be found from it. This
+                            // runs before the session check on purpose -- a decor that is never
+                            // refreshed outside a session is a decor that measures the shutter at
+                            // the wrong height on the first press.
+                            try {
+                                cameraDecor = ((android.app.Activity) param.thisObject)
+                                    .getWindow().getDecorView();
+                            } catch (Throwable ignored) {
+                                // Keep the previous decor; the measurement path has its own fallback.
+                            }
+                        }
+                        if (!following()) return;
+                        android.view.MotionEvent motion = first;
                         float rawX = motion.getRawX();
                         float rawY = motion.getRawY();
                         int action = motion.getActionMasked();
@@ -1120,6 +1643,259 @@ public final class RealsceneProbe {
         }
     }
 
+    private static volatile int shutterButtonId;
+    private static volatile boolean shutterPassLogged;
+
+    /**
+     * Is this the layer that covers the whole viewfinder while a composition is up?
+     *
+     * <p>Measured on 7.006.317: the first view to receive a DOWN at the shutter is
+     * {@code com.oplus.camera.feature.aicomposition.view.CompositionViewDelegate$f} -- the
+     * feature's own gesture layer, an inner class of the delegate and not the
+     * {@code AICompositionPreviewView} that shows the framing. It is not in the activity's view
+     * dump (it is added to the delegate's own container), which is why it was missed at first. Both
+     * are matched: the delegate layer is what eats the press today, the preview view is the one
+     * older builds used.
+     */
+    private static boolean isCompositionOverlay(Class<?> type) {
+        String name = type.getName();
+        return name.startsWith("com.oplus.camera.feature.aicomposition.view.CompositionViewDelegate")
+            || name.endsWith("AICompositionPreviewView");
+    }
+
+    /**
+     * Lets a tap on the shutter reach the shutter while the composition overlay is up.
+     *
+     * <p>{@code AICompositionPreviewView} is a full-screen clickable child of {@code camera_root}
+     * and it is that container's last child, so it sits on top of everything -- the shutter
+     * included. A DOWN on the shutter is delivered there and consumed, which the camera reads as
+     * "leave the composition": the first tap after a good framing only closed the layer and the
+     * photo needed a second tap. Reported as "构好图之后点拍照，第一下拍不了，要点第二下".
+     *
+     * <p>Only a DOWN inside the shutter's own rectangle is handed back. The overlay does not
+     * consume it, so the ViewGroup walks on to the shutter and that one gesture both starts and
+     * finishes the shot. Every other tap -- the ones that pick a subject, and the ones that leave
+     * the composition -- still belongs to the overlay, so the composition is still applied to the
+     * photo rather than being cancelled by the shutter press.
+     *
+     * <p>Hooked on the framework class because the overlay does not override
+     * {@code dispatchTouchEvent} or {@code onTouchEvent}: it consumes the gesture through its own
+     * click listener, so there is no method on it to hook.
+     */
+    private static void hookOverlayPassThrough() {
+        // The decor must always belong to the activity that is on screen now. It is read from the
+        // resumed activity too, not only from its touches: the composition overlay lives in a
+        // container of its own, so the activity may never see the press at all -- and a decor left
+        // over from a rebuilt activity measures the shutter at its old, un-collapsed position.
+        XposedBridge.hookAllMethods(android.app.Activity.class, "onResume", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                Object activity = param.thisObject;
+                if (!(activity instanceof android.app.Activity)) return;
+                try {
+                    android.app.Activity resumed = (android.app.Activity) activity;
+                    if (!"com.oplus.camera".equals(resumed.getPackageName())) return;
+                    cameraDecor = resumed.getWindow().getDecorView();
+                    shutterRect = null;
+                } catch (Throwable ignored) {
+                    // A decor that cannot be read is not worth a log line on every resume.
+                }
+            }
+        });
+        XposedBridge.hookAllMethods(android.view.View.class, "dispatchTouchEvent", new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                // Cheapest rejection first: MOVE and UP are the bulk of the events.
+                if (!(param.args[0] instanceof android.view.MotionEvent)) return;
+                android.view.MotionEvent event = (android.view.MotionEvent) param.args[0];
+                if (event.getActionMasked() != android.view.MotionEvent.ACTION_DOWN) return;
+                Object target = param.thisObject;
+                if (target == null) return;
+                Class<?> type = target.getClass();
+                // Diagnostic: the overlay layer and the shutter itself, with coordinates, every
+                // time. Off unless persist.omnicam.comp.tapdiag=1.
+                if ("1".equals(prop("persist.omnicam.comp.tapdiag", "0"))) {
+                    String who = type.getName();
+                    if (who.contains("CompositionViewDelegate") || who.contains("ShutterButton")) {
+                        Log.i(TAG, "DOWN @" + (int) event.getRawX() + "," + (int) event.getRawY()
+                            + " -> " + who);
+                    }
+                }
+                if (!isCompositionOverlay(type)) return;
+                int x = (int) event.getRawX();
+                int y = (int) event.getRawY();
+                android.graphics.Rect measured = shutterBounds();
+                boolean inside = measured != null && measured.contains(x, y);
+                if (!inside) inside = inShutterBand(x, y);
+                boolean diag = "1".equals(prop("persist.omnicam.comp.tapdiag", "0"));
+                if (diag) {
+                    Log.i(TAG, "overlay DOWN @" + x + "," + y + " rect=" + measured
+                        + " band=" + inShutterBand(x, y) + " pass=" + inside);
+                }
+                if (!inside) return;
+                // The gesture is consumed here on purpose. Letting it through is not enough in
+                // composition mode: the zoom bar's touch area sits over the shutter, so the press
+                // that escapes the overlay lands on zoom_seek_bar instead of the shutter -- the bar
+                // shifts up and the photo is not taken. Reported as "点一次收起构图层，再点一下才能拍".
+                // So the press is swallowed (the composition stays up) and one tap is delivered to
+                // the shutter itself.
+                param.setResult(Boolean.TRUE);
+                android.view.View shutterButton = shutterView();
+                if (shutterButton != null) {
+                    shutterButton.post(() -> tapShutter(shutterButton, x, y));
+                }
+                if (!shutterPassLogged || diag) {
+                    shutterPassLogged = true;
+                    Log.i(TAG, "shutter tap forwarded @" + x + "," + y
+                        + (shutterButton == null ? " (no shutter view)" : ""));
+                }
+            }
+        });
+        Log.i(TAG, "composition overlay: a tap on the shutter is no longer swallowed");
+    }
+
+    /** The camera window's decor view, recorded on every touch the activity sees. */
+    static volatile android.view.View cameraDecor;
+
+    /** Last rectangle the shutter was measured at, and when it was measured. */
+    private static volatile android.graphics.Rect shutterRect;
+    private static volatile long shutterRectAt;
+
+    /**
+     * The shutter's screen rectangle.
+     *
+     * <p>A live measurement is preferred, a recent cached one is the fallback. The cache matters
+     * because the decor can point at an activity that has been rebuilt (or at a container that no
+     * longer holds the shutter), in which case the lookup returns nothing at the exact moment the
+     * user presses -- and one missed press closes the composition instead of taking the photo.
+     */
+    private static android.graphics.Rect shutterBounds() {
+        android.graphics.Rect live = measureShutter();
+        if (live != null) {
+            shutterRect = live;
+            shutterRectAt = android.os.SystemClock.uptimeMillis();
+            return live;
+        }
+        android.graphics.Rect cached = shutterRect;
+        if (cached != null && android.os.SystemClock.uptimeMillis() - shutterRectAt < 180000L) {
+            return cached;
+        }
+        return null;
+    }
+
+    private static android.graphics.Rect measureShutter() {
+        android.view.View root = cameraDecor;
+        if (root == null) return null;
+        if (shutterButtonId == 0) {
+            try {
+                shutterButtonId = root.getResources()
+                    .getIdentifier("shutter_button", "id", "com.oplus.camera");
+            } catch (Throwable ignored) {
+                return null;
+            }
+            if (shutterButtonId == 0) return null;
+        }
+        android.view.View shutter = root.findViewById(shutterButtonId);
+        if (shutter == null || !shutter.isShown()) return null;
+        int width = shutter.getWidth();
+        int height = shutter.getHeight();
+        if (width <= 0 || height <= 0) return null;
+        int[] at = new int[2];
+        shutter.getLocationOnScreen(at);
+        android.graphics.Rect bounds =
+            new android.graphics.Rect(at[0], at[1], at[0] + width, at[1] + height);
+        if ("1".equals(prop("persist.omnicam.comp.tapdiag", "0"))) {
+            Log.i(TAG, "shutter rect " + bounds + " cls=" + shutter.getClass().getSimpleName());
+        }
+        return bounds;
+    }
+
+    /**
+     * Where the shutter can be even when it cannot be measured.
+     *
+     * <p>In composition mode the mode bar collapses and the shutter drops to the bottom bar, around
+     * the horizontal centre. This band is deliberately narrow (centre 40% of the width, the lower
+     * fifth of the screen) so neighbouring controls keep their own gestures, but it covers the
+     * case where the live lookup fails and the press would otherwise close the composition.
+     */
+    private static boolean inShutterBand(int x, int y) {
+        android.util.DisplayMetrics metrics = screenMetrics();
+        if (metrics == null) return false;
+        int width = metrics.widthPixels;
+        int height = metrics.heightPixels;
+        if (width <= 0 || height <= 0) return false;
+        return x > width * 0.30f && x < width * 0.70f
+            && y > height * 0.84f && y < height * 0.95f;
+    }
+
+    private static volatile android.util.DisplayMetrics screenMetrics;
+
+    private static android.util.DisplayMetrics screenMetrics() {
+        android.util.DisplayMetrics known = screenMetrics;
+        if (known != null) return known;
+        try {
+            android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+            android.view.View root = cameraDecor;
+            if (root != null) {
+                metrics.setTo(root.getResources().getDisplayMetrics());
+            } else {
+                metrics.setTo(android.content.res.Resources.getSystem().getDisplayMetrics());
+            }
+            if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) return null;
+            screenMetrics = metrics;
+            return metrics;
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /** The shutter view itself, or null while it cannot be located. */
+    private static android.view.View shutterView() {
+        android.view.View root = cameraDecor;
+        if (root == null) return null;
+        if (shutterButtonId == 0) {
+            try {
+                shutterButtonId = root.getResources()
+                    .getIdentifier("shutter_button", "id", "com.oplus.camera");
+            } catch (Throwable ignored) {
+                return null;
+            }
+            if (shutterButtonId == 0) return null;
+        }
+        return root.findViewById(shutterButtonId);
+    }
+
+    /**
+     * Delivers one tap to the shutter and to nothing else.
+     *
+     * <p>A tap dispatched straight at the view skips hit-testing, so whichever sibling happens to
+     * be on top at that spot (the zoom bar, in composition mode) cannot take it. Coordinates are
+     * translated into the shutter's own space; the pair is timestamped 40 ms apart because the
+     * button treats an instant down-up as a stray touch.
+     */
+    private static void tapShutter(android.view.View shutter, int rawX, int rawY) {
+        android.view.MotionEvent down = null;
+        android.view.MotionEvent up = null;
+        try {
+            int[] at = new int[2];
+            shutter.getLocationOnScreen(at);
+            float localX = rawX - at[0];
+            float localY = rawY - at[1];
+            long now = android.os.SystemClock.uptimeMillis();
+            down = android.view.MotionEvent.obtain(now, now,
+                android.view.MotionEvent.ACTION_DOWN, localX, localY, 0);
+            up = android.view.MotionEvent.obtain(now, now + 40L,
+                android.view.MotionEvent.ACTION_UP, localX, localY, 0);
+            boolean handled = shutter.dispatchTouchEvent(down);
+            handled = shutter.dispatchTouchEvent(up) || handled;
+            Log.i(TAG, "shutter tap " + (handled ? "handled" : "ignored")
+                + " at " + (int) localX + "," + (int) localY);
+        } catch (Throwable error) {
+            Log.e(TAG, "shutter tap failed", error);
+        } finally {
+            if (down != null) down.recycle();
+            if (up != null) up.recycle();
+        }
+    }
+
     private static long lastTreeDump;
 
     /**
@@ -1186,6 +1962,14 @@ public final class RealsceneProbe {
     private static void kick() {
         Object host = cameraHost;
         if (host == null) return;
+        // 7.006.317 declares h4()V while the 123 build took a Boolean; try both so the kick works
+        // on either. Without it a fresh lock waits for the re-arm tick.
+        try {
+            XposedHelpers.callMethod(host, "h4");
+            return;
+        } catch (Throwable noArg) {
+            // fall through to the older shape
+        }
         try {
             XposedHelpers.callMethod(host, "h4", Boolean.FALSE);
         } catch (Throwable error) {
@@ -1442,7 +2226,7 @@ public final class RealsceneProbe {
 
     /** wb.r.f(HardwareBuffer, HardwareBuffer, HardwareBuffer, long, long, float, cb, int, int, int, int) */
     private static void hookWorker(ClassLoader classLoader) {
-        Class<?> owner = XposedHelpers.findClassIfExists("wb.r", classLoader);
+        Class<?> owner = manager(classLoader);
         if (owner == null) {
             Log.i(TAG, "wb.r not in this build");
             return;
@@ -1577,20 +2361,18 @@ public final class RealsceneProbe {
      * output is missing leaves the preview alone and lets the capture finish as a plain photo.
      */
     private static void hookEffectTexture(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClassIfExists("vb.c3", classLoader);
-        if (presenter == null) {
-            Log.i(TAG, "composition presenter missing, effect guard off");
+        Method method;
+        try {
+            /* 123 Z1 / 317 e2: the offscreen-texture guard on the post-draw event. */
+            method = Symbols.get().method("CompPresenter.effectTexture");
+        } catch (Throwable error) {
+            Log.i(TAG, "composition presenter missing, effect guard off ("
+                    + error.getMessage() + ")");
             return;
         }
-        int hooked = 0;
-        for (Method method : presenter.getDeclaredMethods()) {
-            if (!"Z1".equals(method.getName())) continue;
-            if (method.getParameterTypes().length != 1) continue;
-            method.setAccessible(true);
-            XposedBridge.hookMethod(method, EFFECT);
-            hooked++;
-        }
-        Log.i(TAG, "effect texture guard: " + hooked);
+        method.setAccessible(true);
+        XposedBridge.hookMethod(method, EFFECT);
+        Log.i(TAG, "effect texture guard: 1");
     }
 
     private static final XC_MethodHook EFFECT = new XC_MethodHook() {
@@ -1649,21 +2431,19 @@ public final class RealsceneProbe {
     };
 
     private static void hookFailure(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClassIfExists("vb.c3", classLoader);
-        if (presenter == null) {
-            Log.i(TAG, "composition presenter missing, failure guard off");
+        Method method;
+        try {
+            /* 123 n3 (I,String)V / 317 v3 (I,String,Integer)V - identified by its
+             * "no person detected"+"invalid zoom result" reason strings. */
+            method = Symbols.get().method("CompPresenter.failure");
+        } catch (Throwable error) {
+            Log.i(TAG, "composition presenter missing, failure guard off ("
+                    + error.getMessage() + ")");
             return;
         }
-        int hooked = 0;
-        for (Method method : presenter.getDeclaredMethods()) {
-            if (!"n3".equals(method.getName())) continue;
-            Class<?>[] types = method.getParameterTypes();
-            if (types.length != 2 || types[0] != int.class || types[1] != String.class) continue;
-            method.setAccessible(true);
-            XposedBridge.hookMethod(method, FAIL);
-            hooked++;
-        }
-        Log.i(TAG, "composition failure guard: " + hooked);
+        method.setAccessible(true);
+        XposedBridge.hookMethod(method, FAIL);
+        Log.i(TAG, "composition failure guard: 1");
     }
 
     /**
@@ -1690,28 +2470,27 @@ public final class RealsceneProbe {
     }
 
     private static void hookAnswerLanding(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClassIfExists("vb.c3", classLoader);
-        if (presenter == null) return;
-        int hooked = 0;
-        for (Method method : presenter.getDeclaredMethods()) {
-            if (!"k4".equals(method.getName())) continue;
-            Class<?>[] types = method.getParameterTypes();
-            if (types.length != 1 || types[0] != int.class) continue;
-            method.setAccessible(true);
-            XposedBridge.hookMethod(method, new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    if ("1".equals(prop("persist.omnicam.comp.landing", "1"))) {
-                        ANSWER_LANDING.set(Boolean.TRUE);
-                    }
-                }
-
-                @Override protected void afterHookedMethod(MethodHookParam param) {
-                    ANSWER_LANDING.remove();
-                }
-            });
-            hooked++;
+        Method method;
+        try {
+            /* 123 k4 / 317 A4: the panel-landing branch on the switch-button business call. */
+            method = Symbols.get().method("CompPresenter.answerLanding");
+        } catch (Throwable error) {
+            Log.i(TAG, "answer landing hook: 0 (" + error.getMessage() + ")");
+            return;
         }
-        Log.i(TAG, "answer landing hook: " + hooked);
+        method.setAccessible(true);
+        XposedBridge.hookMethod(method, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam param) {
+                if ("1".equals(prop("persist.omnicam.comp.landing", "1"))) {
+                    ANSWER_LANDING.set(Boolean.TRUE);
+                }
+            }
+
+            @Override protected void afterHookedMethod(MethodHookParam param) {
+                ANSWER_LANDING.remove();
+            }
+        });
+        Log.i(TAG, "answer landing hook: 1");
     }
 
     /**
@@ -1850,6 +2629,10 @@ public final class RealsceneProbe {
         }
         cloudPending = null;
         cloudAnswered = null;
+        compositionSource = null;
+        hintText = null;
+        hintShown = null;
+        hideHintBar();
         // cloudAt is deliberately left alone: it says when the current request went out, and the
         // pass gate uses it to keep the preview still until the reply lands. Clearing it here made
         // the very next pass fall straight through to the detector, which is the "two compositions"
@@ -1958,7 +2741,7 @@ public final class RealsceneProbe {
         new java.util.LinkedHashSet<>());
 
     private static void hookTrackStatus(ClassLoader classLoader) {
-        Class<?> presenter = XposedHelpers.findClassIfExists("vb.c3", classLoader);
+        Class<?> presenter = presenter(classLoader);
         int watched = 0;
         if (presenter != null) {
             for (Method method : presenter.getDeclaredMethods()) {
@@ -1985,11 +2768,16 @@ public final class RealsceneProbe {
             }
         }
 
-        Class<?> item = XposedHelpers.findClassIfExists("ub.e$a", classLoader);
+        Log.i(TAG, "Z1 post-draw hooks armed: " + watched
+            + " on " + (presenter == null ? "null" : presenter.getName()));
+        Class<?> item = trackItem(classLoader);
         if (item == null) {
             Log.i(TAG, "track status item missing, post-draw guard off");
             return;
         }
+        Log.i(TAG, "track status item class=" + item.getName()
+            + " presenter=" + (presenter == null ? "null" : presenter.getName()));
+        watchFailureToast(presenter);
         int hooked = 0;
         for (Method method : item.getDeclaredMethods()) {
             if (!"d".equals(method.getName())) continue;
@@ -1998,18 +2786,29 @@ public final class RealsceneProbe {
             method.setAccessible(true);
             XposedBridge.hookMethod(method, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
-                    if (IN_POST_DRAW.get() == null) return;
                     Object raw = param.getResult();
                     if (!(raw instanceof Integer)) return;
                     int status = (Integer) raw;
+                    boolean inPostDraw = IN_POST_DRAW.get() != null;
                     if (SEEN_STATUS.add(status) && SEEN_STATUS.size() <= LIMIT) {
-                        Log.i(TAG, "track status seen: " + status + " (3/6 are the good ones)");
+                        Log.i(TAG, "track status seen: " + status
+                            + " (post-draw=" + inPostDraw + ", 3/6 are the good ones)");
                     }
+                    /*
+                     * r521: this build reads the same status from more than one frame path
+                     * (`Z1`'s afterEffectProcess and the E2 heartbeat), and only Z1 used to fall
+                     * inside IN_POST_DRAW. Whenever the reader was not Z1 the raw status reached
+                     * the teardown branch and the session ended with the "scene changed too much"
+                     * toast even with the phone on a desk. Promote everywhere: 3 is the stock
+                     * "track is usable" answer, and this build has no tracker that could produce
+                     * it on its own.
+                     */
                     if (!"1".equals(prop("persist.omnicam.comp.trackok", "1"))) return;
                     if (status == 3 || status == 6) return;
                     param.setResult(3);
                     if (trackPromoted.incrementAndGet() <= LIMIT) {
-                        Log.i(TAG, "track status " + status + " -> 3 during post-draw");
+                        Log.i(TAG, "track status " + status + " -> 3 (post-draw="
+                            + inPostDraw + ")");
                     }
                 }
             });
@@ -2019,6 +2818,97 @@ public final class RealsceneProbe {
     }
 
     private static final java.util.concurrent.atomic.AtomicInteger trackPromoted =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * Reports which reason string tears a composition session down.
+     *
+     * <p>317's presenter declares {@code z3(int, String)Z}, the single dispatcher behind every
+     * "composition ended" toast: the second argument is the reason ("track failed", "invalid zoom
+     * result", ...). Observation only -- the status promotion above is what keeps the session
+     * alive, this just names the path that got there.
+     */
+    private static void watchFailureToast(Class<?> presenter) {
+        if (presenter == null) return;
+        int hooked = 0;
+        for (Method method : presenter.getDeclaredMethods()) {
+            Class<?>[] types = method.getParameterTypes();
+            if (types.length != 2 || types[0] != int.class || types[1] != String.class) continue;
+            if (method.getReturnType() != boolean.class) continue;
+            method.setAccessible(true);
+            final String name = method.getName();
+            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (toastReasons.add(String.valueOf(param.args[1]))) {
+                        Log.i(TAG, "composition reason \"" + param.args[1]
+                            + "\" raised by " + name);
+                    }
+                }
+            });
+            hooked++;
+        }
+        if (hooked == 0) Log.i(TAG, "composition reason dispatcher not found");
+    }
+
+    private static final java.util.Set<String> toastReasons =
+        java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
+
+    /**
+     * The gate that actually ends a composition session.
+     *
+     * <p>On 317 the "画面变化较大，已退出本次构图" toast is produced by
+     * {@code wb.h3.v3(I, String, Integer)} with reason {@code "track failed"}, and the only thing
+     * that decides it is {@code wb.h3.E2(afterEffectProcess)} calling
+     * {@code CompositionStateMachine.g(trackItem)}:
+     *
+     * <pre>
+     *   g(vb.e$a item) { int s = item.d(); return s == 3 || s == 6; }
+     * </pre>
+     *
+     * {@link #hookTrackStatus} promotes the item's status, but only inside the post-draw window
+     * (Z1). The E2 frame path runs outside that window, reads the untouched status and tears the
+     * session down on the very first frames. Promoting here instead keeps the value untouched and
+     * only answers "the track is usable", which is exactly the stock meaning of a true result.
+     * Shape-matched (single argument of the track item type, boolean result): the class declares
+     * exactly one such method.
+     */
+    private static void hookTrackGate(ClassLoader classLoader) {
+        Class<?> machine = XposedHelpers.findClassIfExists(
+            "com.oplus.camera.feature.aicomposition.state.CompositionStateMachine", classLoader);
+        Class<?> item = trackItem(classLoader);
+        if (machine == null || item == null) {
+            Log.i(TAG, "track gate unavailable (machine=" + (machine != null)
+                + ", item=" + (item != null) + ")");
+            return;
+        }
+        int hooked = 0;
+        for (Method method : machine.getDeclaredMethods()) {
+            Class<?>[] types = method.getParameterTypes();
+            if (types.length != 1 || types[0] != item) continue;
+            if (method.getReturnType() != boolean.class) continue;
+            method.setAccessible(true);
+            XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (!"1".equals(prop("persist.omnicam.comp.trackgate", "1"))) return;
+                    if (Boolean.TRUE.equals(param.getResult())) return;
+                    int status = -1;
+                    try {
+                        Object raw = XposedHelpers.callMethod(param.args[0], "d");
+                        if (raw instanceof Integer) status = (Integer) raw;
+                    } catch (Throwable ignored) {
+                    }
+                    param.setResult(Boolean.TRUE);
+                    if (trackGatePromoted.incrementAndGet() <= LIMIT) {
+                        Log.i(TAG, "track gate held open, status was " + status);
+                    }
+                }
+            });
+            hooked++;
+        }
+        Log.i(TAG, "track gate hook: " + hooked);
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger trackGatePromoted =
         new java.util.concurrent.atomic.AtomicInteger();
 
     /**
@@ -2070,8 +2960,88 @@ public final class RealsceneProbe {
             }
             return;
         }
+        promoteAlign(machine, "z1");
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger alignWhy =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    /** The session a zoom was last applied for, so one framing gets one launch. */
+    private static volatile long zoomAppliedFor = -1L;
+
+    /**
+     * Puts the preview on the recommended framing without asking the user to move the phone.
+     *
+     * <p>Promoting the state to RECT_SHOWN only drops the dead align guide: the framing rect is
+     * drawn, but the lens is still where the user left it. Stock performs the move in
+     * {@code wb.h3.E2}'s zoom arm ({@code "executeZoom, currentZoom: "} @0x0493), through
+     * {@code protocal/ui/a.Xd().g1(targetZoom, true)}. That is the camera's own entry point, so
+     * calling it here lands the preview on the answered crop exactly the way the stock flow would,
+     * and the composition then sits in RECT_SHOWN with the suggestion already in place.
+     *
+     * <p>The presenter is the frame scheduler's host ({@code cameraHost}), refreshed on every
+     * preview tick; on this build the UI protocol object is its {@code e} field.
+     */
+    private static void applyCompositionZoom(float want) {
+        if (!"1".equals(prop("persist.omnicam.comp.autozoom", "1"))) return;
+        if (!(want > 1.05f)) return;
+        Object host = cameraHost;
+        if (host == null) return;
+        if (zoomAppliedFor == sessionAt && zoomAppliedFor != -1L) return;
+        zoomAppliedFor = sessionAt;
+        try {
+            Object ui = field(host, "e");
+            if (ui == null) {
+                Log.i(TAG, "composition zoom: no ui protocol on " + host.getClass().getName());
+                return;
+            }
+            Object zoom = XposedHelpers.callMethod(ui, "Xd");
+            if (zoom == null) {
+                Log.i(TAG, "composition zoom: Xd() returned null");
+                return;
+            }
+            XposedHelpers.callMethod(zoom, "g1", want, true);
+            Log.i(TAG, "composition zoom applied " + want
+                + " (session " + sessionAt + ")");
+        } catch (Throwable error) {
+            Log.i(TAG, "composition zoom failed: " + error);
+        }
+    }
+
+    /**
+     * Writes the machine's state to RECT_SHOWN ("the framing rect is on screen") whenever it is
+     * sitting in TRACKING / APPROACHING.
+     *
+     * <p>Those two states exist for a real tracker to drive the white dot towards the target ring.
+     * This build has no tracker behind them, so the dot and the ring never move and the panel sits
+     * on "请移动手机，对准目标点" forever -- the reported "圆点和圆圈固定不能移动". With the framing
+     * already applied by the injected crop there is nothing left to align, so the module answers
+     * that step itself instead of asking the user to move the phone.
+     *
+     * <p>Called from the post-draw pass (the camera's own place for this transition) and from the
+     * state machine's {@code c()} gate, which runs every poll whether or not the post-draw hook is
+     * in place on this build.
+     */
+    private static void promoteAlign(Object machine, String source) {
+        if (machine == null) return;
+        if (!"1".equals(prop("persist.omnicam.comp.skipalign", "1"))) {
+            if (alignWhy.incrementAndGet() <= 3) {
+                Log.i(TAG, "align promote(" + source + ") switch off, phase=" + phaseName(machine));
+            }
+            return;
+        }
+        Object phase = field(machine, "a");
+        String name = phaseName(machine);
+        if (!"TRACKING".equals(name) && !"APPROACHING".equals(name)) return;
+        if ("RECT_SHOWN".equals(name) || "ZOOM_TRIGGERED".equals(name)) return;
         Object shown = stateNamed(phase, "RECT_SHOWN");
-        if (shown == null) return;
+        if (shown == null) {
+            if (alignWhy.incrementAndGet() <= 5) {
+                Log.i(TAG, "align promote(" + source + ") cannot name RECT_SHOWN, phase=" + name
+                    + " type=" + (phase == null ? "null" : phase.getClass().getName()));
+            }
+            return;
+        }
         try {
             XposedHelpers.setObjectField(machine, "a", shown);
             // RECT_SHOWN's own arm is "if (machine.e) -> ZOOM_TRIGGERED", and that zoom request is
@@ -2085,12 +3055,16 @@ public final class RealsceneProbe {
                 XposedHelpers.setBooleanField(machine, "e", false);
             }
         } catch (Throwable error) {
+            if (alignWhy.incrementAndGet() <= 5) {
+                Log.i(TAG, "align promote(" + source + ") write failed: " + error);
+            }
             return;
         }
-        int seen = alignSkips.incrementAndGet();
         ALIGN_SKIPPED.set(Boolean.TRUE);
+        applyCompositionZoom(recommendZoom);
+        int seen = alignSkips.incrementAndGet();
         if (seen <= LIMIT || seen % 120 == 0) {
-            Log.i(TAG, "align guide skipped: " + name + " -> RECT_SHOWN #" + seen
+            Log.i(TAG, "align promoted (" + source + "): " + name + " -> RECT_SHOWN #" + seen
                 + " p=" + field(machine, "p") + " q=" + field(machine, "q")
                 + " e=" + field(machine, "e") + " f=" + field(machine, "f")
                 + " i=" + field(machine, "i") + " j=" + field(machine, "j"));
@@ -2170,6 +3144,86 @@ public final class RealsceneProbe {
                 + ", tracker scale missing)");
         }
     }
+
+    /**
+     * Rebuilds the cloud answer's zoom from the subject's size instead of the model's box.
+     *
+     * <p>The model answers with a keep-region that carries a margin, so its ratio hardly moves
+     * between scenes: on this device every answer came back 1.3-1.4x ("只能在 1.3X 和 1.4X 之间").
+     * The detector's subject height is the missing variable -- {@code 0.30 / share} is the crop that
+     * puts the subject at 30% of the frame, which is what makes the framing follow the scene. The
+     * model's centre is kept, because the centre is the part it actually judged; only the margin
+     * changes.
+     *
+     * <p>Runs when the answer lands rather than inside {@code CloudComposer}: the detector has a
+     * subject by then, while at request time it usually has not run yet, which is why the first
+     * attempt at this never fired.
+     */
+    private static String subjectZoom(String json) {
+        if (json == null || json.indexOf("omnicam-cloud") < 0) return json;
+        // Off by default: this rewrites the model's box into "whatever ratio puts the subject at
+        // 30% of the frame", which the report called out as "只是按主体比例放大，不是按云端建议构图".
+        // The answer's own crop is applied instead. Kept behind a property for A/B runs.
+        if (!"1".equals(prop("persist.omnicam.comp.retarget", "0"))) return json;
+        float share = SubjectLocator.subjectHeight();
+        if (share <= 0.02f) return json;
+        double want = Math.max(1.3, Math.min(3.0, 0.30 / share));
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(json);
+            org.json.JSONArray crops = root.optJSONArray("crops");
+            if (crops == null || crops.length() == 0) return json;
+            org.json.JSONObject first = crops.optJSONObject(0);
+            if (first == null) return json;
+            double was = first.optDouble("zoom", 0);
+            if (Math.abs(was - want) <= 0.12) return json;
+            org.json.JSONObject moved = atZoom(first, want);
+            if (moved == null) return json;
+            org.json.JSONArray out = new org.json.JSONArray();
+            out.put(moved);
+            // The stock panel is laid out for two suggestions and the second one is what its card
+            // row is shaped around; keep the pair rather than answering with a single crop.
+            org.json.JSONObject tight = atZoom(first, Math.min(want * 1.59, 3.2));
+            if (tight != null) {
+                tight.put("version", "omnicam-cloud-tight");
+                org.json.JSONObject desc = tight.optJSONObject("compositionDesc");
+                if (desc != null) desc.put("title", "AI 灵感特写");
+                out.put(tight);
+            }
+            root.put("crops", out);
+            root.put("outputNum", out.length());
+            Log.i(TAG, String.format(java.util.Locale.US,
+                "framing %.2f -> %.2f (subject %.1f%% of the frame)", was, want, share * 100f));
+            return root.toString();
+        } catch (Throwable error) {
+            Log.i(TAG, "framing retarget skipped: " + error);
+            return json;
+        }
+    }
+
+    /** The same crop's centre at another ratio, in the 768x1024 reference frame. */
+    private static org.json.JSONObject atZoom(org.json.JSONObject crop, double zoom) {
+        try {
+            int w = (int) Math.round(768 / zoom);
+            if (w < 2 || w >= 768) return null;
+            int h = (int) Math.round(w * (1024 / 768.0));
+            org.json.JSONArray box = crop.optJSONArray("srcCrop");
+            if (box == null || box.length() != 4) return null;
+            int cx = (box.getInt(0) + box.getInt(2)) / 2;
+            int cy = (box.getInt(1) + box.getInt(3)) / 2;
+            int x = Math.max(0, Math.min(768 - w, cx - w / 2));
+            int y = Math.max(0, Math.min(1024 - h, cy - h / 2));
+            org.json.JSONObject out = new org.json.JSONObject(crop.toString());
+            out.put("zoom", 768 / (double) w);
+            org.json.JSONArray moved = new org.json.JSONArray();
+            moved.put(x).put(y).put(x + w).put(y + h);
+            out.put("srcCrop", moved);
+            return out;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+
 
     /**
      * The zoom the last answered crop asked for, read straight out of the JSON we hand the camera.
@@ -2385,7 +3439,7 @@ public final class RealsceneProbe {
         // "composition keeps restarting" feel and a steady background load at the same time.
         // persist.omnicam.croptrace=1 brings the whole trace back for a debugging session.
         if (!"1".equals(prop("persist.omnicam.croptrace", "0"))) return;
-        Class<?> crop = XposedHelpers.findClassIfExists("ub.d", classLoader);
+        Class<?> crop = results(classLoader);
         if (crop != null) {
             for (Method method : crop.getDeclaredMethods()) {
                 if (!"a".equals(method.getName())) continue;
@@ -2412,7 +3466,7 @@ public final class RealsceneProbe {
                 Log.i(TAG, "crop parser traced");
             }
         }
-        Class<?> consumer = XposedHelpers.findClassIfExists("vb.c3$c", classLoader);
+        Class<?> consumer = cropConsumer(classLoader);
         if (consumer != null) {
             for (Method method : consumer.getDeclaredMethods()) {
                 Class<?>[] types = method.getParameterTypes();
@@ -2467,7 +3521,7 @@ public final class RealsceneProbe {
         // h4 turns the crop channel on (it is the only writer that sets the flag B3 tests), and T2
         // turns it back off. Seeing both in order says whether a round failed before or after the
         // crops arrived.
-        Class<?> presenter = XposedHelpers.findClassIfExists("vb.c3", classLoader);
+        Class<?> presenter = presenter(classLoader);
         if (presenter == null) return;
         for (Method method : presenter.getDeclaredMethods()) {
             if ("h4".equals(method.getName()) && method.getParameterTypes().length == 1) {
@@ -2754,6 +3808,7 @@ public final class RealsceneProbe {
         try {
             json = absoluteZoom(json, framingBase);
             noteRecommendZoom(json);
+            noteSource(json);
             // Event 1 is the crop the panel draws. Event 2 is the "answer delivered" signal, and the
             // camera's own canned path sends exactly this pair before treating the pass as handled
             // (wb.r.f: onEvent(1, json); onEvent(2, json)), so an answer that stops at event 1 is not
@@ -3064,6 +4119,9 @@ public final class RealsceneProbe {
         waitLogged.set(false);
         android.graphics.Bitmap frame = SubjectLocator.snapshot((HardwareBuffer) buffer);
         if (frame == null) return;
+        // Take the subject's measure before the model is asked: the answer is retargeted to it, and
+        // in cloud mode follow() never runs, so nothing else would take it.
+        if (SubjectLocator.subjectHeight() <= 0.02f) SubjectLocator.measure((HardwareBuffer) buffer);
         Log.i(TAG, "asking the vision model");
         try {
             CloudComposer.submit(frame, (json, summary) -> {
@@ -3084,7 +4142,7 @@ public final class RealsceneProbe {
                 // below: opening the stream calls refreshFraming(), which drops "the previous
                 // scene's answer" -- and the reply that just landed was being counted as exactly
                 // that, so every request ended up replaced by the on-device answer.
-                cloudGiven = json;
+                cloudGiven = subjectZoom(json);
                 cloudGivenAt = android.os.SystemClock.uptimeMillis();
                 cloudPending = null;
                 if (holdingPass) {
@@ -3219,21 +4277,59 @@ public final class RealsceneProbe {
 
     /** The callback the worker talks to; onEvent(int, String) carries the JSON the UI renders. */
     private static void hookCallback(ClassLoader classLoader) {
-        Class<?> owner = XposedHelpers.findClassIfExists("wb.p", classLoader);
-        if (owner == null) {
-            Log.i(TAG, "wb.p not in this build");
-            return;
+        /*
+         * 317 replaced the 123 callback holder (wb.p) with the SDK-side adapter
+         * com.oplus.ocs.camera.OplusAICompositionHelper$SdkCompositionStreamCallback, the only
+         * implementation of OplusAIComposition$CompositionStreamCallback in the build. The class
+         * is SDK-named rather than R8-mangled, but its nested suffix can still move, so derive it
+         * from the helper (declared classes first, then the known simple name) before falling back
+         * to the 123 short name. A zero here means composition events never reach the probe.
+         */
+        java.util.List<Class<?>> holders = new java.util.ArrayList<>();
+        try {
+            Class<?> helper = XposedHelpers.findClassIfExists(
+                    "com.oplus.ocs.camera.OplusAICompositionHelper", classLoader);
+            if (helper != null) {
+                for (Class<?> inner : helper.getDeclaredClasses()) {
+                    for (Class<?> itf : inner.getInterfaces()) {
+                        if (itf.getName().endsWith("CompositionStreamCallback")) {
+                            holders.add(inner);
+                            break;
+                        }
+                    }
+                }
+                if (holders.isEmpty()) {
+                    Class<?> direct = XposedHelpers.findClassIfExists(
+                            helper.getName() + "$SdkCompositionStreamCallback", classLoader);
+                    if (direct != null) holders.add(direct);
+                }
+            }
+        } catch (Throwable error) {
+            Log.i(TAG, "callback holder probe failed: " + error);
+        }
+        if (holders.isEmpty()) {
+            Class<?> legacy = XposedHelpers.findClassIfExists("wb.p", classLoader);
+            if (legacy == null) {
+                Log.i(TAG, "composition callback holder not in this build");
+                return;
+            }
+            holders.add(legacy);
         }
         int hooked = 0;
-        for (Method method : owner.getDeclaredMethods()) {
-            Class<?>[] types = method.getParameterTypes();
-            if (!"onEvent".equals(method.getName())) continue;
-            if (types.length != 2 || types[0] != int.class || types[1] != String.class) continue;
-            method.setAccessible(true);
-            XposedBridge.hookMethod(method, CALLBACK);
-            hooked++;
+        StringBuilder names = new StringBuilder();
+        for (Class<?> owner : holders) {
+            for (Method method : owner.getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
+                if (!"onEvent".equals(method.getName())) continue;
+                if (types.length != 2 || types[0] != int.class || types[1] != String.class) continue;
+                method.setAccessible(true);
+                XposedBridge.hookMethod(method, CALLBACK);
+                hooked++;
+                if (names.length() > 0) names.append(',');
+                names.append(owner.getName());
+            }
         }
-        Log.i(TAG, "onEvent hooked: " + hooked);
+        Log.i(TAG, "onEvent hooked: " + hooked + (hooked > 0 ? " @" + names : ""));
     }
 
     private static final XC_MethodHook CALLBACK = new XC_MethodHook() {
@@ -3384,13 +4480,6 @@ public final class RealsceneProbe {
     }
 
     private static String prop(String key, String fallback) {
-        try {
-            Class<?> type = Class.forName("android.os.SystemProperties");
-            Object value = type.getMethod("get", String.class, String.class)
-                .invoke(null, key, fallback);
-            return String.valueOf(value);
-        } catch (Throwable error) {
-            return fallback;
-        }
+        return local.jiege.hook.common.Props.get(key, fallback);
     }
 }

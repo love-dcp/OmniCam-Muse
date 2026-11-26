@@ -138,17 +138,24 @@ public final class VideoFilterHighSpec {
         // the filter is on. Everywhere else, including when the camera itself already picks the
         // app encoder (1080p with a filter), its own choice stands.
         try {
-            Class<?> recorderKeys = XposedHelpers.findClass("om.e0$g", classLoader);
-            final Object appCodecKey = XposedHelpers.getStaticObjectField(recorderKeys, "b");
-            if (!"is_use_media_codec".contentEquals(
-                    String.valueOf(XposedHelpers.getObjectField(appCodecKey, "a")))) {
-                throw new IllegalStateException("recorder key mismatch");
+            // The recorder key/config classes are R8-renamed per build; LogLutDirect resolves
+            // them from the @ModeRecorder structure (same shared resolution MasterPalette uses).
+            Object appCodec = LogLutDirect.recorderKey("is_use_media_codec");
+            Class<?> config = LogLutDirect.recorderConfigClass();
+            String reader = LogLutDirect.recorderReaderName();
+            if (appCodec == null || config == null || reader == null) {
+                throw new IllegalStateException("recorder structure unavailable");
             }
-            XposedBridge.hookAllMethods(XposedHelpers.findClass("om.c0", classLoader), "a", new XC_MethodHook() {
+            final Object appCodecKey = appCodec;
+            XposedBridge.hookAllMethods(config, reader, new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (param.args.length != 1 || param.args[0] != appCodecKey || !wantAppEncoder) return;
                     if (Boolean.TRUE.equals(param.getResult())) return;
-                    param.setResult(Boolean.TRUE);
+                    // Keep the stock runtime type: 317 casts the integer selector slots back to
+                    // (Integer) in pm.b0.M, so a bare Boolean there is a ClassCastException.
+                    Object replacement = LogLutDirect.coerceConfigValue(param.getResult(), true);
+                    if (replacement == null) return;
+                    param.setResult(replacement);
                 }
             });
             Log.i(TAG, "4K recorder backend hook installed");

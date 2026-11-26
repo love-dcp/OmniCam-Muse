@@ -37,11 +37,11 @@ public final class HighPixelLivePhoto {
     private static final String SESSION_MODE = "high_pixel_mode";
 
     private static Class<?> cls(String id) {
-        return Symbols.get().cls(id.substring(1));
+        return Symbols.get().cls(id.startsWith("@") ? id.substring(1) : id);
     }
 
     private static String member(String id) {
-        return Symbols.get().name(id.substring(1));
+        return Symbols.get().name(id.startsWith("@") ? id.substring(1) : id);
     }
     private static final int VIDEO_CAPTURE_COMPLETED_CASE = 8;
     private static final int FLAG_ENABLE_PACK_P010 = 8388608;

@@ -170,7 +170,10 @@ public final class GrPreviewStreamRestore {
      */
     private static void hookEnvRefresh(final Class<?> lut) {
         try {
-            XposedHelpers.findAndHookMethod(lut, "e", int.class, int.class, String.class,
+            /* e(I, I, String) on 123 is renamed to f() on 317; the Lut3d.load symbol
+             * (initializeBasicToneEnv fingerprint) carries the per-build member name. */
+            XposedHelpers.findAndHookMethod(lut,
+                Symbols.get().name("Lut3d.load"), int.class, int.class, String.class,
                 new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
                         if (!leftGr || GrState.isGrMode() || !inMasterMode()) return;
@@ -233,10 +236,11 @@ public final class GrPreviewStreamRestore {
                                     return;
                                 }
                                 rearming.set(Boolean.TRUE);
+                                String load = lutLoadName();
                                 Object washed = XposedHelpers.callMethod(
-                                    manager, "e", 1, 2, "common");
+                                    manager, load, 1, 2, "common");
                                 Object recomputed = XposedHelpers.callMethod(
-                                    manager, "e", 1, 0, "xpan");
+                                    manager, load, 1, 0, "xpan");
                                 String basicHash = "unknown";
                                 try {
                                     Object basic = XposedHelpers.getObjectField(manager, "c");
@@ -298,6 +302,21 @@ public final class GrPreviewStreamRestore {
      * the clean-env XPAN table into manager.c, snapshot published to cleanXpanTable,
      * then paletteWashes increments so the draw-hook repair can push field o.
      */
+    /**
+     * The per-build member name of {@code Lut3dDataManager.e(I, I, String)}. 317 renames it and
+     * also changes its return type; the Lut3d.load symbol (initializeBasicToneEnv fingerprint)
+     * carries the resolved name, so every reflective call must go through it. Falls back to the
+     * 123 name only when the symbol table is unavailable.
+     */
+    public static String lutLoadName() {
+        try {
+            String resolved = Symbols.get().name("Lut3d.load");
+            if (resolved != null && !resolved.isEmpty()) return resolved;
+        } catch (Throwable ignored) {
+        }
+        return "e";
+    }
+
     public static void forceXpanEnvWash(Object manager, String reason) {
         if (manager == null) return;
         if (!forcedWashRunning.compareAndSet(false, true)) return;
@@ -308,8 +327,9 @@ public final class GrPreviewStreamRestore {
                 return;
             }
             rearming.set(Boolean.TRUE);
-            Object washed = XposedHelpers.callMethod(manager, "e", 1, 2, "common");
-            Object recomputed = XposedHelpers.callMethod(manager, "e", 1, 0, "xpan");
+            String load = lutLoadName();
+            Object washed = XposedHelpers.callMethod(manager, load, 1, 2, "common");
+            Object recomputed = XposedHelpers.callMethod(manager, load, 1, 0, "xpan");
             String basicHash = "unknown";
             try {
                 Object basic = XposedHelpers.getObjectField(manager, "c");

@@ -66,6 +66,17 @@ final class CompositionIconShift {
     static void applyModeVisibility() {
         View view = entry;
         if (view == null) return;
+        /*
+         * r512: the mode tracker can call this from a binder/background thread after a mode
+         * switch. setVisibility from a non-UI thread throws "Only the original thread that
+         * created a view hierarchy can touch its views" -- the restore then never happens and
+         * the icon stays GONE after visiting any composition-less mode (视频 / 人像 / ...),
+         * which read as "the entry disappeared from 照片 and 大师". Marshal onto the UI thread.
+         */
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            view.post(() -> applyModeVisibility());
+            return;
+        }
         try {
             if (!allowed()) {
                 hiddenByUs = true;

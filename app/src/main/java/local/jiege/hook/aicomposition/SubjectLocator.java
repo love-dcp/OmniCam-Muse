@@ -210,6 +210,22 @@ final class SubjectLocator {
         return ambientAnswer;
     }
 
+    /**
+     * Height of the subject the detector is currently holding, as a fraction of the frame.
+     *
+     * <p>Exposed for the cloud path: the model answers with a box that keeps a generous margin
+     * around the scene, so its own zoom barely moves between scenes (measured 1.42x on a desk, and
+     * the report "只能在 1.3X 和 1.4X 之间"). This share is what makes a framing scene-dependent --
+     * a small subject asks for a closer crop than one that already fills the frame.
+     *
+     * @return 0 when nothing is held, which tells the caller to keep the model's own ratio.
+     */
+    static float subjectHeight() {
+        synchronized (LOCK) {
+            return subject == null ? 0f : subject[2];
+        }
+    }
+
     /** Reused sampling scratch; the detection thread and the one inline call both come through here. */
     private static int[] pixels;
     private static int sampleW;
@@ -345,6 +361,20 @@ final class SubjectLocator {
             // A fresh lock counts as movement, so tracking starts at full rate before backing off.
             movedAt = SystemClock.uptimeMillis();
         }
+    }
+
+    /**
+     * Runs the detector once, for its subject size, without asking for an answer to push.
+     *
+     * <p>The cloud request needs {@link #subjectHeight()} to turn the model's loose box into a
+     * scene-dependent ratio, but in cloud mode {@code follow()} is skipped -- there is always an
+     * answer in hand -- so the measurement was never taken and the framing fell back to the
+     * model's own 1.4x every time.
+     */
+    static void measure(HardwareBuffer buffer) {
+        if (buffer == null || buffer.isClosed()) return;
+        if ("0".equals(prop("persist.omnicam.realfollow", "1"))) return;
+        update(buffer);
     }
 
     static String follow(HardwareBuffer buffer) {
@@ -1960,6 +1990,18 @@ final class SubjectLocator {
         // Say which channel decided this. The panel is the only place the user ever meets this
         // feature, and a long press that silently switched between the model and the device looked
         // like the gesture did nothing -- there is no other label on screen to tell them apart.
+        // Where the subject actually sits in the frame, taken off the box it was detected in. The
+        // sentence above only knows the kind of subject, so without this every object scene read
+        // the same; the panel hint is the one place the user sees the detector's reasoning.
+        if (kind != KIND_PINNED) {
+            int centreX = box[0] + box[2] / 2;
+            String place = centreX < REF_W * 2 / 5 ? "主体偏左，前方留出空间"
+                : centreX > REF_W * 3 / 5 ? "主体偏右，视线方向有空间"
+                : "主体居中，两侧留白均匀";
+            desc = desc.endsWith("。")
+                ? desc.substring(0, desc.length() - 1) + "，" + place + "。"
+                : desc + "，" + place + "。";
+        }
         desc = "端侧识别 · " + desc;
         // Two crops, not one: the panel only builds cards for a multi-crop answer. A single-crop
         // answer is applied silently, which is why the local path looked like "no suggestion" even
@@ -2040,13 +2082,6 @@ final class SubjectLocator {
     }
 
     private static String prop(String key, String fallback) {
-        try {
-            Class<?> type = Class.forName("android.os.SystemProperties");
-            Object value = type.getMethod("get", String.class, String.class)
-                .invoke(null, key, fallback);
-            return String.valueOf(value);
-        } catch (Throwable error) {
-            return fallback;
-        }
+        return local.jiege.hook.common.Props.get(key, fallback);
     }
 }

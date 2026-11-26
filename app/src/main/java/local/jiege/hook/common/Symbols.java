@@ -154,8 +154,8 @@ public final class Symbols {
 
     @SuppressWarnings("unchecked")
     public <T> List<T> all(String id) {
-        List<Object> values = resolved.get(id);
-        if (values == null) throw new MissingSymbol(id, failures.get(id));
+        List<Object> values = resolved.get(strip(id));
+        if (values == null) throw new MissingSymbol(id, failures.get(strip(id)));
         return (List<T>) Collections.unmodifiableList(values);
     }
 

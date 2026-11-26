@@ -75,8 +75,77 @@ final class GrEffectTransport {
 
     private GrEffectTransport() {}
 
+    /**
+     * The GR verdict the native half needs, published for it as a one-byte file.
+     *
+     * <p>GR runs on the professional (master) pipeline on this phone, so a capture cannot be told
+     * apart from a master one by its capture mode. The native half used to rely on the APS setting
+     * {@code gr_effect_size == 63}; the 7.006.317 build does not carry that key, so every GR capture
+     * was graded with the master-colour LMT while the viewfinder showed the GR tree -- "选滤镜后拍
+     * 出来的颜色跟预览差别大". The camera's own {@code GrSupport.isGrMode()} is the authoritative
+     * answer, and this is where it crosses into native. Written on change only.
+     */
+    private static final java.io.File GR_FLAG =
+        new java.io.File("/data/user/0/com.oplus.camera/files/jiege/gr_mode");
+    private static volatile Boolean grFlagPublished;
+    private static volatile boolean applicationReady;
+
+    /**
+     * {@code GrState.isGrMode()} reaches the camera's preference store, so it may only be asked once
+     * the application exists.
+     *
+     * <p>Module install runs inside {@code ActivityThread.handleBindApplication}, before the
+     * Application object is created. Reading a preference from there initialises the store early and
+     * the SharedPreferences-to-MMKV migration waits for the application to finish binding -- the
+     * migration thread has not started yet, so the main thread parks forever. The camera showed a
+     * black screen (main thread in {@code DataMigrateHelper.b} <- {@code PrefKeyLaunchSpecified.<clinit>}
+     * <- {@code GrState.isGrMode} <- {@code publishMode} <- {@code install}). Never ask before then.
+     */
+    private static boolean applicationReady() {
+        if (applicationReady) return true;
+        try {
+            Object thread = XposedHelpers.callStaticMethod(
+                Class.forName("android.app.ActivityThread"), "currentActivityThread");
+            if (thread == null) return false;
+            if (XposedHelpers.callMethod(thread, "getApplication") == null) return false;
+            applicationReady = true;
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    static void publishMode() {
+        if (!applicationReady()) return;
+        boolean gr;
+        try {
+            gr = GrState.isGrMode();
+        } catch (Throwable error) {
+            return;
+        }
+        Boolean was = grFlagPublished;
+        if (was != null && was == gr) return;
+        grFlagPublished = gr;
+        try {
+            java.io.File dir = GR_FLAG.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
+                Log.i(TAG, "GR mode flag: cannot create " + dir);
+                return;
+            }
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(GR_FLAG)) {
+                out.write(gr ? '1' : '0');
+            }
+            Log.i(TAG, "GR mode flag -> " + gr);
+        } catch (Throwable error) {
+            Log.e(TAG, "GR mode flag", error);
+        }
+    }
+
     static void install(final ClassLoader classLoader) {
         Symbols symbols = Symbols.get();
+        // No publishMode() here: see applicationReady(). The file is (re)written on the first preview
+        // LUT build, which is the earliest point after the application exists and always precedes a
+        // capture, so a stale "1" cannot outlive the first camera session.
         Log.guard(TAG, "GR preview LUT", () -> hookPreviewLut(symbols, classLoader));
         Log.guard(TAG, "GR capture stage", () -> hookCaptureStage(symbols, classLoader));
         Log.guard(TAG, "GR SDK request", () -> hookSdkRequest(symbols, classLoader));
@@ -87,6 +156,9 @@ final class GrEffectTransport {
         final ThreadLocal<Boolean> replaying = new ThreadLocal<>();
         XposedBridge.hookMethod(symbols.method("Lut3d.load"), new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                // Every preview LUT build is a free occasion to re-check the mode: entering or
+                // leaving GR always rebuilds one, and the native half must not be a mode behind.
+                publishMode();
                 String mode = String.valueOf(param.args[2]);
                 int id = param.args[0] instanceof Integer ? (Integer) param.args[0] : -1;
                 int arg = param.args[1] instanceof Integer ? (Integer) param.args[1] : -1;
@@ -264,6 +336,9 @@ final class GrEffectTransport {
         XposedBridge.hookMethod(symbols.method("GrMode.captureStage"), new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam param) {
                 GrState.currentMode = param.thisObject;
+                // A capture is the last moment this can be settled: the frame is graded a few
+                // milliseconds later, on another thread.
+                publishMode();
                 if (!GrState.isGrMode()) return;
                 try {
                     byte[] effect = loadEffectBytes(symbols);

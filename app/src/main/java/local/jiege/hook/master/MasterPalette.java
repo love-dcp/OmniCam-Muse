@@ -327,8 +327,12 @@ public final class MasterPalette {
             // back, and master - which does have a presenter and already passes the gate - is never
             // touched because the flag only follows the presenter-free path.
             try {
-                XposedHelpers.findAndHookMethod(
-                    "com.oplus.camera.common.utils.Lut3dDataManager", loader, "f", String.class,
+                // The palette whitelist method moves between classes across builds (123:
+                // Lut3dDataManager.f, 317: ka.l0.h0); the Lut3dData.paletteMode fingerprint
+                // resolves the Method wherever it lives, so hook the resolved Method rather
+                // than a hardcoded owner class.
+                XposedBridge.hookMethod(
+                    local.jiege.hook.common.Symbols.get().method("Lut3dData.paletteMode"),
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam param) {
                             if (directPaletteOpen) param.setResult(Boolean.TRUE);
@@ -340,8 +344,11 @@ public final class MasterPalette {
             // Calibration: record the pair the camera itself passes to the tone-environment
             // initialiser, so the fallback above can be checked against it.
             try {
+                // The tone-environment initialiser is e(I,I,String) on 123 and f() on 317;
+                // the Lut3d.load symbol carries the per-build member name.
                 XposedHelpers.findAndHookMethod(
-                    "com.oplus.camera.common.utils.Lut3dDataManager", loader, "e",
+                    "com.oplus.camera.common.utils.Lut3dDataManager", loader,
+                    local.jiege.hook.common.Symbols.get().name("Lut3d.load"),
                     int.class, int.class, String.class, new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam param) {
                             Log.i(TAG, "camera tone env init " + param.args[0] + ","
@@ -366,6 +373,9 @@ public final class MasterPalette {
                 };
                 XposedBridge.hookAllMethods(lutClass, "initializeBasicToneEnv", rearm);
                 XposedBridge.hookAllMethods(lutClass, "initialize", rearm);
+                /* The R8-renamed initialiser (e on 123, f on 317) - the Lut3d.load symbol. */
+                XposedBridge.hookAllMethods(lutClass,
+                    local.jiege.hook.common.Symbols.get().name("Lut3d.load"), rearm);
             } catch (Throwable error) {
                 Log.i(TAG, "tone re-arm hook skipped " + error);
             }
@@ -465,18 +475,30 @@ public final class MasterPalette {
             // clip that carries no change, so the camera keeps its own choice until there is
             // something to write into the file.
             try {
-                Object appCodec = XposedHelpers.getStaticObjectField(cls("om.e0$g"), "b");
-                if (appCodec == null || !"is_use_media_codec".contentEquals(
-                        String.valueOf(field(appCodec, "a")))) {
-                    throw new IllegalStateException("recorder key mismatch");
+                // The recorder key/config classes are R8-renamed per build (123: om.e0$g/om.c0,
+                // 317: pm.b0$i/pm.y); LogLutDirect resolves them from the @ModeRecorder
+                // structure and binds the is_use_media_codec key by fingerprint, so both
+                // features share one resolution instead of hardcoding short names.
+                Object appCodec = local.jiege.hook.video.LogLutDirect.recorderKey(
+                        "is_use_media_codec");
+                Class<?> config = local.jiege.hook.video.LogLutDirect.recorderConfigClass();
+                String reader = local.jiege.hook.video.LogLutDirect.recorderReaderName();
+                if (appCodec == null || config == null || reader == null) {
+                    throw new IllegalStateException("recorder structure unavailable");
                 }
                 appCodecKey = appCodec;
-                XposedBridge.hookAllMethods(cls("om.c0"), "a", new XC_MethodHook() {
+                XposedBridge.hookAllMethods(config, reader, new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam param) {
                         if (param.args.length != 1 || param.args[0] != appCodecKey) return;
                         if (!wantPreviewLut()) return;
                         if (Boolean.TRUE.equals(param.getResult())) return;
-                        param.setResult(Boolean.TRUE);
+                        // 317 reads this slot back with a hard (Boolean) cast but the sibling
+                        // selector keys are Integer; LogLutDirect keeps the stock runtime type so
+                        // pm.b0.M's casts never see a mismatch.
+                        Object replacement = local.jiege.hook.video.LogLutDirect
+                                .coerceConfigValue(param.getResult(), true);
+                        if (replacement == null) return;
+                        param.setResult(replacement);
                         Log.i(TAG, "recording asked for the app encoder pipeline");
                     }
                 });
@@ -656,6 +678,7 @@ public final class MasterPalette {
             case "rp.k0": return symbols.cls("MenuRightButtonHost").getName();
             case "em.p0": return symbols.cls("MasterCapMode").getName();
             case "ap.d": return symbols.cls("InnerShadowEffectFactory").getName();
+            case "nn.l": return symbols.cls("PreviewRenderer").getName();
             case "yg.a": return "ah.a";
             default: return name;
         }
@@ -1044,10 +1067,13 @@ public final class MasterPalette {
         // small values rather than guessing once.
         String mode = currentMode();
         if (mode.isEmpty()) mode = MODE_RETRO;
+        // 317 renames e(I,I,String) to f(I,I,String) and flips its return type; Lut3d.load carries
+        // the per-build name (123 "e", 317 "f").
+        String loadName = local.jiege.hook.common.Symbols.get().name("Lut3d.load");
         for (int variant : new int[] {2, 1, 0}) {
             try {
                 XposedHelpers.callMethod(manager, "l", false);
-                Object result = XposedHelpers.callMethod(manager, "e", variant, 1, mode);
+                Object result = XposedHelpers.callMethod(manager, loadName, variant, 1, mode);
                 Log.i(TAG, "tone env init variant=" + variant + " mode=" + mode
                     + " result=" + result + " " + lutState());
                 if (toneEnvUp(manager)) return;

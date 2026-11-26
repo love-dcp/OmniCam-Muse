@@ -212,6 +212,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             if (!Skip.off("xpan") && !Skip.off("xpanwm")) {
                 XpanWatermarkIsolation.installCamera(classLoader);
             }
+            // 缺陷守卫，不受设置与 xpanwm 跳过影响：XPAN 的水印款式在本机只有 LUMO（4:3 画布），
+            // 一开就切到 2212x912 支路、封面全白。进 XPAN 时强制关掉水印槽位。
+            Log.guard("XpanWatermark", "force closed",
+                () -> XpanWatermarkIsolation.installForceClosed(classLoader));
             if (!Skip.off("xpan") && !Skip.off("xpanfeature")) {
                 XpanLiveFeature.installCamera(classLoader);
             }
@@ -220,6 +224,10 @@ public final class ModuleEntry implements IXposedHookLoadPackage, IXposedHookZyg
             }
             if (!Skip.off("xpan") && !Skip.off("xpanclean")) {
                 XpanViewfinderClean.installCamera(classLoader);
+            }
+            // XPAN 的原生水印是 HAL 底部加高条（CameraRequestTag.n1），与照片水印槽位无关。
+            if (!Skip.off("xpan") && !Skip.off("xpanhs")) {
+                local.jiege.hook.xpan.XpanHsWatermark.installCamera(classLoader);
             }
             if (!Skip.off("watermark")) VideoWatermarkGuard.installCamera(classLoader);
             if (!Skip.off("softlight")) SoftLight.installCamera(classLoader);

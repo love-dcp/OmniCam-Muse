@@ -221,19 +221,60 @@ final class GrMasterLiveLutRestore {
     }
 
     /**
-     * r420: clear the GR-era {@code LutParameters.g} residue off a master live render. Stock
-     * master keeps this flag false (no BasicTone sampler on the recorded frames); GR needs it
-     * true and leaves it behind on the shared pipeline. XPAN live renders also set it on purpose,
-     * which is why the gate is the camera's current mode -- only master-mode draws are touched.
+     * Stock master-live value of {@code LutParameters.g}, learned from the first master render
+     * seen before GR or XPAN was ever entered in this camera process (nothing can have left a
+     * residue behind at that point). 123 answers false; 317 answers true -- stock master live
+     * there keeps the BasicTone sampler on, so forcing the flag off is what turned its live clip
+     * grey once the r522 scope fix had removed the log LUT from Master.
+     */
+    private static volatile Boolean stockMasterGate;
+    /** True once XPAN has been entered in this process (its live renders set g on purpose). */
+    private static volatile boolean xpanEntered;
+
+    static void trackGateSources(Symbols symbols) {
+        try {
+            XposedBridge.hookMethod(symbols.method("ModeSwitch.switch"), new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    for (Object arg : param.args) {
+                        if ("xpan".equals(String.valueOf(arg))) {
+                            xpanEntered = true;
+                            break;
+                        }
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            Log.e(TAG, "basic tone gate source tracking unavailable", error);
+        }
+    }
+
+    /**
+     * r420: take the GR-era {@code LutParameters.g} residue off a master live render. GR (and the
+     * XPAN live renders) need the flag true and leave it behind on the shared pipeline; stock
+     * master has its own value for it. "Residue" therefore means "differs from what stock master
+     * had", not "is true": restore the learned stock value instead of blindly writing false, and
+     * touch nothing while neither source mode has been visited. When the stock value was never
+     * observed, fall back to the r420 rule (clear it).
      */
     private static void clearStaleBasicToneGate(Object params, String where) {
         if (params == null) return;
         if (GrState.isGrMode() || !GrPreviewStreamRestore.inMasterMode()) return;
         try {
-            if (!XposedHelpers.getBooleanField(params, "g")) return;
-            XposedHelpers.setBooleanField(params, "g", false);
-            reportOnce("post-GR basic tone gate cleared (" + where + ")"
-                + ": lutParams.g true -> false (stock master live keeps BasicTone off)"
+            boolean current = XposedHelpers.getBooleanField(params, "g");
+            Boolean stock = stockMasterGate;
+            if (!GrPreviewStreamRestore.hasLeftGr() && !xpanEntered) {
+                // Clean state by construction: remember it, never modify it.
+                if (stock == null) stockMasterGate = Boolean.valueOf(current);
+                return;
+            }
+            if (stock != null && stock.booleanValue() == current) return;
+            boolean target = stock == null ? false : stock.booleanValue();
+            XposedHelpers.setBooleanField(params, "g", target);
+            reportOnce("post-GR basic tone gate restored (" + where + ")"
+                + ": lutParams.g " + current + " -> " + target
+                + " (stock master live value " + (stock == null ? "unknown, r420 rule" : stock)
+                + ", leftGr=" + GrPreviewStreamRestore.hasLeftGr()
+                + ", xpanEntered=" + xpanEntered + ")"
                 + ", f=" + flag(params, "f"));
         } catch (Throwable error) {
             reportOnce("gate clear unreadable (" + where + "): " + error);
@@ -269,6 +310,8 @@ final class GrMasterLiveLutRestore {
         final Class<?> imageData = XposedHelpers.findClass(IMAGE_DATA, classLoader);
         final Class<?> liveRenderer = Symbols.get().cls("WarpRenderer");
         final Class<?> managerHolder = XposedHelpers.findClass(LUT_MANAGER_HOLDER, classLoader);
+
+        trackGateSources(Symbols.get());
 
         // The rebuild that produces the picture's BasicTone table runs from e(); capturing it here
         // means one mode switch already yields the table, without waiting for a live capture.

@@ -720,6 +720,41 @@ SHA-256 2E2E99BED406D1773B5FE8E8C5C5240EBA7B4F26F80E198966948F2E622CD765
 APK 版本和 v3 签名已验证；ZIP 内 APK 的大小为 5,201,651 字节，SHA-256 与 APK 文件
 完全一致。`python tools/verify_port_artifacts.py` 六组检查全部通过。
 
+### 6.10 r534：专业视频 LUT 直出按停止后卡死（317，2026-11-25）
+
+现象：录 10 秒按停，界面立刻回到已停止外观（红色快门、缩略图更新），但编码器一直出帧，
+文件不落盘，再按快门无反应。全线程空闲，无 tombstone / ANR——不是死锁，是真正的停止
+从未被调用：`VideoRecorder.D`、`MediaCodec.stop/signalEndOfInputStream`、`MediaMuxer.stop`
+一次都没出现。
+
+根因（`pm.b0.M(IZ)Z` = `@ModeRecorder.stop`，123 上是 `om.e0.J`）：
+
+1. 停止请求内部新建一个一次性的 `pm.y$a` 配置 map（与录像器选择键同一个 `pm.b0$i` 键类），
+   写入 `b = Dk()&&Qk()&&tk()`、`d = yk()`、`c = Pk() ? 1 : 无`，然后回读 `d` 当作
+   `isNeedPostStopTask`。
+2. 闸门：`needPost` 为真 → 投递 `D0`（`gm.p1` case 5 → `pm.j0.D`）；为假且
+   `previewState == 3`（录像中就是这个状态，`C5()`）→ **跳过投递**。这是给延时摄影
+   （`qm.c` / `qm.l` 覆写 `yk()` 返回 false，由各自 `Ui()` 负责投递）留的分支。
+3. 模块为了选中 type 2，在 builder `b(key, value)` 上把三个选择键改写成
+   `media_codec=true / stream=false / fast=0`。这个钩子不区分「创建时的真实配置」和
+   「停止时的一次性 map」，于是停止时的 `d` 也被改成 false → 原厂以为现在是延时摄影 →
+   不投递停止 → 卡死。
+
+修法：`stopRequestInFlight` 在停止请求入口置真、返回置假；期间 builder / reader 两个钩子
+对三个选择键一律放行原值（日志 `recorder builder keeps stock stop value key=...`）。
+选择键的改写只在创建录像器时有意义，停止时那份 map 只用于闸门和日志，放行不影响 type 2。
+停止请求方法用 `@ModeRecorder.stop`（`in @ModeRecorder, params [int, boolean], ret boolean,
+strings ["stopRecord, end!"]`）解析，123/317 回放唯一命中，不写短名。
+
+实机（r534，4K60-Log + 自定义 LUT）：按停后 `isNeedPostStopTask: true` → `VideoRecorder.D`
+→ `signalEndOfInputStream` → 音视频 `MediaCodec.stop/release` → `MediaMuxer.stop/release`
+→ `setVideoRecordState 2 => 3`，全程约 0.35 s；连录两段都正常落盘并能再次开录。
+
+排查过程中被否掉的假设：弱引用被回收、`yk()` 被模块钩住、延迟 runner 被取消——三条都被
+运行时读数直接否决（`P.referent == Q`、`yk()` 原始值与钩后值都是 true、`D0` 在 `M` 入口和
+出口都是 null）。真正定位靠的是把原厂那条 `stopRecord, isNeedPostStopTask: ...` 日志的
+Supplier 自己求值打印出来。
+
 ## 7. 复现
 
 ```bash
